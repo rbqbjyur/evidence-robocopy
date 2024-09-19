@@ -1,0 +1,2 @@
+# Keep batch files byte-exact (CRLF): cmd misparses labels and goto with LF.
+*.bat -text
