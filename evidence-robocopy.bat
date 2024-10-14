@@ -3,7 +3,7 @@
 setlocal enabledelayedexpansion
 
 echo Script: evidence-robocopy
-echo Version: 1.0.1
+echo Version: 1.0.2
 echo Author: outis
 echo Remember to Disable AV Real Time Scanning if you have lots of small files!
 echo.
@@ -25,18 +25,15 @@ if %errorlevel% equ 0 (
 
 
 
-:: Decide between Log File or ETA /np /tee /log (no /eta)
+:: Decide between Log File (/np /tee (no /eta), /log added later) or ETA and Percentage; /eta (no /np /tee /log)
 : log_decision
 echo Would you prefer a log file, or ETA and Percentage:
 echo 1. Log File (but no ETA or percentage)
 echo 2. ETA and percentage (but no Log File)
 set /p log_choice="> "
 if "%log_choice%"=="1" (
-	:: Log File; /np /tee (no /eta)
-	:: /log added later
 	set robo_flags=!robo_flags! /np /tee
 ) else if "%log_choice%"=="2" (
-	:: ETA and Percentage; /eta (no /np /tee /log)
 	set robo_flags=!robo_flags! /eta
 ) else (
     echo Invalid Input %log_choice%
@@ -64,8 +61,8 @@ call :run_robocopy "!robo_flags! /j /min:104857600" "1" "large_files"
 
 :: Small files (<100 MiB); Thread count is half threads on system
 for /f "skip=1" %%I in ('wmic cpu get NumberOfLogicalProcessors') do if not defined threads set threads=%%I
-set /a half_threads=!num_threads! / 2
-call :run_robocopy "!robo_flags! /max:104857599" "!num_threads!" "small_files"
+set /a half_threads=!threads! / 2
+call :run_robocopy "!robo_flags! /max:104857599" "!threads!" "small_files"
 
 
 :: Large files with admin (/b, /mt:1, /j)
@@ -78,10 +75,10 @@ pause
 endlocal
 exit /b
 
+:: specify Log File if chosen
 :run_robocopy
 set end_robo_flags=
 if "%log_choice%"=="1" (
-	:: specify Log File
 	set end_robo_flags=%~1 /log:"!destination!\robocopy_!UTC!_%~3.log"
 ) else if "%log_choice%"=="2" (
 	set end_robo_flags=%~1
