@@ -1,11 +1,12 @@
 # evidence-robocopy
 
-A Windows batch wrapper around robocopy for copying evidence between drives
-as it moves around a lab: master to working copies, to servers, to archive.
-Built first for forensic disk images (E01/EWF, single or split), and equally
-usable for loose-file evidence such as eDiscovery collections. Each copy is
-verified by SHA-256 and leaves a log and hash records with the evidence, so
-the records of every copy travel with it and support its chain of custody.
+A Windows batch wrapper around robocopy for copying digital evidence between
+drives as it moves around a lab (master to working copies, to servers, to
+archive), with SHA-256 hash verification and chain-of-custody records. Built
+first for forensic images (E01/EWF, single or split), and also usable for
+loose-file evidence such as eDiscovery collections. A verified copy leaves its
+log and hash records with the evidence, so the records of each copy travel
+with it.
 
 It is a batch file on purpose: it uses only tools built into Windows and runs
 wherever robocopy does, including workstations where PowerShell or `.ps1`
@@ -27,16 +28,16 @@ scripts are restricted, so it can travel with the evidence too.
 - **Chain-of-custody records travel with the evidence.** Each run writes its
   log, hash CSVs and a seal (`.sha256`) into the destination, all named with
   the run's UTC start time. Later copies carry them along, so the set
-  accumulates a record of every copy, drive and host. The seal's SHA-256 is
-  shown at the end for your custody notes, making later changes to the
-  records detectable. See [Output](#output).
+  accumulates a record of each copy made with it, with the drives and hosts
+  involved. The seal's SHA-256 is shown at the end; recorded elsewhere, it
+  makes later changes to the records detectable. See [Output](#output).
 - **A result that says what it covers**, with an exit code:
 
   | Result     | Exit code | Meaning |
   |------------|-----------|---------|
   | PASS       | 0         | The copy completed, every file in the reference record is in the destination with the same SHA-256, and sizes and last-modified times match the source. |
   | FAIL       | 1         | The copy failed, a file in the reference record differs, is missing or unreadable, a file's size or last-modified time differs, or the run could not start. |
-  | UNVERIFIED | 2         | Copied without failures; verification not requested. |
+  | UNVERIFIED | 2         | Copied without failures; verification (SHA-256 and metadata) not requested. |
 
   Files added since the reference record are listed as warnings and don't
   fail the run.
@@ -75,29 +76,27 @@ scripts are restricted, so it can travel with the evidence too.
 
 Written to the destination root, named with the UTC start time:
 
-- `robocopy_YYYYMMDDTHHMMSSZ.log` (log mode only): a header in three
-  sections after the warnings (environment: script version, path and
-  SHA-256, host, user, Windows version, elevation, UTC start, local offset,
-  time source and last sync, options; source and destination: folder, volume label, serial and file
-  system, reference record), the robocopy output with exact byte sizes,
-  problems and the summary.
-  Robocopy's Started/Ended times are local; its per-file times are UTC. The
-  log is written to `%TEMP%` during the run and moved to the destination at
-  the end.
-  The log records the process; the hash CSVs are the authoritative
-  per-file record.
+- `robocopy_YYYYMMDDTHHMMSSZ.log` (log mode only): the warnings, then a
+  header in three sections (environment: script version, path and SHA-256,
+  host, user, Windows version, elevation, UTC start, local offset, time
+  source and last sync, options; source and destination: folder, volume
+  label, serial and file system, reference record), the robocopy output with
+  exact byte sizes, problems and the summary. Robocopy's Started/Ended times
+  are local; its per-file times are UTC. The log is written to `%TEMP%`
+  during the run and moved to the destination at the end. The log records
+  the process; the hash CSVs are the authoritative per-file record.
 - `robocopy_YYYYMMDDTHHMMSSZ_hashes_destination.csv` (when verifying), and
   on the first copy also `..._hashes_source.csv`, the reference record:
-  `"File","SHA-256"`, one row per file, sorted by relative path. A set ends up
-  with one source record and one destination record per copy. A file that could not be hashed has
-  `UNREADABLE` in place of a hash. Zero-byte files get the SHA-256 of empty
-  input, as `certutil` can't hash them.
-- `robocopy_YYYYMMDDTHHMMSSZ.sha256`: the SHA-256 of the log and CSVs of this
-  run. All of a run's files share its UTC start time in their names. The script shows the SHA-256 of this file at the end; recorded in your
-  chain-of-custody notes, it shows whether this run's records are later
-  changed.
+  `"File","SHA-256"`, one row per file, sorted by relative path. A set ends
+  up with one source record and one destination record per copy. A file
+  that could not be hashed has `UNREADABLE` in place of a hash; zero-byte
+  files get the SHA-256 of empty input (`certutil` can't hash them).
+- `robocopy_YYYYMMDDTHHMMSSZ.sha256`, the seal: the SHA-256 of this run's log
+  and CSVs. Its own SHA-256 is shown at the end of the run.
 
-Each later copy carries these files along and hashes them as contents.
+All of a run's files share its UTC start time in their names.
+
+Later copies carry these files along and hash them as contents.
 
 ## Example
 
@@ -110,7 +109,7 @@ Warnings (read before relying on this copy)
   [WARN] On battery this machine sleeps after 15 min idle: keep it plugged in for the whole copy.
 
 Environment
-  Script            : evidence-robocopy 1.2.1
+  Script            : evidence-robocopy 1.2.2
   Script path       : E:\Tools\evidence-robocopy.bat
   Script SHA-256    : 5b1e...c09a
   Started (UTC)     : 2026-10-13T10:15:03Z (source: robocopy)
@@ -211,8 +210,9 @@ A failed check is listed where it is found and again in the summary, e.g.
   untested.
 - For the UTC time it uses robocopy's clock plus the registry time-zone bias
   (`ActiveTimeBias`), falling back to `wmic` where present.
-- Administrator rights are optional; they enable backup mode, the file
-  system of system volumes and the time-service status.
+- Administrator rights are optional; they enable backup mode and, on some
+  systems, reading the file system of system volumes and the time-service
+  status.
 
 ## Usage
 
@@ -222,9 +222,8 @@ prompts. `evidence-robocopy.bat /?` shows a short help.
 ## What it does not do
 
 - Replace chain-of-custody documentation: it records copies, not who held
-  the media, why, seals or signatures. Case and exhibit details belong with
-  the evidence itself.
-- Verify an image against its acquisition hash. That needs an EWF verifier.
+  the media, why, seals or signatures.
+- Verify an image against its acquisition hash.
 - Protect its records from change: the seal only makes changes detectable,
   once its SHA-256 is recorded outside the evidence folder.
 - Verify alternate data streams, empty directories, attributes or creation
@@ -233,11 +232,13 @@ prompts. `evidence-robocopy.bat /?` shows a short help.
 - Hash files whose names contain characters outside the console code page,
   or whose paths exceed 260 characters, or that only backup mode can read.
   Robocopy copies them, but they are reported as unreadable (FAIL).
-- Recognise a mapped drive and its UNC path as the same place.
+- Recognise a mapped drive and its UNC path as the same place (in the
+  check that source and destination don't overlap).
 - Keep the destination folder's own timestamps: robocopy gives it the source
   folder's (`/dcopy:T`), and batch has no way to set them back.
-- Check continuity if a later copy takes only a subfolder: the earlier
-  records stay at the root of the original set.
+- Link a copy of a subfolder to its parent set: the parent's records stay
+  at the root of that set, so the subfolder copy starts its own reference
+  record.
 
 ## Licence
 

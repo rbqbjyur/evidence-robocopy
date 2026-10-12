@@ -28,7 +28,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 rem ============================== CONFIG =====================================
 
 set "SCRIPT_NAME=evidence-robocopy"
-set "SCRIPT_VERSION=1.2.1"
+set "SCRIPT_VERSION=1.2.2"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -69,11 +69,12 @@ set "PASS_small_FILTER=/max:%SMALL_FILE_MAX_BYTES%"
 set "PASS_small_THREADS=auto"
 set "PASS_small_FLAGS="
 
-rem Robocopy flags used by every copy pass, and by the file listing that
-rem drives verification (list only, full paths, no headers, sizes or classes).
-rem Files and subfolders keep their data, attributes and timestamps (DAT), so
-rem anything hidden in the evidence stays hidden. Owner and ACLs are not copied.
-rem /bytes logs exact sizes, not rounded ones. /e includes empty folders. /xj doesn't follow junctions: only what is
+rem Robocopy flags used by every copy pass (COPY_FLAGS), and by the file
+rem listing that drives verification (LIST_FLAGS: list only, full paths, no
+rem headers, sizes or classes). Files and subfolders keep their data,
+rem attributes and timestamps (DAT), so anything hidden in the evidence stays
+rem hidden; owner and ACLs are not copied. /bytes logs exact sizes. /e
+rem includes empty folders. /xj doesn't follow junctions: only what is
 rem physically inside the source is copied, and junction loops (e.g.
 rem "Application Data" in a user profile) can't recurse forever.
 set "COPY_FLAGS=/e /xj /v /x /ts /fp /bytes /dcopy:DAT /copy:DAT"
@@ -112,18 +113,19 @@ rem attributes are never carried across. Robocopy copies the source folder's
 rem attributes onto the destination folder; these are cleared again unless
 rem the destination folder already had them. With Read-only or System set,
 rem Explorer applies a copied desktop.ini, so the destination would show the
-rem source folder's name and icon (e.g. Downloads). Fields per row, ":"-separated:
-rem   position in a FOR %%~a attribute string : attrib letter : name
+rem source folder's name and icon (e.g. Downloads). Fields per row, separated
+rem by ":": position in a FOR %%~a attribute string, attrib letter, name.
 set "CONTAINER_ATTRS=1:r:Read-only 3:h:Hidden 4:s:System"
 
 rem SHA-256 of zero bytes. certutil -hashfile fails on empty files, so a file
 rem that certutil can't hash but whose size is 0 gets this value.
 set "EMPTY_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
-rem Ordered fallbacks: each name is a helper (:utc_from_<name>, :admin_check_<name>)
-rem tried in turn until one succeeds. Pure batch and built-in tools only. The
-rem robocopy clock works on every Windows version with robocopy (Vista and
-rem later); wmic is deprecated and absent by default from Windows 11 24H2.
+rem Ordered fallbacks: each name is a helper (:utc_from_<name> or
+rem :admin_check_<name>), tried in turn until one succeeds. Pure batch and
+rem built-in tools only. The robocopy clock works on every Windows version
+rem with robocopy (Vista and later); wmic is deprecated and absent by default
+rem from Windows 11 24H2.
 set "UTC_METHODS=robocopy wmic"
 set "ADMIN_CHECKS=fsutil net"
 
@@ -235,7 +237,8 @@ set "abort_reason=robocopy.exe was not found."
 exit /b 1
 
 :detect_admin
-rem Elevated if any check in ADMIN_CHECKS succeeds; unknown counts as not elevated.
+rem Elevated if any check in ADMIN_CHECKS succeeds; unknown counts as not
+rem elevated.
 set "is_admin="
 set "admin_method=none"
 for %%M in (%ADMIN_CHECKS%) do if not defined is_admin call :admin_check_%%M && (
@@ -368,8 +371,18 @@ set "log_name=robocopy_%run_ts%.log"
 set "log_file=%destination_cmp%%log_name%"
 set "csv_source=%destination_cmp%robocopy_%run_ts%_hashes_source.csv"
 set "csv_destination=%destination_cmp%robocopy_%run_ts%_hashes_destination.csv"
-if not defined TEMP set "TEMP=%destination%"
-set "temp_prefix=%TEMP%\%SCRIPT_NAME%_%run_ts%_%RANDOM%"
+rem Working folder for temporary files and the log during the run, in order:
+rem TEMP, TMP, LOCALAPPDATA\Temp. Never the destination: files there would be
+rem hashed as evidence.
+set "work_dir="
+if defined TEMP if exist "%TEMP%\" set "work_dir=%TEMP%"
+if not defined work_dir if defined TMP if exist "%TMP%\" set "work_dir=%TMP%"
+if not defined work_dir if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\Temp\" set "work_dir=%LOCALAPPDATA%\Temp"
+if not defined work_dir (
+    set "abort_reason=No temporary folder found (TEMP, TMP or LOCALAPPDATA\Temp)."
+    exit /b 1
+)
+set "temp_prefix=%work_dir%\%SCRIPT_NAME%_%run_ts%_%RANDOM%"
 set "tmp_list=%temp_prefix%_list.tmp"
 set "tmp_rows_source=%temp_prefix%_source.tmp"
 set "tmp_rows_destination=%temp_prefix%_destination.tmp"
@@ -396,7 +409,7 @@ if not "%use_log%"=="1" (
     exit /b 0
 )
 (type nul >>"%log_work%") 2>nul || (
-    set "abort_reason=Could not create the working log in the TEMP folder."
+    set "abort_reason=Could not create the working log in the temporary folder."
     exit /b 1
 )
 set "log_ready=1"
@@ -615,11 +628,23 @@ set "ht_failed="
 call :list_files %~1 tmp_list || set "ht_failed=1"
 set "n_listed=?"
 for /f %%N in ('find /c /v "" ^<"%tmp_list%" 2^>nul') do set "n_listed=%%N"
+rem The listing includes this run's own outputs already in the destination
+rem (the source CSV on a first copy); they are skipped, so leave them out of
+rem the total shown in the progress counter.
+if "%~2"=="destination" for %%O in (log_file csv_source csv_destination seal_file) do call :discount_output %%O
 for /f "usebackq tokens=*" %%L in ("%tmp_list%") do (
     set "entry=%%L"
     call :hash_listed_entry %~1 %~2
 )
 if defined ht_failed exit /b 1
+exit /b 0
+
+:discount_output  pathVar
+rem Lower n_listed by one if this run's output file exists (see :hash_tree).
+setlocal EnableDelayedExpansion
+if "!n_listed!"=="?" (endlocal & exit /b 0)
+if not exist "!%~1!" (endlocal & exit /b 0)
+endlocal & set /a "n_listed-=1"
 exit /b 0
 
 :finish
@@ -631,6 +656,8 @@ set /a "copy_failed=copy_rc & RC_FAIL_MASK"
 if %copy_failed% neq 0 (set "copy_status=FAILED") else set "copy_status=OK"
 set "v_copy=%copy_status% (robocopy exit codes combined: %copy_rc%)"
 set "verify_status=NOT RUN"
+set "hash_status=NOT RUN"
+set "meta_status=NOT RUN"
 set "v_verify=NOT RUN: verification was not requested"
 set "v_verify_detail="
 set "v_ref_used=none"
@@ -641,10 +668,11 @@ if "%verify_status%"=="FAIL" set "verdict=FAIL"
 if "%copy_status%"=="FAILED" set "verdict=FAIL"
 if "%verify_status%"=="NOT RUN" if "%verdict%"=="PASS" set "verdict=UNVERIFIED"
 if "%verdict%"=="PASS" set "v_result=PASS - the copy completed, every file in the reference record is in the destination with the same SHA-256, and size and last-modified time match the source"
-if "%verdict%"=="UNVERIFIED" set "v_result=UNVERIFIED - the copy completed without errors, but was not verified by SHA-256"
+if "%verdict%"=="UNVERIFIED" set "v_result=UNVERIFIED - the copy completed without errors, but was not verified (no SHA-256 or metadata check)"
 if "%verdict%"=="FAIL" set "v_result=FAIL - "
 if "%verdict%"=="FAIL" if "%copy_status%"=="FAILED" set "v_result=%v_result%the copy failed; "
-if "%verdict%"=="FAIL" if "%verify_status%"=="FAIL" set "v_result=%v_result%the SHA-256 verification failed; "
+if "%verdict%"=="FAIL" if not "%hash_status%"=="PASS" if not "%hash_status%"=="NOT RUN" set "v_result=%v_result%the SHA-256 verification failed; "
+if "%verdict%"=="FAIL" if "%verify_status%"=="FAIL" if not "%meta_status%"=="PASS" set "v_result=%v_result%the metadata check failed; "
 if "%verdict%"=="FAIL" set "v_result=%v_result%see the problems listed"
 if "%verdict%"=="PASS" set "exit_code=%EXIT_CODE_PASS%"
 if "%verdict%"=="FAIL" set "exit_code=%EXIT_CODE_FAIL%"
@@ -961,9 +989,9 @@ set "prev_hash="
 set "prev_tag="
 for /f "usebackq eol=* delims=" %%L in ("%tmp_merge_sorted%") do (
     set "ln=%%L"
-    call :continuity_line
+    call :compare_line
 )
-call :continuity_flush
+call :compare_flush
 exit /b 0
 
 :add_reference_row
@@ -987,7 +1015,7 @@ if "!x:**=!"=="!x!" (
 >>"!tmp_merge!" echo(!x!*R
 endlocal & set /a "c_rows+=1" & exit /b 0
 
-:continuity_line
+:compare_line
 rem Process one sorted merge line (in "ln"): pair it with the previous line
 rem if both are the same path, otherwise settle the previous line alone.
 setlocal EnableDelayedExpansion
@@ -1025,20 +1053,20 @@ if defined prev_rel if "!prev_rel!"=="!rel!" (
     set "new_rel="
     set "new_hash="
     set "new_tag="
-) else if defined prev_rel call :continuity_single prev_rel prev_tag
+) else if defined prev_rel call :compare_single prev_rel prev_tag
 endlocal & set "prev_rel=%new_rel%" & set "prev_hash=%new_hash%" & set "prev_tag=%new_tag%" & set /a "c_ok+=%d_ok%, c_changed+=%d_changed%, c_missing+=%d_missing%, c_invalid+=%d_invalid%, c_unreadable+=%d_unreadable%, c_records+=%d_records%, c_added+=%d_added%"
 exit /b 0
 
-:continuity_flush
+:compare_flush
 rem Settle the last unpaired merge line, if any.
 if not defined prev_rel exit /b 0
 setlocal EnableDelayedExpansion
 for %%V in (d_missing d_records d_added) do set "%%V=0"
-call :continuity_single prev_rel prev_tag
+call :compare_single prev_rel prev_tag
 endlocal & set /a "c_missing+=%d_missing%, c_records+=%d_records%, c_added+=%d_added%"
 exit /b 0
 
-:continuity_single  relVar  tagVar
+:compare_single  relVar  tagVar
 rem A path found on one side only. In the reference record but not in the
 rem destination: missing (FAIL). In the destination but not in the record:
 rem added since; a custody record of an earlier run (robocopy_* in the root)
@@ -1062,21 +1090,29 @@ set "d_added=1"
 exit /b 0
 
 :verification_status
-rem Set verify_status (PASS or FAIL), v_verify, v_verify_detail and v_ref_used.
+rem Set hash_status and meta_status (each PASS, FAIL or NOT RUN), verify_status
+rem (PASS only if both pass), and the summary lines for each.
 set "v_ref_used=%reference_name%"
 if not defined v_ref_used set "v_ref_used=none"
-set /a "c_bad=c_changed + c_missing + c_invalid + c_unreadable + n_anomalies + verify_incomplete + m_differ + m_incomplete"
-set "verify_status=PASS"
-if %c_bad% neq 0 set "verify_status=FAIL"
-if %c_ok% equ 0 set "verify_status=FAIL"
-set "v_verify=%verify_status%: %c_ok% of %c_rows% files in the reference record match the destination"
+set /a "hash_bad=c_changed + c_missing + c_invalid + c_unreadable + n_anomalies + verify_incomplete"
+set "hash_status=PASS"
+if %hash_bad% neq 0 set "hash_status=FAIL"
+if %c_ok% equ 0 set "hash_status=FAIL"
+set "v_verify=%hash_status%: %c_ok% of %c_rows% files in the reference record match the destination"
 set "v_verify_detail=%c_changed% differ, %c_missing% missing, %c_unreadable% unreadable, %c_invalid% invalid in the record; added since: %c_records% custody record(s), %c_added% other file(s)"
 if %verify_incomplete% neq 0 set "v_verify_detail=%v_verify_detail%; INCOMPLETE (see problems)"
 if %n_anomalies% neq 0 set "v_verify_detail=%v_verify_detail%; %n_anomalies% unexpected listing line(s)"
+set "meta_status=NOT RUN"
 set "v_meta=NOT RUN"
+if defined meta_ran set "meta_status=PASS"
 if defined meta_ran set "v_meta=PASS: size and last-modified time match for every file (compared %meta_mode%)"
+if %m_differ% neq 0 set "meta_status=FAIL"
 if %m_differ% neq 0 set "v_meta=FAIL: %m_differ% file(s) differ in size or last-modified time, or were not copied"
+if %m_incomplete% neq 0 set "meta_status=FAIL"
 if %m_incomplete% neq 0 set "v_meta=FAIL: the comparison was incomplete"
+set "verify_status=PASS"
+if not "%hash_status%"=="PASS" set "verify_status=FAIL"
+if not "%meta_status%"=="PASS" set "verify_status=FAIL"
 exit /b 0
 
 :is_sha256  hashVar
@@ -1508,7 +1544,8 @@ setlocal EnableDelayedExpansion
 endlocal & exit /b 0
 
 :show_problems
-rem List remembered problems on the console (in log mode they are also in the log).
+rem List remembered problems on the console (in log mode they are also in
+rem the log).
 setlocal EnableDelayedExpansion
 if not exist "!tmp_problems!" (endlocal & exit /b 0)
 echo.
