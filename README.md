@@ -12,49 +12,20 @@ scripts are restricted, so it can travel with the evidence too.
 
 ## What it does
 
-- Prompts for: log file or on-screen ETA, source, destination, and whether to
-  verify. ETA mode (no log) and declining verification are meant for
-  non-evidence copies, and each has to be confirmed.
-  Paths can be typed, pasted with quotes, or dragged into the window.
-- Refuses relative paths, and a source and destination that are the same or
-  inside each other. If the destination already holds files, it says so
-  (robocopy overwrites same-named files that differ) and asks first.
-- Copies the contents of the source folder into the destination folder,
-  keeping data, attributes and timestamps of files and subfolders
-  (`/copy:DAT /dcopy:DAT`), so anything hidden stays hidden. Empty folders
-  are included (`/e`); junctions are not followed (`/xj`).
-- Owner and permissions are deliberately not copied: copies inherit the
-  destination's permissions, since the source's users and groups usually
-  don't exist on the target system.
-- Copies in two passes: files of 100 MiB or more unbuffered (`/j`) and
-  single-threaded, smaller files with half the logical processors (1–128).
-  A failed file is retried once after 2 s, so real failures surface quickly.
-  When run elevated it uses backup mode (`/b`).
-- Treats the source and destination folders as containers of the evidence,
-  not as evidence themselves:
-  - skips `$RECYCLE.BIN` and `System Volume Information` only where the
-    source or destination is a drive root (`E:\`); anywhere else, including
-    any UNC path, they are copied as contents;
-  - clears any Read-only, Hidden or System attribute that robocopy carries
-    from the source folder onto the destination folder, unless the
-    destination already had it.
-- Before copying, lists everything to be wary of in one **Warnings**
-  section at the top of the header (repeated in the summary): the power plan
-  may sleep or hibernate the machine, or the lid would; the clock isn't
-  synchronised with a time source; the destination is FAT32 or FAT, or
-  wasn't empty; no UTC time source worked.
-- Verification (optional), against a reference record of the evidence:
-  - **First copy** (no hash record in the source): the source is hashed and
-    recorded; that record becomes the reference for this and every later copy.
-  - **Later copies:** the reference is the oldest source hash record carried
-    in the source; the source is not hashed again.
-  - Every destination file is listed with robocopy (including Hidden and
-    System files), hashed with `certutil`, and compared by relative path with
-    the reference. So each copy is checked back to the original record, not
-    only to its immediate source. Files that differ, are missing or are
-    unreadable fail the run; files added since are listed, and earlier
-    custody records are expected.
-- Ends with a result:
+- **SHA-256 verification against a reference record.** On the first copy
+  of an evidence set (no hash record in the source yet), the source is
+  hashed and recorded. That record is the reference for this and every
+  later copy: each copy hashes its destination with `certutil` and compares
+  every file by relative path, so it is checked back to the original record,
+  not only to its immediate source. Later copies don't hash the source again.
+  Files that differ, are missing or are unreadable fail the run.
+- **Chain-of-custody records travel with the evidence.** Each run writes its
+  log, hash CSVs and a seal (`.sha256`) into the destination, all named with
+  the run's UTC start time. Later copies carry them along, so the set
+  accumulates a record of every copy, drive and host. The seal's SHA-256 is
+  shown at the end for your custody notes, making later changes to the
+  records detectable. See [Output](#output).
+- **A result that says what it covers**, with an exit code:
 
   | Result     | Exit code | Meaning |
   |------------|-----------|---------|
@@ -62,8 +33,38 @@ scripts are restricted, so it can travel with the evidence too.
   | FAIL       | 1         | The copy failed, or a file in the reference record differs, is missing or unreadable, or the run could not start. |
   | UNVERIFIED | 2         | Copied without failures; verification not requested. |
 
-  Files added since the reference record are warnings and don't fail the
-  run. The summary states what the result covers.
+  Files added since the reference record are listed as warnings and don't
+  fail the run.
+- **Warnings up front.** Before copying, everything to be wary of is listed
+  in one **Warnings** section at the top of the log header (and repeated in
+  the summary): the machine may sleep or hibernate (power plan or lid), the
+  clock isn't synchronised with a time source, the destination is FAT32/FAT
+  or wasn't empty, no UTC time source worked.
+- **What is preserved.** Data, attributes and timestamps of files and
+  subfolders (`/copy:DAT /dcopy:DAT`), so anything hidden stays hidden;
+  empty folders (`/e`). Junctions are not followed (`/xj`). Exact byte sizes
+  in the log (`/bytes`). When run elevated, backup mode (`/b`) reads files
+  regardless of their permissions.
+- **Owner and permissions are deliberately not copied:** copies inherit the
+  destination's permissions, since the source's users and groups usually
+  don't exist on the target system.
+- **Source and destination folders are containers, not evidence:**
+  - `$RECYCLE.BIN` and `System Volume Information` are skipped only where
+    the source or destination is a drive root (`E:\`); anywhere else,
+    including any UNC path, they are copied as contents;
+  - any Read-only, Hidden or System attribute robocopy carries from the
+    source folder onto the destination folder is cleared, unless the
+    destination already had it.
+- **Copying:** two passes, files of 100 MiB or more unbuffered (`/j`) and
+  single-threaded, smaller files with half the logical processors (1–128).
+  A failed file is retried once after 2 s, so real failures surface quickly.
+- **Prompts:** log file or on-screen ETA, source, destination, and whether
+  to verify. ETA mode (no log) and declining verification are for
+  non-evidence copies, and each has to be confirmed. Paths can be typed,
+  pasted with quotes, or dragged in; relative paths, and a source and
+  destination that are the same or inside each other, are refused. A
+  destination that already holds files has to be confirmed (robocopy
+  overwrites same-named files that differ).
 
 ## Output
 
