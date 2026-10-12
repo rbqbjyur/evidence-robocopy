@@ -11,6 +11,27 @@ recorded release dates. Before the archived scripts were imported, only three
 things were changed: the script name and author lines, an added SPDX licence
 line, and the version string of 0.9.0. The code is unchanged.
 
+## 1.1.0 - 2026-10-12
+
+### Fixed
+- Verification compares every file by relative path, including Hidden and
+  System files and awkward names (`!` `%` `&`, spaces). Unhashable files are
+  reported as UNREADABLE, never as a match; zero-byte files hash correctly.
+- Robocopy's exit code is checked. Each run ends with PASS / FAIL /
+  UNVERIFIED and exit code 0 / 1 / 2.
+- Output names use UTC (`robocopy_YYYYMMDDTHHMMSSZ.*`) without needing wmic.
+  The small-file pass uses half the logical processors, as intended.
+
+### Changed
+- Attributes are copied (`/copy:DAT /dcopy:DAT`, `/A-:SH` removed), empty
+  folders too (`/e`); junctions are not followed (`/xj`); failed files are
+  retried. Only the destination folder's own carried-over attributes are
+  cleared.
+- Log header records script hash, host, user, volumes, power settings and
+  options. The log is kept in `%TEMP%` until the end of the run.
+- Paths are normalised and checked for overlap. A non-empty destination
+  must be confirmed. Warnings for sleep settings and FAT destinations.
+
 ## 1.0.3 - 2025-06-05
 
 ### Added
