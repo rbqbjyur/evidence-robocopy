@@ -11,6 +11,27 @@ recorded release dates. Before the archived scripts were imported, only three
 things were changed: the script name and author lines, an added SPDX licence
 line, and the version string of 0.9.0. The code is unchanged.
 
+## 1.2.0 - 2026-10-12
+
+### Added
+- Reference record: the source's oldest source hash record, or on a first
+  copy a new one made from the source. Every copy is checked against it.
+- Seal: `robocopy_<UTC>.sha256` holds the SHA-256 of the run's log and CSVs;
+  its own SHA-256 is shown for chain-of-custody notes.
+- Log header in sections (warnings, environment, source, destination), with
+  the Windows name and release, and the time source and last sync. All
+  pre-copy warnings (sleep, lid, clock, file system, non-empty destination)
+  are listed together at the top and repeated in the summary.
+
+### Changed
+- Verification hashes the destination against the reference record; the
+  source is hashed only on the first copy. The summary states what the
+  result covers.
+- Exact byte sizes in the log (`/bytes`). A failed file is retried once
+  after 2 s (was twice, 5 s apart).
+- ETA mode (no log) and declining verification must each be confirmed,
+  and are marked as not for evidence.
+
 ## 1.1.1 - 2026-10-12
 
 ### Fixed

@@ -27,11 +27,14 @@ setlocal EnableExtensions DisableDelayedExpansion
 rem ============================== CONFIG =====================================
 
 set "SCRIPT_NAME=evidence-robocopy"
-set "SCRIPT_VERSION=1.1.1"
+set "SCRIPT_VERSION=1.2.0"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
-set "RETRY_COUNT=2"
-set "RETRY_WAIT_SECONDS=5"
+rem Fail fast on purpose: one short retry covers transient faults (network
+rem blip, AV holding a file), while a real problem fails within seconds per
+rem file instead of retrying for hours and looking like progress.
+set "RETRY_COUNT=1"
+set "RETRY_WAIT_SECONDS=2"
 
 rem Files of at least this many bytes go to the large-file pass.
 set "LARGE_FILE_BYTES=104857600"
@@ -69,10 +72,10 @@ rem Robocopy flags used by every copy pass, and by the file listing that
 rem drives verification (list only, full paths, no headers, sizes or classes).
 rem Files and subfolders keep their data, attributes and timestamps (DAT), so
 rem anything hidden in the evidence stays hidden. Owner and ACLs are not copied.
-rem /e includes empty folders. /xj doesn't follow junctions: only what is
+rem /bytes logs exact sizes, not rounded ones. /e includes empty folders. /xj doesn't follow junctions: only what is
 rem physically inside the source is copied, and junction loops (e.g.
 rem "Application Data" in a user profile) can't recurse forever.
-set "COPY_FLAGS=/e /xj /v /x /ts /fp /dcopy:DAT /copy:DAT"
+set "COPY_FLAGS=/e /xj /v /x /ts /fp /bytes /dcopy:DAT /copy:DAT"
 set "LIST_FLAGS=/l /e /xj /njh /njs /ndl /nc /ns /fp /r:0 /w:0"
 
 rem Robocopy exit code bits, checked highest first. Fields per bit <n>:
@@ -149,17 +152,18 @@ call :init_state
 call :show_banner
 call :check_robocopy || goto :abort
 call :detect_admin
-call :check_power
 call :ask_progress_mode || goto :abort
 call :ask_paths || goto :abort
 call :ask_verify || goto :abort
 call :init_run || goto :abort
+call :check_environment
 call :write_header
 for %%P in (%COPY_PASSES%) do call :run_copy_pass %%P
 call :restore_destination_attributes
 if "%verify%"=="1" call :verify_copy
 call :finish
 call :publish_log
+call :write_seal
 call :cleanup_temp
 pause
 exit /b %exit_code%
@@ -180,17 +184,23 @@ echo.
 echo The script asks for: log file or ETA, source, destination, verification.
 echo Output in the destination root (timestamps are UTC):
 echo   robocopy_YYYYMMDDTHHMMSSZ.log                     (log mode only)
-echo   robocopy_YYYYMMDDTHHMMSSZ_hashes_source.csv
+echo   robocopy_YYYYMMDDTHHMMSSZ_hashes_source.csv       (first copy only)
 echo   robocopy_YYYYMMDDTHHMMSSZ_hashes_destination.csv
+echo   robocopy_YYYYMMDDTHHMMSSZ.sha256                  (seal: hashes of the above)
+echo Verification compares the destination with the reference record: the
+echo oldest source hash record in the source, or on a first copy the source
+echo hashed now. Every file in it must be in the destination, unchanged.
 echo.
 echo Exit codes: %EXIT_CODE_PASS% PASS, %EXIT_CODE_FAIL% FAIL, %EXIT_CODE_UNVERIFIED% UNVERIFIED (copied, not verified).
 exit /b 0
 
 :init_state
 rem Counters and flags used across the run.
-for %%V in (copy_rc n_source n_match n_mismatch n_missing n_unreadable n_extra n_anomalies verify_incomplete) do set "%%V=0"
+for %%V in (copy_rc n_anomalies verify_incomplete n_hashed_source n_hashed_destination) do set "%%V=0"
+for %%V in (c_ok c_changed c_missing c_invalid c_unreadable c_records c_added c_rows) do set "%%V=0"
 set "log_ready="
 set "timestamp_warning=0"
+set "n_warnings=0"
 set "exit_code=%EXIT_CODE_FAIL%"
 exit /b 0
 
@@ -243,8 +253,8 @@ exit /b %errorlevel%
 rem Log mode and ETA mode are deliberately exclusive: robocopy's progress
 rem output would make the log unreadable, so the user picks one.
 echo Would you prefer a log file, or ETA and percentage?
-echo 1. Log file (but no ETA or percentage)
-echo 2. ETA and percentage (but no log file; results are shown on screen only)
+echo 1. Log file (but no ETA or percentage). Use this for evidence.
+echo 2. ETA and percentage (no log file: for non-evidence copies only)
 call :ask_choice progress_mode "1 2" || exit /b 1
 if "%progress_mode%"=="1" (
     set "use_log=1"
@@ -253,7 +263,19 @@ if "%progress_mode%"=="1" (
 ) else (
     set "use_log=0"
     set "progress_flags=/eta"
-    set "progress_text=ETA and percentage, no log file (/eta)"
+    set "progress_text=ETA and percentage, no log file (/eta): not a custody record"
+)
+if "%use_log%"=="0" (
+    echo.
+    echo WARNING: ETA mode keeps no log file. This copy will leave no record and
+    echo cannot serve as chain of custody. Use it for non-evidence copies only.
+    echo 1. Continue without a log file
+    echo 2. Go back and choose again
+)
+if "%use_log%"=="0" call :ask_choice eta_confirm "1 2" || exit /b 1
+if "%use_log%"=="0" if "%eta_confirm%"=="2" (
+    echo.
+    goto ask_progress_mode
 )
 echo.
 exit /b 0
@@ -270,7 +292,7 @@ call :paths_overlap && (
     echo.
     goto ask_paths_loop
 )
-set "dest_state=empty or new"
+set "dest_state=empty"
 call :destination_has_content || exit /b 0
 echo.
 echo The destination folder is not empty. Robocopy overwrites files there that
@@ -301,10 +323,20 @@ endlocal & exit /b 1
 :ask_verify
 echo.
 echo Once complete, compare the SHA-256 of every file?
-echo 1. Compare SHA-256
-echo 2. Do not compare hashes
+echo 1. Compare SHA-256. Use this for evidence.
+echo 2. Do not compare hashes (not for evidence)
 call :ask_choice verify_choice "1 2" || exit /b 1
 if "%verify_choice%"=="1" (set "verify=1") else set "verify=0"
+if "%verify%"=="0" (
+    echo.
+    echo WARNING: without verification nothing is hashed and no hash record is
+    echo made, so this copy cannot show that the evidence is unchanged, and later
+    echo copies made from it can't be checked against a reference record.
+    echo 1. Continue without verification
+    echo 2. Go back and choose again
+)
+if "%verify%"=="0" call :ask_choice verify_confirm "1 2" || exit /b 1
+if "%verify%"=="0" if "%verify_confirm%"=="2" goto ask_verify
 echo.
 exit /b 0
 
@@ -327,6 +359,15 @@ set "tmp_list=%temp_prefix%_list.tmp"
 set "tmp_rows_source=%temp_prefix%_source.tmp"
 set "tmp_rows_destination=%temp_prefix%_destination.tmp"
 set "tmp_problems=%temp_prefix%_problems.tmp"
+set "tmp_merge=%temp_prefix%_merge.tmp"
+set "tmp_merge_sorted=%temp_prefix%_merge_sorted.tmp"
+set "tmp_clock=%temp_prefix%_clock.tmp"
+set "tmp_warnings=%temp_prefix%_warnings.tmp"
+set "seal_name=robocopy_%run_ts%.sha256"
+set "seal_file=%destination_cmp%%seal_name%"
+set "reference_name="
+set "reference_csv="
+if "%verify%"=="1" call :find_reference_csv
 set "log_work=%temp_prefix%_%log_name%"
 set "dest_attrs_before="
 if exist "%destination_cmp%" for %%A in ("%destination%") do set "dest_attrs_before=%%~aA"
@@ -347,9 +388,9 @@ set "log_ready=1"
 exit /b 0
 
 :write_header
+rem Write the run header in three sections: environment, source, destination.
 call :format_utc_offset utc_offset
-set "windows_version=unknown"
-for /f "delims=" %%V in ('ver') do set "windows_version=%%V"
+call :describe_windows windows_version
 set "robocopy_path="
 for /f "delims=" %%R in ('where robocopy.exe 2^>nul') do if not defined robocopy_path set "robocopy_path=%%R"
 set "certutil_path="
@@ -365,37 +406,50 @@ set "v_user=%USERDOMAIN%\%USERNAME%"
 set "v_excluded=%EXCLUDED_ROOT_DIRS% (only where a folder is a drive root)"
 set "v_retries=%RETRY_COUNT% x %RETRY_WAIT_SECONDS% s"
 if "%verify%"=="1" (set "v_verify=SHA-256, every file") else set "v_verify=no"
-call :describe_volume "%source:~0,2%" v_src_volume src_fs
-call :describe_volume "%destination:~0,2%" v_dst_volume dst_fs
+set "v_reference=not used (no verification)"
+if "%verify%"=="1" set "v_reference=none yet: first copy, so the source is hashed and recorded"
+if defined reference_name set "v_reference=%reference_name% (oldest in the source; the destination is checked against it)"
 set "msg================================================================================" & call :emit msg
+set "msg=Warnings (read before relying on this copy)" & call :emit msg
+if %n_warnings% equ 0 (
+    set "msg=  none"
+    call :emit msg
+) else for /f "usebackq delims=" %%L in ("%tmp_warnings%") do (
+    set "msg=  %%L"
+    call :emit msg
+)
+set "msg=" & call :emit msg
+set "msg=Environment" & call :emit msg
 call :emit_kv "Script" v_script
 call :emit_kv "Script path" script_path
 call :emit_kv "Script SHA-256" script_sha256
 call :emit_kv "Started (UTC)" v_started
 call :emit_kv "Local UTC offset" v_offset
+call :emit_kv "Time source" v_time_source
+call :emit_kv "Last time sync" v_last_sync
 call :emit_kv "Host" COMPUTERNAME
 call :emit_kv "User" v_user
 call :emit_kv "Windows" windows_version
 call :emit_kv "Elevated" elevated_text
 call :emit_kv "robocopy" robocopy_path
 call :emit_kv "certutil" certutil_path
-call :emit_kv "Contents of" source_cmp
-call :emit_kv "Copied into" destination_cmp
-call :emit_kv "Destination was" dest_state
-call :emit_kv "Source volume" v_src_volume
-call :emit_kv "Dest volume" v_dst_volume
 call :emit_kv "Sleep when idle" sleep_text
 call :emit_kv "Excluded" v_excluded
 call :emit_kv "Retries" v_retries
 call :emit_kv "Progress" progress_text
 call :emit_kv "Verify" v_verify
+set "msg=" & call :emit msg
+set "msg=Source" & call :emit msg
+call :emit_kv "Contents of" source_cmp
+call :emit_kv "Volume" v_src_volume
+call :emit_kv "Hash record" v_reference
+set "msg=" & call :emit msg
+set "msg=Destination" & call :emit msg
+call :emit_kv "Copied into" destination_cmp
+call :emit_kv "Was" dest_state
+call :emit_kv "Volume" v_dst_volume
 call :emit_kv "Log" log_file
 if "%use_log%"=="1" call :emit_kv "Log during run" log_work
-if "%timestamp_warning%"=="1" (
-    set "msg=[WARN] No UTC time source worked; output names use a placeholder."
-    call :emit msg
-)
-if defined dst_fs if defined FS_WARN_%dst_fs% call :warn_destination_fs
 set "msg================================================================================" & call :emit msg
 exit /b 0
 
@@ -456,8 +510,10 @@ for %%R in (%CONTAINER_ATTRS%) do for /f "tokens=1-3 delims=:" %%I in ("%%R") do
 endlocal & exit /b 0
 
 :verify_copy
-rem Hash every source file and its copy, compare them by relative path, then
-rem look for files that exist only in the destination.
+rem Hash the destination and compare it with the reference record: the oldest
+rem source hash record from the source, or on a first copy (no record yet)
+rem this run's own record of the source, made now. So the source is hashed
+rem once per evidence set, and every later copy is checked back to it.
 set "msg=" & call :emit msg
 set "msg=--- Verification (SHA-256) ---" & call :emit msg
 where /q certutil.exe || (
@@ -467,58 +523,75 @@ where /q certutil.exe || (
     set "verify_incomplete=1"
     exit /b 1
 )
-call :list_files source_cmp tmp_list || set "verify_incomplete=1"
+if not defined reference_name (
+    set "msg=No hash record in the source: first copy, so the source is hashed and recorded."
+    call :emit msg
+    call :hash_tree source_cmp source || set "verify_incomplete=1"
+    call :write_hash_csv source
+    set "reference_name=robocopy_%run_ts%_hashes_source.csv"
+)
+call :hash_tree destination_cmp destination || set "verify_incomplete=1"
+call :write_hash_csv destination
+set "reference_csv=%destination_cmp%%reference_name%"
+if not exist "%reference_csv%" (
+    set "msg=[FAIL] The reference record %reference_name% is not in the destination."
+    call :emit msg
+    call :add_problem msg
+    set "verify_incomplete=1"
+    exit /b 1
+)
+call :compare_with_reference
+exit /b 0
+
+:hash_tree  rootVar  side
+rem List every file under the root (with robocopy) and hash each one into the
+rem side's rows. Exit 1 if the listing was incomplete.
+set "ht_failed="
+call :list_files %~1 tmp_list || set "ht_failed=1"
 set "n_listed=?"
 for /f %%N in ('find /c /v "" ^<"%tmp_list%" 2^>nul') do set "n_listed=%%N"
 for /f "usebackq tokens=*" %%L in ("%tmp_list%") do (
     set "entry=%%L"
-    call :verify_source_entry
+    call :hash_listed_entry %~1 %~2
 )
-call :list_files destination_cmp tmp_list || set "verify_incomplete=1"
-for /f "usebackq tokens=*" %%L in ("%tmp_list%") do (
-    set "entry=%%L"
-    call :check_destination_entry
-)
-call :write_hash_csvs
+if defined ht_failed exit /b 1
 exit /b 0
 
 :finish
-rem Work out the verdict, print the summary and set exit_code.
+rem Work out the result, print the summary and set exit_code. The result
+rem states what it covers, so it can't be misread later.
 call :get_utc_now
 set "end_iso=%utc_iso%"
 set /a "copy_failed=copy_rc & RC_FAIL_MASK"
-set /a "verify_bad=n_mismatch + n_missing + n_unreadable + n_anomalies + verify_incomplete"
+if %copy_failed% neq 0 (set "copy_status=FAILED") else set "copy_status=OK"
+set "v_copy=%copy_status% (robocopy exit codes combined: %copy_rc%)"
+set "verify_status=NOT RUN"
+set "v_verify=NOT RUN: verification was not requested"
+set "v_verify_detail="
+set "v_ref_used=none"
+if "%verify%"=="1" call :verification_status
 set "verdict=PASS"
-if %copy_failed% neq 0 set "verdict=FAIL"
-if "%verify%"=="1" if %verify_bad% neq 0 set "verdict=FAIL"
-if "%verify%"=="1" if %n_source% equ 0 (
-    set "verdict=FAIL"
-    set "msg=[FAIL] No files were found in the source to verify."
-    call :emit msg
-    call :add_problem msg
-)
-if not "%verify%"=="1" if "%verdict%"=="PASS" set "verdict=UNVERIFIED"
+if "%verify_status%"=="FAIL" set "verdict=FAIL"
+if "%copy_status%"=="FAILED" set "verdict=FAIL"
+if "%verify_status%"=="NOT RUN" if "%verdict%"=="PASS" set "verdict=UNVERIFIED"
+if "%verdict%"=="PASS" set "v_result=PASS - the copy completed, and every file in the reference record is in the destination with the same SHA-256"
+if "%verdict%"=="UNVERIFIED" set "v_result=UNVERIFIED - the copy completed without errors, but was not verified by SHA-256"
+if "%verdict%"=="FAIL" set "v_result=FAIL - "
+if "%verdict%"=="FAIL" if "%copy_status%"=="FAILED" set "v_result=%v_result%the copy failed; "
+if "%verdict%"=="FAIL" if "%verify_status%"=="FAIL" set "v_result=%v_result%the SHA-256 verification failed; "
+if "%verdict%"=="FAIL" set "v_result=%v_result%see the problems listed"
 if "%verdict%"=="PASS" set "exit_code=%EXIT_CODE_PASS%"
 if "%verdict%"=="FAIL" set "exit_code=%EXIT_CODE_FAIL%"
 if "%verdict%"=="UNVERIFIED" set "exit_code=%EXIT_CODE_UNVERIFIED%"
-set "v_copy=robocopy exit codes combined: %copy_rc%"
-if %copy_failed% neq 0 (set "v_copy=%v_copy% - FAILED") else set "v_copy=%v_copy% - OK"
-if "%verify%"=="1" (
-    set "v_verify=%n_source% source files: %n_match% match, %n_mismatch% mismatch, %n_missing% missing, %n_unreadable% unreadable"
-    set "v_extra=%n_extra% file(s) only in the destination"
-) else (
-    set "v_verify=not run"
-    set "v_extra=not checked"
-)
-if %verify_incomplete% neq 0 set "v_verify=%v_verify%; verification INCOMPLETE"
-if %n_anomalies% neq 0 set "v_verify=%v_verify%; %n_anomalies% unexpected listing line(s)"
 set "msg=" & call :emit msg
 set "msg================================================================================" & call :emit msg
+set "msg=Result" & call :emit msg
 call :emit_kv "Finished (UTC)" end_iso
-call :emit_kv "Copy" v_copy
+call :emit_kv "Copy (robocopy)" v_copy
 call :emit_kv "Verification" v_verify
-call :emit_kv "Extra files" v_extra
-call :emit_kv "RESULT" verdict
+if defined v_verify_detail call :emit_more v_verify_detail
+call :emit_kv "Reference record" v_ref_used
+call :emit_kv "OVERALL RESULT" v_result
 call :emit_kv "Exit code" exit_code
 call :emit_kv "Log" log_file
 set "msg================================================================================" & call :emit msg
@@ -539,11 +612,75 @@ exit /b %EXIT_CODE_FAIL%
 
 rem --------------------------- Environment ------------------------------------
 
+:check_environment
+rem Run every check an analyst should know about before relying on the copy,
+rem and collect the results as one list of warnings (:add_warning). The list
+rem heads the log header and is repeated in the summary.
+call :check_power
+call :read_clock_status
+call :describe_volume "%source:~0,2%" v_src_volume src_fs
+call :describe_volume "%destination:~0,2%" v_dst_volume dst_fs
+if "%timestamp_warning%"=="1" (
+    set "msg=No UTC time source worked: output names use a placeholder, and times are unknown."
+    call :add_warning msg
+)
+if defined dst_fs if defined FS_WARN_%dst_fs% call :warn_destination_fs
+if not "%dest_state%"=="empty" (
+    set "msg=The destination was not empty (you chose to continue): robocopy overwrites same-named files that differ."
+    call :add_warning msg
+)
+exit /b 0
+
+:add_warning  msgVar
+rem Add "[WARN] <text>" to the warnings list and to the end-of-run problems.
+setlocal EnableDelayedExpansion
+>>"!tmp_warnings!" echo([WARN] !%~1!
+>>"!tmp_problems!" echo([WARN] !%~1!
+endlocal & set /a "n_warnings+=1"
+exit /b 0
+
+:read_clock_status
+rem Set v_time_source and v_last_sync from "w32tm /query /status", and warn
+rem if the clock isn't synchronised. w32tm prints its lines in a fixed order
+rem (1 leap indicator, ... 7 last successful sync time, 8 source), so lines
+rem are picked by position and work in any display language. The "not
+rem synchronised" test: leap indicator 3, or a local/free-running clock source.
+set "v_time_source=unknown"
+set "v_last_sync=unknown"
+set "clock_unsynced="
+w32tm /query /status >"%tmp_clock%" 2>&1
+if errorlevel 1 (
+    set "v_time_source=unavailable (time service off, or w32tm needs administrator)"
+    set "msg=The clock's synchronisation could not be checked (w32tm failed): times in this record rely on this machine's clock."
+    call :add_warning msg
+    exit /b 0
+)
+set "cl_n=0"
+for /f "usebackq delims=" %%L in ("%tmp_clock%") do (
+    set "cl_line=%%L"
+    call :read_clock_line
+)
+findstr /i /c:"Local CMOS Clock" /c:"Free-running System Clock" "%tmp_clock%" >nul 2>&1 && set "clock_unsynced=1"
+if defined clock_unsynced (
+    set "msg=The clock is not synchronised with a time source: times in this record rely on this machine's own clock."
+    call :add_warning msg
+)
+exit /b 0
+
+:read_clock_line
+rem One line of w32tm output (in cl_line): keep the value after "label: ".
+set /a "cl_n+=1"
+set "cl_v=%cl_line:*: =%"
+if %cl_n% equ 1 if "%cl_v:~0,1%"=="3" set "clock_unsynced=1"
+if %cl_n% equ 7 set "v_last_sync=%cl_v% (local time, as w32tm reports it)"
+if %cl_n% equ 8 set "v_time_source=%cl_v%"
+exit /b 0
+
 :check_power
-rem Advise, before the copy starts, if this machine may sleep or hibernate
-rem during it. Reads the current power plan (SLEEP_SETTINGS, lid action).
-rem Pure batch can't tell whether the machine is on mains or battery right
-rem now, so the advice covers both. Sets sleep_text for the log header.
+rem Warn if this machine may sleep or hibernate during the copy. Reads the
+rem current power plan (SLEEP_SETTINGS, lid action). Pure batch can't read
+rem whether the machine is on mains or battery right now, so the warnings
+rem cover both. Sets sleep_text for the log header.
 setlocal EnableDelayedExpansion
 set "known=1"
 set "ac=0"
@@ -571,31 +708,26 @@ if not defined sleep_text if !ac! equ 0 set "sleep_text=never on mains; after !d
 if not defined sleep_text if !dc! equ 0 set "sleep_text=after !ac_min! min on mains; never on battery"
 if not defined sleep_text set "sleep_text=after !ac_min! min on mains; after !dc_min! min on battery"
 if not defined known (
-    echo Tip: make sure this machine won't sleep or hibernate during a long copy.
-    echo.
+    set "msg=The power settings could not be read: make sure this machine won't sleep or hibernate during the copy."
+    call :add_warning msg
 )
 if defined known if !ac! gtr 0 (
-    echo WARNING: this machine sleeps or hibernates after !ac_min! min idle, even on
-    echo mains power. Windows may treat a long copy as idle and sleep part-way
-    echo through. Set sleep and hibernate to Never for this copy: Settings, System,
-    echo Power. Then continue.
-    echo.
+    set "msg=This machine sleeps or hibernates after !ac_min! min idle, even on mains power: Windows may treat a long copy as idle and stop it part-way. Set sleep and hibernate to Never (Settings, System, Power)."
+    call :add_warning msg
 )
 if defined known if !ac! equ 0 if !dc! gtr 0 (
-    echo Note: on battery this machine sleeps after !dc_min! min idle. Keep it
-    echo plugged in for the whole copy.
-    echo.
+    set "msg=On battery this machine sleeps after !dc_min! min idle: keep it plugged in for the whole copy."
+    call :add_warning msg
 )
 call :read_power_values SUB_BUTTONS LIDACTION lid
 set "lid_sleeps="
 if defined lid_AC if !lid_AC! neq 0 set "lid_sleeps=1"
 if defined lid_DC if !lid_DC! neq 0 set "lid_sleeps=1"
 if defined lid_sleeps (
-    echo Tip: if this is a laptop, keep the lid open: closing it sleeps, hibernates
-    echo or shuts it down.
-    echo.
+    set "msg=If this is a laptop, keep the lid open: closing it sleeps, hibernates or shuts it down."
+    call :add_warning msg
 )
-endlocal & set "sleep_text=%sleep_text%"
+endlocal & set "sleep_text=%sleep_text%" & set "n_warnings=%n_warnings%"
 exit /b 0
 
 :read_power_values  subgroup  setting  prefix
@@ -620,6 +752,40 @@ set /a "%~3_AC=!pv_prev!, %~3_DC=!pv_last!" 2>nul || (
     set "%~3_DC="
     exit /b 1
 )
+exit /b 0
+
+:describe_windows  outVar
+rem Windows as a person would name it, e.g. "Windows 11 Pro 25H2 (build
+rem 26200.9457)": ProductName from the registry, corrected to Windows 11 from
+rem build 22000 (the registry still says Windows 10 there), plus the release
+rem (DisplayVersion, or ReleaseId on older builds) and the full build. Same
+rem approach as the LiveResponse collector's registry fallback. Falls back
+rem to VER's output.
+setlocal EnableDelayedExpansion
+set "cv=HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+for %%V in (ProductName DisplayVersion ReleaseId CurrentBuild UBR) do (
+    set "w_%%V="
+    for /f "tokens=2,*" %%A in ('reg query "!cv!" /v %%V 2^>nul ^| find /i "%%V"') do set "w_%%V=%%B"
+)
+if not defined w_ProductName (
+    set "text=unknown"
+    for /f "delims=" %%V in ('ver') do set "text=%%V"
+    goto describe_windows_done
+)
+set /a "build=w_CurrentBuild" 2>nul
+if !build! geq 22000 set "w_ProductName=!w_ProductName:Windows 10=Windows 11!"
+set "release=!w_DisplayVersion!"
+if not defined release set "release=!w_ReleaseId!"
+set "text=!w_ProductName!"
+if defined release set "text=!text! !release!"
+set "full_build=!w_CurrentBuild!"
+if defined w_UBR (
+    set /a "ubr=!w_UBR!" 2>nul
+    set "full_build=!full_build!.!ubr!"
+)
+set "text=!text! (build !full_build!)"
+:describe_windows_done
+endlocal & set "%~1=%text%"
 exit /b 0
 
 :describe_volume  drive  outVar  fsOutVar
@@ -663,13 +829,12 @@ for /f "delims=" %%L in ('chkntfs %~1 2^>nul') do for %%T in (%%L) do for %%F in
 exit /b 0
 
 :warn_destination_fs
-rem Warn (console, log and summary) about a destination file system listed in
-rem FS_WARN_<name>. A warning only: robocopy fails any file that doesn't fit.
+rem Warn about a destination file system listed in FS_WARN_<name>. A warning
+rem only: robocopy fails any file that doesn't fit.
 setlocal EnableDelayedExpansion
-set "msg=[WARN] Destination file system is !dst_fs!: !FS_WARN_%dst_fs%!"
-call :emit msg
-call :add_problem msg
-endlocal & exit /b 0
+set "msg=The destination file system is !dst_fs!: !FS_WARN_%dst_fs%!"
+call :add_warning msg
+endlocal & set /a "n_warnings+=1" & exit /b 0
 
 rem ----------------------------- Log -----------------------------------------
 
@@ -686,6 +851,206 @@ if exist "!log_file!" if not exist "!log_work!" (
 echo [WARN] Could not move the log to the destination. It is here:
 echo        !log_work!
 endlocal & exit /b 1
+
+rem ---------------------- Chain of custody helpers ---------------------------
+
+:find_reference_csv
+rem Find the reference record: the oldest source hash record in the source
+rem root (robocopy_<UTC>_hashes_source.csv, oldest by name, as names start
+rem with the UTC time; names without a timestamp are ignored). It is chosen
+rem from the source, so an unrelated older record already in a non-empty
+rem destination can't be picked, and read from the destination after the
+rem copy. Sets reference_name, or leaves it empty on a first copy.
+for /f "delims=" %%F in ('dir /b /a-d /on "%source_cmp%robocopy_*_hashes_source.csv" 2^>nul') do (
+    if not defined reference_name call :consider_reference "%%F"
+)
+exit /b 0
+
+:consider_reference  fileName
+set "cr_name=%~1"
+set "cr_char=%cr_name:~9,1%"
+if "%cr_char%" lss "0" exit /b 0
+if "%cr_char%" gtr "9" exit /b 0
+set "reference_name=%cr_name%"
+exit /b 0
+
+:compare_with_reference
+rem Compare the destination with the reference record: every file in the
+rem record must be in the destination with the same SHA-256. Both lists are
+rem written as "relpath*hash*tag" (* can't occur in Windows names), sorted
+rem ordinally (sort /L C) so each path's two lines are adjacent, then paired
+rem up in one pass.
+set "msg=" & call :emit msg
+set "msg=--- Destination vs reference record: %reference_name% ---"
+call :emit msg
+for /f "usebackq skip=1 delims=" %%L in ("%reference_csv%") do (
+    set "ln=%%L"
+    call :add_reference_row
+)
+if not exist "%tmp_merge%" type nul >"%tmp_merge%"
+sort /L C /O "%tmp_merge_sorted%" "%tmp_merge%"
+set "prev_rel="
+set "prev_hash="
+set "prev_tag="
+for /f "usebackq eol=* delims=" %%L in ("%tmp_merge_sorted%") do (
+    set "ln=%%L"
+    call :continuity_line
+)
+call :continuity_flush
+exit /b 0
+
+:add_reference_row
+rem Turn one row of the reference record ("rel","hash", maybe with trailing
+rem spaces from 1.0.x) into a merge line "rel*hash*R".
+setlocal EnableDelayedExpansion
+set "row=!ln!"
+:add_reference_row_trim
+if "!row:~-1!"==" " (
+    set "row=!row:~0,-1!"
+    goto add_reference_row_trim
+)
+set "x=!row:","=*!"
+set "x=!x:"=!"
+if "!x:**=!"=="!x!" (
+    set "msg=[FAIL] Unreadable row in the reference record: !row!"
+    call :emit msg
+    call :add_problem msg
+    endlocal & set /a "c_invalid+=1" & exit /b 0
+)
+>>"!tmp_merge!" echo(!x!*R
+endlocal & set /a "c_rows+=1" & exit /b 0
+
+:continuity_line
+rem Process one sorted merge line (in "ln"): pair it with the previous line
+rem if both are the same path, otherwise settle the previous line alone.
+setlocal EnableDelayedExpansion
+for %%V in (d_ok d_changed d_missing d_invalid d_unreadable d_records d_added) do set "%%V=0"
+set "cur=!ln!"
+set "tag=!cur:~-1!"
+set "rest=!cur:~0,-2!"
+set "hash=!rest:**=!"
+call :strlen hash hash_len
+set /a "cut=hash_len + 1"
+for %%N in (!cut!) do set "rel=!rest:~0,-%%N!"
+set "new_rel=!rel!"
+set "new_hash=!hash!"
+set "new_tag=!tag!"
+if defined prev_rel if "!prev_rel!"=="!rel!" (
+    if "!tag!"=="R" (
+        set "ref_hash=!hash!"
+        set "now_hash=!prev_hash!"
+    ) else (
+        set "ref_hash=!prev_hash!"
+        set "now_hash=!hash!"
+    )
+    set "c_status="
+    set "c_counter="
+    if "!tag!"=="!prev_tag!" set "c_status=listed twice" & set "c_counter=d_invalid"
+    if not defined c_status call :is_sha256 ref_hash || (set "c_status=no valid hash in the reference record" & set "c_counter=d_invalid")
+    if not defined c_status if "!now_hash!"=="UNREADABLE" set "c_status=UNREADABLE in the destination" & set "c_counter=d_unreadable"
+    if not defined c_status if /i not "!ref_hash!"=="!now_hash!" set "c_status=DIFFERS from the reference record" & set "c_counter=d_changed"
+    if defined c_status (
+        set "msg=[FAIL] !c_status!: !rel!"
+        call :emit msg
+        call :add_problem msg
+        set "!c_counter!=1"
+    ) else set "d_ok=1"
+    set "new_rel="
+    set "new_hash="
+    set "new_tag="
+) else if defined prev_rel call :continuity_single prev_rel prev_tag
+endlocal & set "prev_rel=%new_rel%" & set "prev_hash=%new_hash%" & set "prev_tag=%new_tag%" & set /a "c_ok+=%d_ok%, c_changed+=%d_changed%, c_missing+=%d_missing%, c_invalid+=%d_invalid%, c_unreadable+=%d_unreadable%, c_records+=%d_records%, c_added+=%d_added%"
+exit /b 0
+
+:continuity_flush
+rem Settle the last unpaired merge line, if any.
+if not defined prev_rel exit /b 0
+setlocal EnableDelayedExpansion
+for %%V in (d_missing d_records d_added) do set "%%V=0"
+call :continuity_single prev_rel prev_tag
+endlocal & set /a "c_missing+=%d_missing%, c_records+=%d_records%, c_added+=%d_added%"
+exit /b 0
+
+:continuity_single  relVar  tagVar
+rem A path found on one side only. In the reference record but not in the
+rem destination: missing (FAIL). In the destination but not in the record:
+rem added since; a custody record of an earlier run (robocopy_* in the root)
+rem is expected, anything else is a warning. Caller's scope, delayed on.
+if "!%~2!"=="R" (
+    set "msg=[FAIL] MISSING from the destination (in the reference record): !%~1!"
+    call :emit msg
+    call :add_problem msg
+    set "d_missing=1"
+    exit /b 0
+)
+set "cs_rel=!%~1!"
+if "!cs_rel:\=!"=="!cs_rel!" if /i "!cs_rel:~0,9!"=="robocopy_" (
+    set "d_records=1"
+    exit /b 0
+)
+set "msg=[WARN] Not in the reference record (added since, so not verified against it): !cs_rel!"
+call :emit msg
+call :add_problem msg
+set "d_added=1"
+exit /b 0
+
+:verification_status
+rem Set verify_status (PASS or FAIL), v_verify, v_verify_detail and v_ref_used.
+set "v_ref_used=%reference_name%"
+if not defined v_ref_used set "v_ref_used=none"
+set /a "c_bad=c_changed + c_missing + c_invalid + c_unreadable + n_anomalies + verify_incomplete"
+set "verify_status=PASS"
+if %c_bad% neq 0 set "verify_status=FAIL"
+if %c_ok% equ 0 set "verify_status=FAIL"
+set "v_verify=%verify_status%: %c_ok% of %c_rows% files in the reference record match the destination"
+set "v_verify_detail=%c_changed% differ, %c_missing% missing, %c_unreadable% unreadable, %c_invalid% invalid in the record; added since: %c_records% custody record(s), %c_added% other file(s)"
+if %verify_incomplete% neq 0 set "v_verify_detail=%v_verify_detail%; INCOMPLETE (see problems)"
+if %n_anomalies% neq 0 set "v_verify_detail=%v_verify_detail%; %n_anomalies% unexpected listing line(s)"
+exit /b 0
+
+:is_sha256  hashVar
+rem Exit 0 if the variable holds exactly 64 hex characters.
+setlocal EnableDelayedExpansion
+set "h=!%~1!"
+if not defined h (endlocal & exit /b 1)
+if not "!h:~64!"=="" (endlocal & exit /b 1)
+if "!h:~63,1!"=="" (endlocal & exit /b 1)
+for /f "delims=0123456789abcdefABCDEF" %%X in ("!h!") do (endlocal & exit /b 1)
+endlocal & exit /b 0
+
+:write_seal
+rem Seal this run's custody records: write the SHA-256 of the log and hash
+rem CSVs to robocopy_<UTC>.sha256 in the destination, then show the seal's
+rem own SHA-256 for the user's chain-of-custody notes. With that value
+rem recorded elsewhere, any later change to these records can be detected.
+setlocal EnableDelayedExpansion
+set "sealed=0"
+for %%F in (log_file csv_source csv_destination) do (
+    if exist "!%%F!" (
+        set "sf=!%%F!"
+        call :get_sha256 sf sh
+        for %%N in ("!sf!") do set "sn=%%~nxN"
+        if defined sh (
+            >>"!seal_file!" echo(!sh! *!sn!
+            set /a "sealed+=1"
+        ) else (
+            echo [WARN] Could not hash !sn! for the seal.
+        )
+    )
+)
+if !sealed! equ 0 (endlocal & exit /b 0)
+set "seal_hash="
+call :get_sha256 seal_file seal_hash
+echo.
+echo Custody records sealed in: !seal_name!
+if defined seal_hash (
+    echo   SHA-256: !seal_hash!
+    echo Record this value in your chain-of-custody notes: it shows whether this
+    echo run's log and hash CSVs are later changed.
+) else (
+    echo [WARN] Could not hash the seal file.
+)
+endlocal & exit /b 0
 
 rem ------------------------ Verification helpers ------------------------------
 
@@ -706,68 +1071,33 @@ if !rc! geq 8 (
 )
 endlocal & exit /b 0
 
-:verify_source_entry
-rem Verify one listed source file (in "entry") against its copy.
+:hash_listed_entry  rootVar  side
+rem Hash one listed file (in "entry") and record it as a "rel","hash" row for
+rem the side's CSV; for the destination also as a "rel*hash*C" line for the
+rem comparison with the reference record. This run's own outputs are skipped.
 setlocal EnableDelayedExpansion
 set "full=!entry!"
-call :relative_path full source_cmp rel || (
-    set "msg=[FAIL] Unexpected line while listing the source: !full!"
+call :relative_path full %~1 rel || (
+    set "msg=[FAIL] Unexpected line while listing the %~2: !full!"
     call :emit msg
     call :add_problem msg
     endlocal & set /a "n_anomalies+=1" & exit /b 0
 )
-set /a "seq=n_source + 1"
-set "msg=[!seq!/!n_listed!] Hashing: !rel!" & call :say msg
-set "dest_full=!destination_cmp!!rel!"
-call :get_sha256 full hash_s
-if not defined hash_s set "hash_s=UNREADABLE"
-if exist "!dest_full!" (
-    call :get_sha256 dest_full hash_d
-    if not defined hash_d set "hash_d=UNREADABLE"
-) else set "hash_d=MISSING"
->>"!tmp_rows_source!" echo("!rel!","!hash_s!"
-if not "!hash_d!"=="MISSING" >>"!tmp_rows_destination!" echo("!rel!","!hash_d!"
-set "counter=n_match"
-set "status="
-if /i not "!hash_s!"=="!hash_d!" set "counter=n_mismatch" & set "status=MISMATCH"
-if "!hash_d!"=="MISSING" set "counter=n_missing" & set "status=MISSING in destination"
-if "!hash_d!"=="UNREADABLE" set "counter=n_unreadable" & set "status=UNREADABLE in destination"
-if "!hash_s!"=="UNREADABLE" set "counter=n_unreadable" & set "status=UNREADABLE in source"
-if defined status (
-    set "msg=[FAIL] !status!: !rel!"
-    call :emit msg
-    call :add_problem msg
-)
-endlocal & set /a "n_source+=1, %counter%+=1" & exit /b 0
+for %%O in (log_file csv_source csv_destination seal_file) do if /i "!full!"=="!%%O!" (endlocal & exit /b 0)
+set /a "seq=n_hashed_%~2 + 1"
+set "msg=[!seq!/!n_listed!] Hashing %~2: !rel!" & call :say msg
+call :get_sha256 full h
+if not defined h set "h=UNREADABLE"
+>>"!tmp_rows_%~2!" echo("!rel!","!h!"
+if "%~2"=="destination" >>"!tmp_merge!" echo(!rel!*!h!*C
+endlocal & set /a "n_hashed_%~2+=1" & exit /b 0
 
-:check_destination_entry
-rem Record a listed destination file (in "entry") that has no source file.
+:write_hash_csv  side
+rem Write the side's CSV: header plus rows sorted by relative path, so it
+rem doesn't depend on the order in which a file system lists files.
 setlocal EnableDelayedExpansion
-set "full=!entry!"
-call :relative_path full destination_cmp rel || (
-    set "msg=[FAIL] Unexpected line while listing the destination: !full!"
-    call :emit msg
-    call :add_problem msg
-    endlocal & set /a "n_anomalies+=1" & exit /b 0
-)
-for %%O in (log_file csv_source csv_destination) do if /i "!full!"=="!%%O!" (endlocal & exit /b 0)
-if exist "!source_cmp!!rel!" (endlocal & exit /b 0)
-call :get_sha256 full hash_d
-if not defined hash_d set "hash_d=UNREADABLE"
->>"!tmp_rows_destination!" echo("!rel!","!hash_d!"
-set "msg=[WARN] Only in destination: !rel!"
-call :emit msg
-call :add_problem msg
-endlocal & set /a "n_extra+=1" & exit /b 0
-
-:write_hash_csvs
-rem Header plus rows sorted by relative path, so the CSVs don't depend on the
-rem order in which a file system lists files.
-setlocal EnableDelayedExpansion
-for %%C in (source destination) do (
-    >"!csv_%%C!" echo "File","SHA-256"
-    if exist "!tmp_rows_%%C!" sort "!tmp_rows_%%C!" >>"!csv_%%C!"
-)
+>"!csv_%~1!" echo "File","SHA-256"
+if exist "!tmp_rows_%~1!" sort "!tmp_rows_%~1!" >>"!csv_%~1!"
 endlocal & exit /b 0
 
 :get_sha256  pathVar  outVar
@@ -1086,10 +1416,17 @@ if defined log_ready >>"!log_work!" echo(!%~1!
 endlocal & exit /b 0
 
 :emit_kv  label  valueVar
-rem Emit "label     : value" with the labels aligned.
+rem Emit "  label     : value" with the labels aligned under a section title.
 setlocal EnableDelayedExpansion
 set "kv_label=%~1                    "
-set "msg=!kv_label:~0,18!: !%~2!"
+set "msg=  !kv_label:~0,18!: !%~2!"
+call :emit msg
+endlocal & exit /b 0
+
+:emit_more  valueVar
+rem Emit a continuation line, aligned with the values of :emit_kv.
+setlocal EnableDelayedExpansion
+set "msg=                      !%~1!"
 call :emit msg
 endlocal & exit /b 0
 
@@ -1145,7 +1482,7 @@ exit /b 0
 :cleanup_temp
 rem Delete this run's temporary files; a failed delete never stops the run.
 setlocal EnableDelayedExpansion
-for %%T in (tmp_list tmp_rows_source tmp_rows_destination tmp_problems) do (
+for %%T in (tmp_list tmp_rows_source tmp_rows_destination tmp_problems tmp_merge tmp_merge_sorted tmp_clock tmp_warnings) do (
     if defined %%T if exist "!%%T!" del /f /q "!%%T!" >nul 2>&1
 )
 endlocal & exit /b 0
