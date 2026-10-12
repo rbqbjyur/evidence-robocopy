@@ -18,6 +18,9 @@ file in source and destination.
 - Copies the contents of the source folder into the destination folder
   with robocopy, keeping data, attributes and timestamps of files and
   subfolders (`/copy:DAT /dcopy:DAT`), so anything hidden stays hidden.
+  Owner and permissions are deliberately not copied: the copies inherit the
+  destination's permissions, since the source's users and groups usually
+  don't exist on the target system.
   Empty folders are included (`/e`); junctions are not followed (`/xj`).
   Failed files are retried twice, 5 s apart. When run elevated it uses
   backup mode (`/b`), so file permissions don't block reads.
@@ -25,7 +28,10 @@ file in source and destination.
   single-threaded, smaller files with half the logical processors (1–128).
 - Treats the source and destination folders as containers of the evidence,
   not as evidence themselves:
-  - skips `$RECYCLE.BIN` and `System Volume Information` at their roots;
+  - skips `$RECYCLE.BIN` and `System Volume Information` only where the
+    source or destination is a drive root (`E:\`), where they belong to the
+    volume; anywhere else, including any UNC path, they are copied as
+    contents;
   - clears any Read-only, Hidden or System attribute that robocopy carries
     from the source folder onto the destination folder, unless the
     destination already had it. Otherwise the destination can turn hidden, or
@@ -87,7 +93,6 @@ prompts. `evidence-robocopy.bat /?` shows a short help.
 
 ## What it does not do
 
-- Copy owner or ACLs.
 - Verify alternate data streams or empty directories. Only each file's main
   data stream is hashed.
 - Verify an image against its acquisition hash. That needs an EWF verifier.

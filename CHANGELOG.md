@@ -11,6 +11,13 @@ recorded release dates. Before the archived scripts were imported, only three
 things were changed: the script name and author lines, an added SPDX licence
 line, and the version string of 0.9.0. The code is unchanged.
 
+## 1.1.1 - 2026-10-12
+
+### Fixed
+- `$RECYCLE.BIN` and `System Volume Information` are skipped only when the
+  source or destination is a drive root. In a folder (or on a UNC path) they
+  are evidence content and are copied.
+
 ## 1.1.0 - 2026-10-12
 
 ### Fixed

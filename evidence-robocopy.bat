@@ -27,7 +27,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 rem ============================== CONFIG =====================================
 
 set "SCRIPT_NAME=evidence-robocopy"
-set "SCRIPT_VERSION=1.1.0"
+set "SCRIPT_VERSION=1.1.1"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 set "RETRY_COUNT=2"
@@ -42,9 +42,12 @@ rem kept within 1..THREAD_MAX (robocopy's /mt limit is 128).
 set "THREAD_DIVISOR=2"
 set "THREAD_MAX=128"
 
-rem Folders skipped at the root of the source and of the destination: quoted,
-rem space-separated. At a drive root they hold that drive's recycle bin and
-rem system data, which are not part of the evidence set.
+rem Folders skipped only when the source or destination IS a drive root (E:\):
+rem quoted, space-separated. There they are the volume's recycle bin and
+rem system data, not evidence. Anywhere else (inside a folder, or any UNC
+rem path, which can't be told apart from a folder) they are contents and are
+rem copied: wrongly copying them fails visibly, wrongly skipping them would
+rem silently leave evidence out.
 set EXCLUDED_ROOT_DIRS="$RECYCLE.BIN" "System Volume Information"
 
 rem Copy passes, run in the order listed in COPY_PASSES. Fields per pass <id>:
@@ -280,14 +283,16 @@ set "dest_state=NOT empty (user chose to continue)"
 exit /b 0
 
 :destination_has_content
-rem Exit 0 if the destination folder exists and contains anything other than
-rem the EXCLUDED_ROOT_DIRS folders (which every drive root has).
+rem Exit 0 if the destination folder exists and contains anything other than,
+rem at a drive root only, the EXCLUDED_ROOT_DIRS folders (which every drive
+rem root has).
 setlocal EnableDelayedExpansion
 if not exist "!destination_cmp!" (endlocal & exit /b 1)
+call :is_drive_root destination_cmp && (set "at_root=1") || set "at_root="
 set "found="
 for /f "delims=" %%E in ('dir /a /b "!destination_cmp!" 2^>nul') do if not defined found (
     set "skip="
-    for %%D in (%EXCLUDED_ROOT_DIRS%) do if /i "%%E"=="%%~D" set "skip=1"
+    if defined at_root for %%D in (%EXCLUDED_ROOT_DIRS%) do if /i "%%E"=="%%~D" set "skip=1"
     if not defined skip set "found=1"
 )
 if defined found (endlocal & exit /b 0)
@@ -357,7 +362,7 @@ set "v_script=%SCRIPT_NAME% %SCRIPT_VERSION%"
 set "v_started=%start_iso% (source: %start_method%)"
 set "v_offset=%utc_offset% (robocopy's Started/Ended times are local; its file times are UTC)"
 set "v_user=%USERDOMAIN%\%USERNAME%"
-set "v_excluded=%EXCLUDED_ROOT_DIRS%"
+set "v_excluded=%EXCLUDED_ROOT_DIRS% (only where a folder is a drive root)"
 set "v_retries=%RETRY_COUNT% x %RETRY_WAIT_SECONDS% s"
 if "%verify%"=="1" (set "v_verify=SHA-256, every file") else set "v_verify=no"
 call :describe_volume "%source:~0,2%" v_src_volume src_fs
@@ -380,7 +385,7 @@ call :emit_kv "Destination was" dest_state
 call :emit_kv "Source volume" v_src_volume
 call :emit_kv "Dest volume" v_dst_volume
 call :emit_kv "Sleep when idle" sleep_text
-call :emit_kv "Excluded at roots" v_excluded
+call :emit_kv "Excluded" v_excluded
 call :emit_kv "Retries" v_retries
 call :emit_kv "Progress" progress_text
 call :emit_kv "Verify" v_verify
@@ -790,8 +795,10 @@ exit /b 0
 rem ---------------------------- Copy helpers ----------------------------------
 
 :add_root_exclusions  rootVar
-rem Append "/xd <root><dir>" entries for EXCLUDED_ROOT_DIRS to xd_args.
-rem Caller's scope; the caller must have delayed expansion enabled.
+rem Append "/xd <root><dir>" entries for EXCLUDED_ROOT_DIRS to xd_args, only if
+rem the root is a drive root (see CONFIG). Caller's scope; the caller must have
+rem delayed expansion enabled.
+call :is_drive_root %~1 || exit /b 0
 for %%D in (%EXCLUDED_ROOT_DIRS%) do (
     if not defined xd_args set "xd_args=/xd"
     set "xd_args=!xd_args! "!%~1!%%~D""
@@ -1114,6 +1121,14 @@ for %%N in (!rp_len!) do (
 if /i not "!rp_prefix!"=="!%~2!" exit /b 1
 if not defined %~3 exit /b 1
 exit /b 0
+
+:is_drive_root  pathVar
+rem Exit 0 if the path (in its trailing-backslash form) is a drive root: "X:\".
+setlocal EnableDelayedExpansion
+set "r=!%~1!"
+if not "!r:~3!"=="" (endlocal & exit /b 1)
+if not "!r:~1,2!"==":\" (endlocal & exit /b 1)
+endlocal & exit /b 0
 
 :strlen  stringVar  outVar
 rem Length of a variable's value.
