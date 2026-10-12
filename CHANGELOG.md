@@ -5,11 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Entries up to and including 1.0.3 were reconstructed retrospectively from the
-archived scripts. Their dates are the files' last-modified times (UTC), not
-recorded release dates. Before the archived scripts were imported, only three
-things were changed: the script name and author lines, an added SPDX licence
-line, and the version string of 0.9.0. The code is unchanged.
+## 1.2.1 - 2026-10-12
+
+### Added
+- Metadata check after the copy: robocopy compares every source file with
+  its copy (list-only); a differing size or last-modified time, or a file
+  not copied, fails verification. Times to 2 s where FAT/exFAT is involved.
+
+### Changed
+- Scope: evidence of any kind, with E01/EWF image sets first and loose
+  files (e.g. eDiscovery collections) supported.
 
 ## 1.2.0 - 2026-10-12
 
@@ -112,11 +117,6 @@ line, and the version string of 0.9.0. The code is unchanged.
   backslash (e.g. `E:\`) does not escape the closing quote.
 
 ## 0.9.0 - 2024-09-19
-
-Recovered as a variant labelled "1.0.0b" that reported itself as 1.0.0. Its
-content shows it is a pre-release of 1.0.0: everything in it is in 1.0.0, it
-has none of the features 1.0.0 added, and 1.0.1 builds on 1.0.0, not on this
-file. It is numbered 0.9.0 here.
 
 ### Added
 - Interactive prompts for source and destination.

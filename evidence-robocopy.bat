@@ -1,8 +1,9 @@
 :: SPDX-License-Identifier: 0BSD
 @echo off
 rem ===========================================================================
-rem evidence-robocopy - copy E01/EWF evidence sets between drives with
-rem robocopy, then optionally verify every file by SHA-256.
+rem evidence-robocopy - copy evidence between drives with robocopy (E01/EWF
+rem image sets first and foremost, and loose files), verify every file by
+rem SHA-256 against a reference record, and leave chain-of-custody records.
 rem
 rem Usage:   evidence-robocopy.bat       double-click or run from cmd; run as
 rem                                      administrator for backup mode (/b)
@@ -27,7 +28,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 rem ============================== CONFIG =====================================
 
 set "SCRIPT_NAME=evidence-robocopy"
-set "SCRIPT_VERSION=1.2.0"
+set "SCRIPT_VERSION=1.2.1"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -77,6 +78,17 @@ rem physically inside the source is copied, and junction loops (e.g.
 rem "Application Data" in a user profile) can't recurse forever.
 set "COPY_FLAGS=/e /xj /v /x /ts /fp /bytes /dcopy:DAT /copy:DAT"
 set "LIST_FLAGS=/l /e /xj /njh /njs /ndl /nc /ns /fp /r:0 /w:0"
+
+rem Post-copy metadata check: robocopy in list-only mode, source against
+rem destination, lists only files it would copy, i.e. whose size or
+rem last-modified time differ (or that are missing). /xx leaves out files that
+rem exist only in the destination (custody records). No /v or class column,
+rem so nothing localised is parsed. Attributes and creation time are copied
+rem but not compared: exFAT can't hold every NTFS attribute.
+set "META_FLAGS=/l /e /xj /xx /njh /njs /ndl /nc /ns /fp /r:0 /w:0"
+rem File systems with coarse timestamps: if the source or destination is one,
+rem times are compared to 2 s (/fft) instead of exactly.
+set "COARSE_TIME_FILESYSTEMS=FAT FAT32 exFAT"
 
 rem Robocopy exit code bits, checked highest first. Fields per bit <n>:
 rem   RC_<n>_SEVERITY  FAIL (copy failed), WARN or INFO
@@ -189,18 +201,21 @@ echo   robocopy_YYYYMMDDTHHMMSSZ_hashes_destination.csv
 echo   robocopy_YYYYMMDDTHHMMSSZ.sha256                  (seal: hashes of the above)
 echo Verification compares the destination with the reference record: the
 echo oldest source hash record in the source, or on a first copy the source
-echo hashed now. Every file in it must be in the destination, unchanged.
+echo hashed now. Every file in it must be in the destination, unchanged, and
+echo every copied file must match its source in size and last-modified time.
 echo.
 echo Exit codes: %EXIT_CODE_PASS% PASS, %EXIT_CODE_FAIL% FAIL, %EXIT_CODE_UNVERIFIED% UNVERIFIED (copied, not verified).
 exit /b 0
 
 :init_state
 rem Counters and flags used across the run.
-for %%V in (copy_rc n_anomalies verify_incomplete n_hashed_source n_hashed_destination) do set "%%V=0"
+for %%V in (copy_rc n_anomalies verify_incomplete n_hashed_source n_hashed_destination m_differ m_incomplete) do set "%%V=0"
 for %%V in (c_ok c_changed c_missing c_invalid c_unreadable c_records c_added c_rows) do set "%%V=0"
 set "log_ready="
 set "timestamp_warning=0"
 set "n_warnings=0"
+set "meta_mode=exact"
+set "meta_ran="
 set "exit_code=%EXIT_CODE_FAIL%"
 exit /b 0
 
@@ -516,6 +531,7 @@ rem this run's own record of the source, made now. So the source is hashed
 rem once per evidence set, and every later copy is checked back to it.
 set "msg=" & call :emit msg
 set "msg=--- Verification (SHA-256) ---" & call :emit msg
+call :check_metadata
 where /q certutil.exe || (
     set "msg=[FAIL] certutil.exe not found: verification could not run."
     call :emit msg
@@ -543,6 +559,55 @@ if not exist "%reference_csv%" (
 call :compare_with_reference
 exit /b 0
 
+:check_metadata
+rem Compare size and last-modified time of every source file with its copy,
+rem using robocopy's own comparison (see META_FLAGS). Any file listed differs
+rem or is missing. Sets m_differ and m_incomplete; v_meta for the summary.
+setlocal EnableDelayedExpansion
+set "fft="
+set "time_mode=exact"
+for %%F in (%COARSE_TIME_FILESYSTEMS%) do (
+    if /i "!src_fs!"=="%%F" set "fft=/fft"
+    if /i "!dst_fs!"=="%%F" set "fft=/fft"
+)
+if defined fft set "time_mode=to 2 s (FAT/exFAT involved)"
+set "msg=" & call :emit msg
+set "msg=--- Metadata check: size and last-modified time, compared !time_mode! ---"
+call :emit msg
+set "xd_args="
+call :add_root_exclusions source_cmp
+call :add_root_exclusions destination_cmp
+robocopy "!source! " "!destination! " *.* !META_FLAGS! !fft! !backup_flag! !xd_args! >"!tmp_list!" 2>&1
+set "rc=!errorlevel!"
+set "incomplete=0"
+if !rc! geq 8 (
+    set "msg=[FAIL] The metadata check could not compare every file (robocopy exit code !rc!)."
+    call :emit msg
+    call :add_problem msg
+    set "incomplete=1"
+)
+endlocal & set "m_incomplete=%incomplete%" & set "meta_mode=%time_mode%" & set "meta_ran=1"
+for /f "usebackq tokens=*" %%L in ("%tmp_list%") do (
+    set "entry=%%L"
+    call :metadata_entry
+)
+exit /b 0
+
+:metadata_entry
+rem One file listed by the metadata check (in "entry"): it differs.
+setlocal EnableDelayedExpansion
+set "full=!entry!"
+call :relative_path full source_cmp rel || (
+    set "msg=[FAIL] Unexpected line in the metadata check: !full!"
+    call :emit msg
+    call :add_problem msg
+    endlocal & set /a "n_anomalies+=1" & exit /b 0
+)
+set "msg=[FAIL] METADATA differs (size or last-modified time), or not copied: !rel!"
+call :emit msg
+call :add_problem msg
+endlocal & set /a "m_differ+=1" & exit /b 0
+
 :hash_tree  rootVar  side
 rem List every file under the root (with robocopy) and hash each one into the
 rem side's rows. Exit 1 if the listing was incomplete.
@@ -569,12 +634,13 @@ set "verify_status=NOT RUN"
 set "v_verify=NOT RUN: verification was not requested"
 set "v_verify_detail="
 set "v_ref_used=none"
+set "v_meta=NOT RUN: verification was not requested"
 if "%verify%"=="1" call :verification_status
 set "verdict=PASS"
 if "%verify_status%"=="FAIL" set "verdict=FAIL"
 if "%copy_status%"=="FAILED" set "verdict=FAIL"
 if "%verify_status%"=="NOT RUN" if "%verdict%"=="PASS" set "verdict=UNVERIFIED"
-if "%verdict%"=="PASS" set "v_result=PASS - the copy completed, and every file in the reference record is in the destination with the same SHA-256"
+if "%verdict%"=="PASS" set "v_result=PASS - the copy completed, every file in the reference record is in the destination with the same SHA-256, and size and last-modified time match the source"
 if "%verdict%"=="UNVERIFIED" set "v_result=UNVERIFIED - the copy completed without errors, but was not verified by SHA-256"
 if "%verdict%"=="FAIL" set "v_result=FAIL - "
 if "%verdict%"=="FAIL" if "%copy_status%"=="FAILED" set "v_result=%v_result%the copy failed; "
@@ -590,6 +656,7 @@ call :emit_kv "Finished (UTC)" end_iso
 call :emit_kv "Copy (robocopy)" v_copy
 call :emit_kv "Verification" v_verify
 if defined v_verify_detail call :emit_more v_verify_detail
+call :emit_kv "Metadata" v_meta
 call :emit_kv "Reference record" v_ref_used
 call :emit_kv "OVERALL RESULT" v_result
 call :emit_kv "Exit code" exit_code
@@ -998,7 +1065,7 @@ exit /b 0
 rem Set verify_status (PASS or FAIL), v_verify, v_verify_detail and v_ref_used.
 set "v_ref_used=%reference_name%"
 if not defined v_ref_used set "v_ref_used=none"
-set /a "c_bad=c_changed + c_missing + c_invalid + c_unreadable + n_anomalies + verify_incomplete"
+set /a "c_bad=c_changed + c_missing + c_invalid + c_unreadable + n_anomalies + verify_incomplete + m_differ + m_incomplete"
 set "verify_status=PASS"
 if %c_bad% neq 0 set "verify_status=FAIL"
 if %c_ok% equ 0 set "verify_status=FAIL"
@@ -1006,6 +1073,10 @@ set "v_verify=%verify_status%: %c_ok% of %c_rows% files in the reference record 
 set "v_verify_detail=%c_changed% differ, %c_missing% missing, %c_unreadable% unreadable, %c_invalid% invalid in the record; added since: %c_records% custody record(s), %c_added% other file(s)"
 if %verify_incomplete% neq 0 set "v_verify_detail=%v_verify_detail%; INCOMPLETE (see problems)"
 if %n_anomalies% neq 0 set "v_verify_detail=%v_verify_detail%; %n_anomalies% unexpected listing line(s)"
+set "v_meta=NOT RUN"
+if defined meta_ran set "v_meta=PASS: size and last-modified time match for every file (compared %meta_mode%)"
+if %m_differ% neq 0 set "v_meta=FAIL: %m_differ% file(s) differ in size or last-modified time, or were not copied"
+if %m_incomplete% neq 0 set "v_meta=FAIL: the comparison was incomplete"
 exit /b 0
 
 :is_sha256  hashVar
