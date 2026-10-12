@@ -45,7 +45,9 @@ scripts are restricted, so it can travel with the evidence too.
   in one **Warnings** section at the top of the log header (and repeated in
   the summary): the machine may sleep or hibernate (power plan or lid), the
   clock isn't synchronised with a time source, the destination is FAT32/FAT
-  or wasn't empty, no UTC time source worked.
+  or wasn't empty, a drive root holds fragments recovered by file-system
+  repairs (`FOUND.nnn`, `LOST.DIR`; copied as contents), no UTC time source
+  worked.
 - **What is preserved.** Data, attributes and timestamps of files and
   subfolders (`/copy:DAT /dcopy:DAT`), so anything hidden stays hidden;
   empty folders (`/e`). Junctions are not followed (`/xj`). Exact byte sizes
@@ -55,9 +57,16 @@ scripts are restricted, so it can travel with the evidence too.
   destination's permissions, since the source's users and groups usually
   don't exist on the target system.
 - **Source and destination folders are containers, not evidence:**
-  - `$RECYCLE.BIN` and `System Volume Information` are skipped only where
-    the source or destination is a drive root (`E:\`); anywhere else,
-    including any UNC path, they are copied as contents;
+  - at a drive root (`E:\`) only, the housekeeping that Windows, macOS and
+    Linux leave on drives they are plugged into is skipped. Each drive root
+    is checked first; only the items actually present are excluded, by exact
+    path, and the log lists each one. Folders: `$RECYCLE.BIN`, `RECYCLER`,
+    `RECYCLED`, `System Volume Information`, `.Trashes`, `.Spotlight-V100`,
+    `.fseventsd`, `.TemporaryItems`, `.DocumentRevisions-V100`, `.Trash-*`.
+    Files: `.DS_Store`, `._*`, `.apdisk`, `.VolumeIcon.icns`,
+    `.com.apple.timemachine.donotpresent`, `.metadata_never_index*`,
+    `Thumbs.db`, `.xdg-volume-info`, `.directory`. Anywhere else, including
+    inside evidence folders and on any UNC path, they are copied as contents;
   - any Read-only, Hidden or System attribute robocopy carries from the
     source folder onto the destination folder is cleared, unless the
     destination already had it.
@@ -80,7 +89,8 @@ Written to the destination root, named with the UTC start time:
   header in three sections (environment: script version, path and SHA-256,
   host, user, Windows version, elevation, UTC start, local offset, time
   source and last sync, options; source and destination: folder, volume
-  label, serial and file system, reference record), the robocopy output with
+  label, serial and file system, reference record, each housekeeping item
+  skipped at a drive root), the robocopy output with
   exact byte sizes, problems and the summary. Robocopy's Started/Ended times
   are local; its per-file times are UTC. The log is written to `%TEMP%`
   during the run and moved to the destination at the end. The log records
@@ -109,7 +119,7 @@ Warnings (read before relying on this copy)
   [WARN] On battery this machine sleeps after 15 min idle: keep it plugged in for the whole copy.
 
 Environment
-  Script            : evidence-robocopy 1.2.2
+  Script            : evidence-robocopy 1.3.0
   Script path       : E:\Tools\evidence-robocopy.bat
   Script SHA-256    : 5b1e...c09a
   Started (UTC)     : 2026-10-13T10:15:03Z (source: robocopy)
@@ -123,7 +133,7 @@ Environment
   robocopy          : C:\Windows\System32\Robocopy.exe
   certutil          : C:\Windows\System32\certutil.exe
   Sleep when idle   : never on mains; after 15 min on battery
-  Excluded          : "$RECYCLE.BIN" "System Volume Information" (only where a folder is a drive root)
+  Excluded          : volume housekeeping at a drive root only (see Source and Destination)
   Retries           : 1 x 2 s
   Progress          : log file (/np /tee)
   Verify            : SHA-256, every file
@@ -132,11 +142,13 @@ Source
   Contents of       : F:\Working\Case-0042\
   Volume            : Volume in drive F is WORK03; serial 6C2E-91A4; NTFS
   Hash record       : robocopy_20261009T141500Z_hashes_source.csv (oldest in the source; the destination is checked against it)
+  Skipped at root   : n/a (not a drive root)
 
 Destination
   Copied into       : \\nas01\cases\Case-0042\
   Was               : empty
   Volume            : n/a (network path)
+  Left alone at root: n/a (not a drive root)
   Log               : \\nas01\cases\Case-0042\robocopy_20261013T101503Z.log
   Log during run    : C:\Users\analyst2\AppData\Local\Temp\evidence-robocopy_20261013T101503Z_12345_robocopy_20261013T101503Z.log
 ===============================================================================

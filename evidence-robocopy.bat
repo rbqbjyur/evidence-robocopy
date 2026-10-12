@@ -28,7 +28,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 rem ============================== CONFIG =====================================
 
 set "SCRIPT_NAME=evidence-robocopy"
-set "SCRIPT_VERSION=1.2.2"
+set "SCRIPT_VERSION=1.3.0"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -46,13 +46,38 @@ rem kept within 1..THREAD_MAX (robocopy's /mt limit is 128).
 set "THREAD_DIVISOR=2"
 set "THREAD_MAX=128"
 
-rem Folders skipped only when the source or destination IS a drive root (E:\):
-rem quoted, space-separated. There they are the volume's recycle bin and
-rem system data, not evidence. Anywhere else (inside a folder, or any UNC
-rem path, which can't be told apart from a folder) they are contents and are
-rem copied: wrongly copying them fails visibly, wrongly skipping them would
-rem silently leave evidence out.
-set EXCLUDED_ROOT_DIRS="$RECYCLE.BIN" "System Volume Information"
+rem Volume housekeeping skipped only when the source or destination IS a
+rem drive root (E:\): what Windows, macOS and Linux leave on a drive they are
+rem plugged into, not evidence. Anywhere else (inside a folder, or any UNC
+rem path, which can't be told apart from a folder) these names are contents
+rem and are copied: wrongly copying them fails visibly, wrongly skipping them
+rem would silently leave evidence out. Before copying, each drive root is
+rem checked and only the items actually present are excluded, by exact path,
+rem and listed in the log. Items are separated by "|" (invalid in Windows
+rem names; a plain FOR would treat * and ? as a file search), * and ? are
+rem allowed. One row per origin: add a row, not code.
+rem Folders:
+rem   Windows: recycle bins (Vista+, 2000/XP/2003 NTFS, 9x/ME FAT), system data
+set "EXCLUDED_ROOT_DIRS=$RECYCLE.BIN|RECYCLER|RECYCLED|System Volume Information"
+rem   macOS: trash, Spotlight index, file-system events, temp, version store
+set "EXCLUDED_ROOT_DIRS=%EXCLUDED_ROOT_DIRS%|.Trashes|.Spotlight-V100|.fseventsd|.TemporaryItems|.DocumentRevisions-V100"
+rem   Linux desktops: trash on removable media, one per user (.Trash-<uid>)
+set "EXCLUDED_ROOT_DIRS=%EXCLUDED_ROOT_DIRS%|.Trash-*"
+rem Files:
+rem   macOS: Finder data, AppleDouble files, volume icon, Time Machine and
+rem   Spotlight markers
+set "EXCLUDED_ROOT_FILES=.DS_Store|._*|.apdisk|.VolumeIcon.icns|.com.apple.timemachine.donotpresent|.metadata_never_index*"
+rem   Windows: thumbnail cache
+set "EXCLUDED_ROOT_FILES=%EXCLUDED_ROOT_FILES%|Thumbs.db"
+rem   Linux desktops: GNOME volume info, KDE folder settings
+set "EXCLUDED_ROOT_FILES=%EXCLUDED_ROOT_FILES%|.xdg-volume-info|.directory"
+
+rem Folders of recovered fragments at a drive root ("|"-separated, * and ?
+rem allowed):
+rem chkdsk (FOUND.000, ...) and Android (LOST.DIR). They are copied as
+rem contents, never skipped (they may hold pieces of evidence files), but
+rem their presence means the drive has had file-system repairs: a warning.
+set "RECOVERED_ROOT_DIRS=FOUND.???|LOST.DIR"
 
 rem Copy passes, run in the order listed in COPY_PASSES. Fields per pass <id>:
 rem   PASS_<id>_LABEL    text shown in the console and log
@@ -323,20 +348,14 @@ set "dest_state=NOT empty (user chose to continue)"
 exit /b 0
 
 :destination_has_content
-rem Exit 0 if the destination folder exists and contains anything other than,
-rem at a drive root only, the EXCLUDED_ROOT_DIRS folders (which every drive
-rem root has).
-setlocal EnableDelayedExpansion
-if not exist "!destination_cmp!" (endlocal & exit /b 1)
-call :is_drive_root destination_cmp && (set "at_root=1") || set "at_root="
-set "found="
-for /f "delims=" %%E in ('dir /a /b "!destination_cmp!" 2^>nul') do if not defined found (
-    set "skip="
-    if defined at_root for %%D in (%EXCLUDED_ROOT_DIRS%) do if /i "%%E"=="%%~D" set "skip=1"
-    if not defined skip set "found=1"
-)
-if defined found (endlocal & exit /b 0)
-endlocal & exit /b 1
+rem Exit 0 if the destination folder exists and holds anything other than,
+rem at a drive root, the housekeeping items of EXCLUDED_ROOT_DIRS/FILES.
+if not exist "%destination_cmp%" exit /b 1
+set "dh_total=0"
+for /f "eol=/ delims=" %%E in ('dir /b /a "%destination_cmp%" 2^>nul') do set /a "dh_total+=1"
+call :find_root_baggage destination dh_baggage 0
+if %dh_total% gtr %dh_baggage% exit /b 0
+exit /b 1
 
 :ask_verify
 echo.
@@ -391,6 +410,8 @@ set "tmp_merge=%temp_prefix%_merge.tmp"
 set "tmp_merge_sorted=%temp_prefix%_merge_sorted.tmp"
 set "tmp_clock=%temp_prefix%_clock.tmp"
 set "tmp_warnings=%temp_prefix%_warnings.tmp"
+set "tmp_baggage_source=%temp_prefix%_baggage_source.tmp"
+set "tmp_baggage_destination=%temp_prefix%_baggage_destination.tmp"
 set "seal_name=robocopy_%run_ts%.sha256"
 set "seal_file=%destination_cmp%%seal_name%"
 set "reference_name="
@@ -431,7 +452,7 @@ set "v_script=%SCRIPT_NAME% %SCRIPT_VERSION%"
 set "v_started=%start_iso% (source: %start_method%)"
 set "v_offset=%utc_offset% (robocopy's Started/Ended times are local; its file times are UTC)"
 set "v_user=%USERDOMAIN%\%USERNAME%"
-set "v_excluded=%EXCLUDED_ROOT_DIRS% (only where a folder is a drive root)"
+set "v_excluded=volume housekeeping at a drive root only (see Source and Destination)"
 set "v_retries=%RETRY_COUNT% x %RETRY_WAIT_SECONDS% s"
 if "%verify%"=="1" (set "v_verify=SHA-256, every file") else set "v_verify=no"
 set "v_reference=not used (no verification)"
@@ -471,11 +492,13 @@ set "msg=Source" & call :emit msg
 call :emit_kv "Contents of" source_cmp
 call :emit_kv "Volume" v_src_volume
 call :emit_kv "Hash record" v_reference
+call :emit_baggage source "Skipped at root"
 set "msg=" & call :emit msg
 set "msg=Destination" & call :emit msg
 call :emit_kv "Copied into" destination_cmp
 call :emit_kv "Was" dest_state
 call :emit_kv "Volume" v_dst_volume
+call :emit_baggage destination "Left alone at root"
 call :emit_kv "Log" log_file
 if "%use_log%"=="1" call :emit_kv "Log during run" log_work
 set "msg================================================================================" & call :emit msg
@@ -487,14 +510,14 @@ setlocal EnableDelayedExpansion
 set "label=!PASS_%~1_LABEL!"
 set "threads=!PASS_%~1_THREADS!"
 if /i "!threads!"=="auto" call :auto_thread_count threads
-set "xd_args="
-call :add_root_exclusions source_cmp
-call :add_root_exclusions destination_cmp
+set "excl_args="
+call :add_root_exclusions source
+call :add_root_exclusions destination
 set "msg=" & call :emit msg
 set "msg=--- Copy pass: !label!, threads: !threads! ---" & call :emit msg
 set "log_args="
 if "!use_log!"=="1" set log_args=/log+:"!log_work!"
-robocopy "!source! " "!destination! " *.* !COPY_FLAGS! !PASS_%~1_FILTER! !PASS_%~1_FLAGS! /mt:!threads! /r:!RETRY_COUNT! /w:!RETRY_WAIT_SECONDS! !progress_flags! !backup_flag! !xd_args! !log_args!
+robocopy "!source! " "!destination! " *.* !COPY_FLAGS! !PASS_%~1_FILTER! !PASS_%~1_FLAGS! /mt:!threads! /r:!RETRY_COUNT! /w:!RETRY_WAIT_SECONDS! !progress_flags! !backup_flag! !excl_args! !log_args!
 set "rc=!errorlevel!"
 call :report_robocopy_rc rc
 endlocal & set /a "copy_rc|=%rc%" & exit /b 0
@@ -587,10 +610,10 @@ if defined fft set "time_mode=to 2 s (FAT/exFAT involved)"
 set "msg=" & call :emit msg
 set "msg=--- Metadata check: size and last-modified time, compared !time_mode! ---"
 call :emit msg
-set "xd_args="
-call :add_root_exclusions source_cmp
-call :add_root_exclusions destination_cmp
-robocopy "!source! " "!destination! " *.* !META_FLAGS! !fft! !backup_flag! !xd_args! >"!tmp_list!" 2>&1
+set "excl_args="
+call :add_root_exclusions source
+call :add_root_exclusions destination
+robocopy "!source! " "!destination! " *.* !META_FLAGS! !fft! !backup_flag! !excl_args! >"!tmp_list!" 2>&1
 set "rc=!errorlevel!"
 set "incomplete=0"
 if !rc! geq 8 (
@@ -720,10 +743,107 @@ if "%timestamp_warning%"=="1" (
     call :add_warning msg
 )
 if defined dst_fs if defined FS_WARN_%dst_fs% call :warn_destination_fs
+call :check_recovered_dirs
+call :find_root_baggage source n_baggage_src 1
+call :find_root_baggage destination n_baggage_dst 1
 if not "%dest_state%"=="empty" (
     set "msg=The destination was not empty (you chose to continue): robocopy overwrites same-named files that differ."
     call :add_warning msg
 )
+exit /b 0
+
+:check_recovered_dirs
+rem Warn if the source or destination drive root holds folders of recovered
+rem fragments (RECOVERED_ROOT_DIRS): the drive has had file-system repairs.
+for %%R in (source destination) do call :check_recovered_side %%R
+exit /b 0
+
+:check_recovered_side  side
+set "rc_hits="
+call :is_drive_root %~1_cmp || exit /b 0
+if "%~1"=="source" (set "fb_root=%source_cmp%") else set "fb_root=%destination_cmp%"
+call :each_item RECOVERED_ROOT_DIRS find_recovered
+if not defined rc_hits exit /b 0
+set "msg=The %~1 drive holds folders of fragments recovered by file-system repairs (%rc_hits%): the drive may have been damaged. They are copied as contents."
+call :add_warning msg
+exit /b 0
+
+:find_recovered  pattern
+for /f "eol=/ delims=" %%F in ('dir /b /ad "%fb_root%%~1" 2^>nul') do call :add_recovered_hit "%%F"
+exit /b 0
+
+:add_recovered_hit  name
+if defined rc_hits (set "rc_hits=%rc_hits%, %~1") else set "rc_hits=%~1"
+exit /b 0
+
+:find_root_baggage  side  countVar  write
+rem Find the housekeeping items present at the side's root, if it is a drive
+rem root: folders matching EXCLUDED_ROOT_DIRS and files matching
+rem EXCLUDED_ROOT_FILES. Sets countVar; with write=1 also records them as
+rem D:"name" / F:"name" lines in tmp_baggage_<side>, which drive the
+rem exclusions (:add_root_exclusions) and the log (:emit_baggage).
+set "fb_n=0"
+set "fb_file="
+if "%~1"=="source" (set "fb_root=%source_cmp%") else set "fb_root=%destination_cmp%"
+if "%~3"=="1" if "%~1"=="source" set "fb_file=%tmp_baggage_source%"
+if "%~3"=="1" if "%~1"=="destination" set "fb_file=%tmp_baggage_destination%"
+if defined fb_file type nul >"%fb_file%" 2>nul
+call :is_drive_root %~1_cmp || (
+    set "%~2=0"
+    exit /b 0
+)
+call :each_item EXCLUDED_ROOT_DIRS find_root_dir
+call :each_item EXCLUDED_ROOT_FILES find_root_file
+set "%~2=%fb_n%"
+exit /b 0
+
+:find_root_dir  pattern
+rem One folder pattern of EXCLUDED_ROOT_DIRS (see :find_root_baggage). An
+rem exact name is tested with IF EXIST (DIR on a folder lists its contents);
+rem a pattern with * or ? is expanded with DIR.
+echo(%~1| findstr /r "[*?]" >nul && goto find_root_dir_wild
+if exist "%fb_root%%~1\" call :record_baggage D "%~1"
+exit /b 0
+:find_root_dir_wild
+for /f "eol=/ delims=" %%F in ('dir /b /ad "%fb_root%%~1" 2^>nul') do call :record_baggage D "%%F"
+exit /b 0
+
+:find_root_file  pattern
+rem One file pattern of EXCLUDED_ROOT_FILES (see :find_root_baggage).
+for /f "eol=/ delims=" %%F in ('dir /b /a-d "%fb_root%%~1" 2^>nul') do call :record_baggage F "%%F"
+exit /b 0
+
+:record_baggage  kind  name
+rem Count one housekeeping item and, if recording, write it (see above).
+set /a "fb_n+=1"
+if defined fb_file >>"%fb_file%" echo(%~1:"%~2"
+exit /b 0
+
+:emit_baggage  side  label
+rem Emit "label : ..." for the housekeeping items skipped at the side's
+rem root, one per line, or why there are none.
+set "eb_text=n/a (not a drive root)"
+call :is_drive_root %~1_cmp || (
+    call :emit_kv "%~2" eb_text
+    exit /b 0
+)
+if "%~1"=="source" (set "eb_file=%tmp_baggage_source%") else set "eb_file=%tmp_baggage_destination%"
+set "eb_n=0"
+if exist "%eb_file%" for /f "usebackq tokens=1* delims=:" %%A in ("%eb_file%") do set /a "eb_n+=1"
+set "eb_text=none present"
+if %eb_n% gtr 0 set "eb_text=%eb_n% item(s), excluded by exact path:"
+call :emit_kv "%~2" eb_text
+if %eb_n% equ 0 exit /b 0
+for /f "usebackq tokens=1* delims=:" %%A in ("%eb_file%") do (
+    set "eb_name=%%~B"
+    if "%%A"=="D" (set "eb_kind=folder") else set "eb_kind=file"
+    call :emit_baggage_line
+)
+exit /b 0
+
+:emit_baggage_line
+set "msg=                      %eb_name% (%eb_kind%)"
+call :emit msg
 exit /b 0
 
 :add_warning  msgVar
@@ -1166,9 +1286,10 @@ rem Write every file under the root to the out file as a full path, one per
 rem line, using robocopy (sees Hidden/System files and long paths) and the
 rem same root exclusions as the copy. Exit 1 if robocopy reports a failure.
 setlocal EnableDelayedExpansion
-set "xd_args="
-call :add_root_exclusions %~1
-robocopy "!%~1! " "!temp_prefix!_nonexistent" *.* !LIST_FLAGS! !backup_flag! !xd_args! >"!%~2!" 2>&1
+set "excl_args="
+set "side=%~1"
+call :add_root_exclusions !side:_cmp=!
+robocopy "!%~1! " "!temp_prefix!_nonexistent" *.* !LIST_FLAGS! !backup_flag! !excl_args! >"!%~2!" 2>&1
 set "rc=!errorlevel!"
 if !rc! geq 8 (
     set "msg=[FAIL] Could not list every file under !%~1! (robocopy exit code !rc!)."
@@ -1231,15 +1352,22 @@ exit /b 0
 
 rem ---------------------------- Copy helpers ----------------------------------
 
-:add_root_exclusions  rootVar
-rem Append "/xd <root><dir>" entries for EXCLUDED_ROOT_DIRS to xd_args, only if
-rem the root is a drive root (see CONFIG). Caller's scope; the caller must have
-rem delayed expansion enabled.
-call :is_drive_root %~1 || exit /b 0
-for %%D in (%EXCLUDED_ROOT_DIRS%) do (
-    if not defined xd_args set "xd_args=/xd"
-    set "xd_args=!xd_args! "!%~1!%%~D""
+:add_root_exclusions  side
+rem Append "/xd" and "/xf" with the full paths of the housekeeping items
+rem found at the side's root (tmp_baggage_<side>) to excl_args. Caller's
+rem scope; the caller must have delayed expansion enabled. A name containing
+rem "!" can't be passed this way: that item is then copied, never dropped.
+set "ar_file=!tmp_baggage_%~1!"
+if not defined ar_file exit /b 0
+if not exist "!ar_file!" exit /b 0
+set "ar_xd="
+set "ar_xf="
+for /f "usebackq tokens=1* delims=:" %%A in ("!ar_file!") do (
+    if "%%A"=="D" set "ar_xd=!ar_xd! "!%~1_cmp!%%~B""
+    if "%%A"=="F" set "ar_xf=!ar_xf! "!%~1_cmp!%%~B""
 )
+if defined ar_xd set "excl_args=!excl_args! /xd!ar_xd!"
+if defined ar_xf set "excl_args=!excl_args! /xf!ar_xf!"
 exit /b 0
 
 :auto_thread_count  outVar
@@ -1575,6 +1703,24 @@ if not "!r:~3!"=="" (endlocal & exit /b 1)
 if not "!r:~1,2!"==":\" (endlocal & exit /b 1)
 endlocal & exit /b 0
 
+:each_item  listVar  callback
+rem Call :<callback> "<item>" for each "|"-separated item of the list
+rem variable. Splitting with FOR /F keeps * and ? intact (a plain FOR would
+rem treat them as a file search). Caller's scope, so the callback's
+rem variables persist; items are CONFIG values, safe to pass to CALL.
+set "ei_rest=%~1"
+call set "ei_rest=%%%ei_rest%%%"
+:each_item_loop
+if not defined ei_rest exit /b 0
+set "ei_item="
+for /f "tokens=1* delims=|" %%A in ("%ei_rest%") do (
+    set "ei_item=%%A"
+    set "ei_rest=%%B"
+)
+if not defined ei_item set "ei_rest="
+if defined ei_item call :%~2 "%ei_item%"
+goto each_item_loop
+
 :strlen  stringVar  outVar
 rem Length of a variable's value.
 setlocal EnableDelayedExpansion
@@ -1590,7 +1736,7 @@ exit /b 0
 :cleanup_temp
 rem Delete this run's temporary files; a failed delete never stops the run.
 setlocal EnableDelayedExpansion
-for %%T in (tmp_list tmp_rows_source tmp_rows_destination tmp_problems tmp_merge tmp_merge_sorted tmp_clock tmp_warnings) do (
+for %%T in (tmp_list tmp_rows_source tmp_rows_destination tmp_problems tmp_merge tmp_merge_sorted tmp_clock tmp_warnings tmp_baggage_source tmp_baggage_destination) do (
     if defined %%T if exist "!%%T!" del /f /q "!%%T!" >nul 2>&1
 )
 endlocal & exit /b 0
