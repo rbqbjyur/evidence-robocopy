@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.3.1 - 2026-10-13
+
+### Changed
+- The OS is named by product, edition and release (e.g. "Microsoft Windows
+  11 Pro 25H2"), without the build.
+- A source without a hash record is reported neutrally, with a warning,
+  instead of being described as a first copy.
+- Clearer log: source and destination hashing have their own headings;
+  tidier clock and metadata wording.
+
 ## 1.3.0 - 2026-10-12
 
 ### Added

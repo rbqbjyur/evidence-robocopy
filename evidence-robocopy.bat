@@ -28,7 +28,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 rem ============================== CONFIG =====================================
 
 set "SCRIPT_NAME=evidence-robocopy"
-set "SCRIPT_VERSION=1.3.0"
+set "SCRIPT_VERSION=1.3.1"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -223,11 +223,11 @@ echo.
 echo The script asks for: log file or ETA, source, destination, verification.
 echo Output in the destination root (timestamps are UTC):
 echo   robocopy_YYYYMMDDTHHMMSSZ.log                     (log mode only)
-echo   robocopy_YYYYMMDDTHHMMSSZ_hashes_source.csv       (first copy only)
+echo   robocopy_YYYYMMDDTHHMMSSZ_hashes_source.csv       (only if the source has none)
 echo   robocopy_YYYYMMDDTHHMMSSZ_hashes_destination.csv
 echo   robocopy_YYYYMMDDTHHMMSSZ.sha256                  (seal: hashes of the above)
 echo Verification compares the destination with the reference record: the
-echo oldest source hash record in the source, or on a first copy the source
+echo oldest source hash record in the source or, if it holds none, the source
 echo hashed now. Every file in it must be in the destination, unchanged, and
 echo every copied file must match its source in size and last-modified time.
 echo.
@@ -456,7 +456,7 @@ set "v_excluded=volume housekeeping at a drive root only (see Source and Destina
 set "v_retries=%RETRY_COUNT% x %RETRY_WAIT_SECONDS% s"
 if "%verify%"=="1" (set "v_verify=SHA-256, every file") else set "v_verify=no"
 set "v_reference=not used (no verification)"
-if "%verify%"=="1" set "v_reference=none yet: first copy, so the source is hashed and recorded"
+if "%verify%"=="1" set "v_reference=none found in the source root: the source is hashed and becomes the reference record"
 if defined reference_name set "v_reference=%reference_name% (oldest in the source; the destination is checked against it)"
 set "msg================================================================================" & call :emit msg
 set "msg=Warnings (read before relying on this copy)" & call :emit msg
@@ -478,7 +478,7 @@ call :emit_kv "Time source" v_time_source
 call :emit_kv "Last time sync" v_last_sync
 call :emit_kv "Host" COMPUTERNAME
 call :emit_kv "User" v_user
-call :emit_kv "Windows" windows_version
+call :emit_kv "OS" windows_version
 call :emit_kv "Elevated" elevated_text
 call :emit_kv "robocopy" robocopy_path
 call :emit_kv "certutil" certutil_path
@@ -562,8 +562,8 @@ endlocal & exit /b 0
 
 :verify_copy
 rem Hash the destination and compare it with the reference record: the oldest
-rem source hash record from the source, or on a first copy (no record yet)
-rem this run's own record of the source, made now. So the source is hashed
+rem source hash record from the source, or if the source holds none, this
+rem run's own record of the source, made now. So the source is hashed
 rem once per evidence set, and every later copy is checked back to it.
 set "msg=" & call :emit msg
 set "msg=--- Verification (SHA-256) ---" & call :emit msg
@@ -576,12 +576,15 @@ where /q certutil.exe || (
     exit /b 1
 )
 if not defined reference_name (
-    set "msg=No hash record in the source: first copy, so the source is hashed and recorded."
+    set "msg=" & call :emit msg
+    set "msg=--- Hashing the source (no hash record found in the source root): it becomes the reference record ---"
     call :emit msg
     call :hash_tree source_cmp source || set "verify_incomplete=1"
     call :write_hash_csv source
     set "reference_name=robocopy_%run_ts%_hashes_source.csv"
 )
+set "msg=" & call :emit msg
+set "msg=--- Hashing the destination ---" & call :emit msg
 call :hash_tree destination_cmp destination || set "verify_incomplete=1"
 call :write_hash_csv destination
 set "reference_csv=%destination_cmp%%reference_name%"
@@ -606,7 +609,7 @@ for %%F in (%COARSE_TIME_FILESYSTEMS%) do (
     if /i "!src_fs!"=="%%F" set "fft=/fft"
     if /i "!dst_fs!"=="%%F" set "fft=/fft"
 )
-if defined fft set "time_mode=to 2 s (FAT/exFAT involved)"
+if defined fft set "time_mode=to 2 s, as FAT/exFAT is involved"
 set "msg=" & call :emit msg
 set "msg=--- Metadata check: size and last-modified time, compared !time_mode! ---"
 call :emit msg
@@ -652,8 +655,8 @@ call :list_files %~1 tmp_list || set "ht_failed=1"
 set "n_listed=?"
 for /f %%N in ('find /c /v "" ^<"%tmp_list%" 2^>nul') do set "n_listed=%%N"
 rem The listing includes this run's own outputs already in the destination
-rem (the source CSV on a first copy); they are skipped, so leave them out of
-rem the total shown in the progress counter.
+rem (the source CSV, when the source had none); they are skipped, so leave
+rem them out of the total shown in the progress counter.
 if "%~2"=="destination" for %%O in (log_file csv_source csv_destination seal_file) do call :discount_output %%O
 for /f "usebackq tokens=*" %%L in ("%tmp_list%") do (
     set "entry=%%L"
@@ -746,6 +749,10 @@ if defined dst_fs if defined FS_WARN_%dst_fs% call :warn_destination_fs
 call :check_recovered_dirs
 call :find_root_baggage source n_baggage_src 1
 call :find_root_baggage destination n_baggage_dst 1
+if "%verify%"=="1" if not defined reference_name (
+    set "msg=No hash record was found in the source root: the source is hashed now and becomes the reference record, so this copy is not checked against any earlier record."
+    call :add_warning msg
+)
 if not "%dest_state%"=="empty" (
     set "msg=The destination was not empty (you chose to continue): robocopy overwrites same-named files that differ."
     call :add_warning msg
@@ -875,9 +882,9 @@ for /f "usebackq delims=" %%L in ("%tmp_clock%") do (
     set "cl_line=%%L"
     call :read_clock_line
 )
-findstr /i /c:"Local CMOS Clock" /c:"Free-running System Clock" "%tmp_clock%" >nul 2>&1 && set "clock_unsynced=1"
+if not defined clock_unsynced findstr /i /c:"Local CMOS Clock" /c:"Free-running System Clock" "%tmp_clock%" >nul 2>&1 && set "clock_unsynced=w32tm reports a local clock as its source"
 if defined clock_unsynced (
-    set "msg=The clock is not synchronised with a time source: times in this record rely on this machine's own clock."
+    set "msg=The clock is not synchronised with a time source (%clock_unsynced%): times in this record rely on this machine's own clock."
     call :add_warning msg
 )
 exit /b 0
@@ -886,7 +893,12 @@ exit /b 0
 rem One line of w32tm output (in cl_line): keep the value after "label: ".
 set /a "cl_n+=1"
 set "cl_v=%cl_line:*: =%"
-if %cl_n% equ 1 if "%cl_v:~0,1%"=="3" set "clock_unsynced=1"
+:read_clock_line_trim
+if "%cl_v:~-1%"==" " (
+    set "cl_v=%cl_v:~0,-1%"
+    goto read_clock_line_trim
+)
+if %cl_n% equ 1 if "%cl_v:~0,1%"=="3" set "clock_unsynced=w32tm reports leap indicator 3, not synchronised"
 if %cl_n% equ 7 set "v_last_sync=%cl_v% (local time, as w32tm reports it)"
 if %cl_n% equ 8 set "v_time_source=%cl_v%"
 exit /b 0
@@ -970,36 +982,30 @@ set /a "%~3_AC=!pv_prev!, %~3_DC=!pv_last!" 2>nul || (
 exit /b 0
 
 :describe_windows  outVar
-rem Windows as a person would name it, e.g. "Windows 11 Pro 25H2 (build
-rem 26200.9457)": ProductName from the registry, corrected to Windows 11 from
-rem build 22000 (the registry still says Windows 10 there), plus the release
-rem (DisplayVersion, or ReleaseId on older builds) and the full build. Same
-rem approach as the LiveResponse collector's registry fallback. Falls back
-rem to VER's output.
+rem The OS as a person would name it: product, edition and release, e.g.
+rem "Microsoft Windows 11 Pro 25H2", matching the form of WMI's Caption plus
+rem release used by the PowerShell tools. "Microsoft " + registry ProductName
+rem (corrected from "Windows 10" to "Windows 11" from build 22000, where the
+rem registry still says 10) + DisplayVersion, or ReleaseId on older builds.
+rem The build is read only for that correction, never shown.
 setlocal EnableDelayedExpansion
 set "cv=HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
-for %%V in (ProductName DisplayVersion ReleaseId CurrentBuild UBR) do (
+for %%V in (ProductName DisplayVersion ReleaseId CurrentBuild) do (
     set "w_%%V="
     for /f "tokens=2,*" %%A in ('reg query "!cv!" /v %%V 2^>nul ^| find /i "%%V"') do set "w_%%V=%%B"
 )
 if not defined w_ProductName (
-    set "text=unknown"
-    for /f "delims=" %%V in ('ver') do set "text=%%V"
-    goto describe_windows_done
+    endlocal
+    set "%~1=unknown (ProductName not readable)"
+    exit /b 0
 )
+set "build=0"
 set /a "build=w_CurrentBuild" 2>nul
 if !build! geq 22000 set "w_ProductName=!w_ProductName:Windows 10=Windows 11!"
 set "release=!w_DisplayVersion!"
 if not defined release set "release=!w_ReleaseId!"
-set "text=!w_ProductName!"
+set "text=Microsoft !w_ProductName!"
 if defined release set "text=!text! !release!"
-set "full_build=!w_CurrentBuild!"
-if defined w_UBR (
-    set /a "ubr=!w_UBR!" 2>nul
-    set "full_build=!full_build!.!ubr!"
-)
-set "text=!text! (build !full_build!)"
-:describe_windows_done
 endlocal & set "%~1=%text%"
 exit /b 0
 
@@ -1075,7 +1081,7 @@ rem root (robocopy_<UTC>_hashes_source.csv, oldest by name, as names start
 rem with the UTC time; names without a timestamp are ignored). It is chosen
 rem from the source, so an unrelated older record already in a non-empty
 rem destination can't be picked, and read from the destination after the
-rem copy. Sets reference_name, or leaves it empty on a first copy.
+rem copy. Sets reference_name, or leaves it empty if the source holds none.
 for /f "delims=" %%F in ('dir /b /a-d /on "%source_cmp%robocopy_*_hashes_source.csv" 2^>nul') do (
     if not defined reference_name call :consider_reference "%%F"
 )

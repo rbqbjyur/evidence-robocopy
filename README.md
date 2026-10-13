@@ -14,9 +14,9 @@ scripts are restricted, so it can travel with the evidence too.
 
 ## What it does
 
-- **SHA-256 verification against a reference record.** On the first copy
-  of an evidence set (no hash record in the source yet), the source is
-  hashed and recorded. That record is the reference for this and every
+- **SHA-256 verification against a reference record.** If the source holds
+  no hash record from an earlier copy, the source is hashed and recorded,
+  and a warning says so. That record is the reference for this and every
   later copy: each copy hashes its destination with `certutil` and compares
   every file by relative path, so it is checked back to the original record,
   not only to its immediate source. Later copies don't hash the source again.
@@ -96,7 +96,8 @@ Written to the destination root, named with the UTC start time:
   during the run and moved to the destination at the end. The log records
   the process; the hash CSVs are the authoritative per-file record.
 - `robocopy_YYYYMMDDTHHMMSSZ_hashes_destination.csv` (when verifying), and
-  on the first copy also `..._hashes_source.csv`, the reference record:
+  when the source holds no hash record also `..._hashes_source.csv`, the
+  reference record:
   `"File","SHA-256"`, one row per file, sorted by relative path. A set ends
   up with one source record and one destination record per copy. A file
   that could not be hashed has `UNREADABLE` in place of a hash; zero-byte
@@ -110,114 +111,119 @@ Later copies carry these files along and hash them as contents.
 
 ## Example
 
-A second copy of an E01 set, from a working copy to a NAS. The log
-(robocopy's file lists shortened to `...`):
+A first copy of loose-file evidence from a folder on an internal drive to an
+exFAT USB drive, run without elevation. Real output, anonymised (host, user,
+paths, volume labels and serials replaced; times, counts, sizes and results
+as recorded), with robocopy's file lists left out:
 
 ```
 ===============================================================================
 Warnings (read before relying on this copy)
-  [WARN] On battery this machine sleeps after 15 min idle: keep it plugged in for the whole copy.
+  [WARN] The clock is not synchronised with a time source (w32tm reports leap indicator 3, not synchronised): times in this record rely on this machine's own clock.
+  [WARN] No hash record was found in the source root: the source is hashed now and becomes the reference record, so this copy is not checked against any earlier record.
 
 Environment
-  Script            : evidence-robocopy 1.3.0
+  Script            : evidence-robocopy 1.3.1
   Script path       : E:\Tools\evidence-robocopy.bat
-  Script SHA-256    : 5b1e...c09a
-  Started (UTC)     : 2026-10-13T10:15:03Z (source: robocopy)
+  Script SHA-256    : aa39c8b2f286d2c03ad409ff8a5dae2656e94f68625102ea111c9da0a72aeb3e
+  Started (UTC)     : 2026-10-13T12:57:01Z (source: robocopy)
   Local UTC offset  : +01:00 (robocopy's Started/Ended times are local; its file times are UTC)
   Time source       : time.windows.com,0x9
-  Last time sync    : 13/10/2026 09:58:12 (local time, as w32tm reports it)
-  Host              : LAB-WS07
-  User              : LAB\analyst2
-  Windows           : Windows 11 Enterprise 24H2 (build 26100.4061)
-  Elevated          : yes (detected by fsutil), backup mode /b
+  Last time sync    : 13/10/2026 12:11:01 (local time, as w32tm reports it)
+  Host              : WORKSTATION-01
+  User              : WORKSTATION-01\analyst
+  OS                : Microsoft Windows 11 Pro 25H2
+  Elevated          : no
   robocopy          : C:\Windows\System32\Robocopy.exe
   certutil          : C:\Windows\System32\certutil.exe
-  Sleep when idle   : never on mains; after 15 min on battery
+  Sleep when idle   : never, on mains or battery
   Excluded          : volume housekeeping at a drive root only (see Source and Destination)
   Retries           : 1 x 2 s
   Progress          : log file (/np /tee)
   Verify            : SHA-256, every file
 
 Source
-  Contents of       : F:\Working\Case-0042\
-  Volume            : Volume in drive F is WORK03; serial 6C2E-91A4; NTFS
-  Hash record       : robocopy_20261009T141500Z_hashes_source.csv (oldest in the source; the destination is checked against it)
+  Contents of       : C:\Cases\Case-0042\
+  Volume            : Volume in drive C is OS; serial 1A2B-3C4D; file system unknown
+  Hash record       : none found in the source root: the source is hashed and becomes the reference record
   Skipped at root   : n/a (not a drive root)
 
 Destination
-  Copied into       : \\nas01\cases\Case-0042\
+  Copied into       : I:\Case-0042\
   Was               : empty
-  Volume            : n/a (network path)
+  Volume            : Volume in drive I is EVIDENCE01; serial 5E6F-7A8B; exFAT
   Left alone at root: n/a (not a drive root)
-  Log               : \\nas01\cases\Case-0042\robocopy_20261013T101503Z.log
-  Log during run    : C:\Users\analyst2\AppData\Local\Temp\evidence-robocopy_20261013T101503Z_12345_robocopy_20261013T101503Z.log
+  Log               : I:\Case-0042\robocopy_20261013T125701Z.log
+  Log during run    : C:\Users\analyst\AppData\Local\Temp\evidence-robocopy_20261013T125701Z_7836_robocopy_20261013T125701Z.log
 ===============================================================================
 
 --- Copy pass: Large files (100 MiB and over), threads: 1 ---
-
--------------------------------------------------------------------------------
-   ROBOCOPY     ::     Robust File Copy for Windows
--------------------------------------------------------------------------------
-
-  Started : Tuesday 13 October 2026 11:15:04
-   Source : F:\Working\Case-0042\
-     Dest : \\nas01\cases\Case-0042\
-  Options : *.* /V /X /TS /FP /BYTES /TEE /S /E /DCOPY:DAT /COPY:DAT /B /J /NP /XJ /MIN:104857600 /MT:1 /R:1 /W:2
 ...
-	    New File  		2097152000 2026/10/09 13:40:12	F:\Working\Case-0042\PC01.E01
-	    New File  		2097152000 2026/10/09 13:47:55	F:\Working\Case-0042\PC01.E02
+  Options : *.* /V /X /TS /FP /BYTES /TEE /S /E /DCOPY:DAT /COPY:DAT /J /NP /XJ /MIN:104857600 /MT:1 /R:1 /W:2
 ...
                Total    Copied   Skipped  Mismatch    FAILED    Extras
-    Dirs :         1         1         0         0         0         0
-   Files :        10         5         5         0         0         0
+    Dirs :         7         7         1         0         0         0
+   Files :        28         1        27         0         0         0
+   Bytes : 330770479 178021472 152749007         0         0         0
+   Times :   0:00:08   0:00:02                       0:00:00   0:00:02
 ...
 Robocopy exit code: 1
   [INFO] Files were copied.
 
---- Copy pass: Small files (under 100 MiB), threads: 4 ---
+--- Copy pass: Small files (under 100 MiB), threads: 8 ---
+...
+               Total    Copied   Skipped  Mismatch    FAILED    Extras
+    Dirs :         7         7         7         0         0         0
+   Files :        28        27         1         0         0         0
+   Bytes : 330770479 152749007 178021472         0         0         0
+   Times :   0:00:25   0:00:03                       0:00:00   0:00:00
 ...
 Robocopy exit code: 1
   [INFO] Files were copied.
 
-Destination folder attributes unchanged.
+Destination folder: cleared Read-only (carried over from the source folder).
 
 --- Verification (SHA-256) ---
 
---- Metadata check: size and last-modified time, compared exact ---
+--- Metadata check: size and last-modified time, compared to 2 s, as FAT/exFAT is involved ---
 
---- Destination vs reference record: robocopy_20261009T141500Z_hashes_source.csv ---
+--- Hashing the source (no hash record found in the source root): it becomes the reference record ---
+
+--- Hashing the destination ---
+
+--- Destination vs reference record: robocopy_20261013T125701Z_hashes_source.csv ---
 
 ===============================================================================
 Result
-  Finished (UTC)    : 2026-10-13T10:41:37Z
+  Finished (UTC)    : 2026-10-13T12:57:20Z
   Copy (robocopy)   : OK (robocopy exit codes combined: 1)
-  Verification      : PASS: 6 of 6 files in the reference record match the destination
-                      0 differ, 0 missing, 0 unreadable, 0 invalid in the record; added since: 4 custody record(s), 0 other file(s)
-  Metadata          : PASS: size and last-modified time match for every file (compared exact)
-  Reference record  : robocopy_20261009T141500Z_hashes_source.csv
+  Verification      : PASS: 28 of 28 files in the reference record match the destination
+                      0 differ, 0 missing, 0 unreadable, 0 invalid in the record; added since: 0 custody record(s), 0 other file(s)
+  Metadata          : PASS: size and last-modified time match for every file (compared to 2 s, as FAT/exFAT is involved)
+  Reference record  : robocopy_20261013T125701Z_hashes_source.csv
   OVERALL RESULT    : PASS - the copy completed, every file in the reference record is in the destination with the same SHA-256, and size and last-modified time match the source
   Exit code         : 0
-  Log               : \\nas01\cases\Case-0042\robocopy_20261013T101503Z.log
+  Log               : I:\Case-0042\robocopy_20261013T125701Z.log
 ===============================================================================
 ```
 
 After the log is saved, the console also shows the seal:
 
 ```
-Custody records sealed in: robocopy_20261013T101503Z.sha256
-  SHA-256: 8f03...b6d1
+Custody records sealed in: robocopy_20261013T125701Z.sha256
+  SHA-256: 73a3c0cdc56e0e718fcb4cfcf90e33cfeb43175c5e5ccada680d5474ee596d2c
 Record this value in your chain-of-custody notes: it shows whether this
 run's log and hash CSVs are later changed.
 ```
 
 A failed check is listed where it is found and again in the summary, e.g.
-`[FAIL] DIFFERS from the reference record: PC01.E03`, with
+`[FAIL] DIFFERS from the reference record: <file>`, with
 `OVERALL RESULT : FAIL - the SHA-256 verification failed; see the problems listed`.
 
 ## Requirements
 
 - Windows with `robocopy` and `certutil` (both built in). Tested on
-  Windows 11 (build 26200). Copying folder attributes (`/dcopy:DAT`) needs a
+  Microsoft Windows 11 Pro 25H2. Copying folder attributes (`/dcopy:DAT`) needs a
   recent robocopy; Windows 7's only supports `/dcopy:T`. Older versions are
   untested.
 - For the UTC time it uses robocopy's clock plus the registry time-zone bias
