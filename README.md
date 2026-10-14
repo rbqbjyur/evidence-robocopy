@@ -2,11 +2,15 @@
 
 A Windows batch wrapper around robocopy for copying digital evidence between
 drives as it moves around a lab (master to working copies, to servers, to
-archive), with SHA-256 hash verification and chain-of-custody records. Built
-first for forensic images (E01/EWF, single or split), and also usable for
-loose-file evidence such as eDiscovery collections. A verified copy leaves its
-log and hash records with the evidence, so the records of each copy travel
-with it.
+archive), with SHA-256 hash verification and chain-of-custody records. It
+copies files of any kind: forensic images in any format (E01/EWF, raw/dd,
+mobile extractions and so on) and loose files such as eDiscovery
+collections. Every copy is logged and verified by default, and its records
+stay with the evidence, together with the script itself.
+
+Robocopy can be run many ways. This script fixes one documented methodology
+for evidence, so every copy is made the same way and leaves a record that can
+be audited, repeated and defended later.
 
 It is a batch file on purpose: it uses only tools built into Windows and runs
 wherever robocopy does, including workstations where PowerShell or `.ps1`
@@ -14,6 +18,16 @@ scripts are restricted, so it can travel with the evidence too.
 
 ## What it does
 
+- **Forensic by default.** Every run keeps a log file and verifies every
+  file, without asking. `/nonforensic` asks whether to keep a log (or show
+  ETA instead) and whether to verify; dropping either is for non-evidence
+  copies and has to be confirmed.
+- **The script travels with the evidence.** Kept in the evidence folder
+  with its logs, it offers that folder as the default source.
+  Run from elsewhere, it places a copy of itself beside the logs in the
+  destination, unless the source already holds one, and checks the copy's
+  SHA-256 against the run's log. Copies of the script at a root count as
+  custody records, not evidence, so updating it never fails a later copy.
 - **SHA-256 verification against a reference record.** If the source holds
   no hash record from an earlier copy, the source is hashed and recorded,
   and a warning says so. That record is the reference for this and every
@@ -37,7 +51,7 @@ scripts are restricted, so it can travel with the evidence too.
   |------------|-----------|---------|
   | PASS       | 0         | The copy completed, every file in the reference record is in the destination with the same SHA-256, and sizes and last-modified times match the source. |
   | FAIL       | 1         | The copy failed, a file in the reference record differs, is missing or unreadable, a file's size or last-modified time differs, or the run could not start. |
-  | UNVERIFIED | 2         | Copied without failures; verification (SHA-256 and metadata) not requested. |
+  | UNVERIFIED | 2         | Copied without failures; verification (SHA-256 and metadata) declined with `/nonforensic`. |
 
   Files added since the reference record are listed as warnings and don't
   fail the run.
@@ -73,13 +87,12 @@ scripts are restricted, so it can travel with the evidence too.
 - **Copying:** two passes, files of 100 MiB or more unbuffered (`/j`) and
   single-threaded, smaller files with half the logical processors (1–128).
   A failed file is retried once after 2 s, so real failures surface quickly.
-- **Prompts:** log file or on-screen ETA, source, destination, and whether
-  to verify. ETA mode (no log) and declining verification are for
-  non-evidence copies, and each has to be confirmed. Paths can be typed,
-  pasted with quotes, or dragged in; relative paths, and a source and
-  destination that are the same or inside each other, are refused. A
-  destination that already holds files has to be confirmed (robocopy
-  overwrites same-named files that differ).
+- **Prompts:** source (default: the script's folder, when it holds
+  anything besides the script) and destination. Paths can be typed, pasted with
+  quotes, or dragged in; relative paths, and a source and destination that
+  are the same or inside each other, are refused. A destination that
+  already holds files has to be confirmed (robocopy overwrites same-named
+  files that differ).
 
 ## Output
 
@@ -103,7 +116,10 @@ Written to the destination root, named with the UTC start time:
   that could not be hashed has `UNREADABLE` in place of a hash; zero-byte
   files get the SHA-256 of empty input (`certutil` can't hash them).
 - `robocopy_YYYYMMDDTHHMMSSZ.sha256`, the seal: the SHA-256 of this run's log
-  and CSVs. Its own SHA-256 is shown at the end of the run.
+  and CSVs (and of the script copy, if one was placed). Its own SHA-256 is
+  shown at the end of the run.
+- `evidence-robocopy.bat`: a copy of the script, if the source root held
+  none.
 
 All of a run's files share its UTC start time in their names.
 
@@ -111,25 +127,26 @@ Later copies carry these files along and hash them as contents.
 
 ## Example
 
-A first copy of loose-file evidence from a folder on an internal drive to an
-exFAT USB drive, run without elevation. Real output, anonymised (host, user,
-paths, volume labels and serials replaced; times, counts, sizes and results
-as recorded), with robocopy's file lists left out:
+A first copy of an evidence folder on an exFAT USB drive to an internal
+drive, with the script kept in the evidence folder and the source picked by
+pressing Enter; not elevated. Real output, anonymised (host, user, paths,
+volume labels and serials replaced; times, counts, sizes and results as
+recorded), with robocopy's file lists left out:
 
 ```
 ===============================================================================
 Warnings (read before relying on this copy)
-  [WARN] The clock is not synchronised with a time source (w32tm reports leap indicator 3, not synchronised): times in this record rely on this machine's own clock.
   [WARN] No hash record was found in the source root: the source is hashed now and becomes the reference record, so this copy is not checked against any earlier record.
 
 Environment
-  Script            : evidence-robocopy 1.3.1
-  Script path       : E:\Tools\evidence-robocopy.bat
-  Script SHA-256    : aa39c8b2f286d2c03ad409ff8a5dae2656e94f68625102ea111c9da0a72aeb3e
-  Started (UTC)     : 2026-10-13T12:57:01Z (source: robocopy)
+  Script            : evidence-robocopy 1.4.0
+  Script path       : E:\Case-0042\evidence-robocopy.bat
+  Script SHA-256    : 2997e6e847a3d7cba98172ce835fc4b0e068ea2e9001920dd4c46527fea1dfe5
+  Mode              : forensic (default): log file and SHA-256 verification
+  Started (UTC)     : 2026-10-14T16:09:09Z (source: robocopy)
   Local UTC offset  : +01:00 (robocopy's Started/Ended times are local; its file times are UTC)
   Time source       : time.windows.com,0x9
-  Last time sync    : 13/10/2026 12:11:01 (local time, as w32tm reports it)
+  Last time sync    : 14/10/2026 16:59:34 (local time, as w32tm reports it)
   Host              : WORKSTATION-01
   User              : WORKSTATION-01\analyst
   OS                : Microsoft Windows 11 Pro 25H2
@@ -140,21 +157,22 @@ Environment
   Excluded          : volume housekeeping at a drive root only (see Source and Destination)
   Retries           : 1 x 2 s
   Progress          : log file (/np /tee)
-  Verify            : SHA-256, every file
+  Verify            : SHA-256 hash and metadata (size, last-modified time), every file
 
 Source
-  Contents of       : C:\Cases\Case-0042\
-  Volume            : Volume in drive C is OS; serial 1A2B-3C4D; file system unknown
+  Contents of       : E:\Case-0042\
+  Chosen            : the script's folder (the default, taken with Enter)
+  Volume            : Volume in drive E is EVIDENCE01; serial 1A2B-3C4D; exFAT
   Hash record       : none found in the source root: the source is hashed and becomes the reference record
   Skipped at root   : n/a (not a drive root)
 
 Destination
-  Copied into       : I:\Case-0042\
+  Copied into       : C:\Cases\Case-0042\
   Was               : empty
-  Volume            : Volume in drive I is EVIDENCE01; serial 5E6F-7A8B; exFAT
+  Volume            : Volume in drive C is OS; serial 5E6F-7A8B; file system unknown
   Left alone at root: n/a (not a drive root)
-  Log               : I:\Case-0042\robocopy_20261013T125701Z.log
-  Log during run    : C:\Users\analyst\AppData\Local\Temp\evidence-robocopy_20261013T125701Z_7836_robocopy_20261013T125701Z.log
+  Log               : C:\Cases\Case-0042\robocopy_20261014T160909Z.log
+  Log during run    : C:\Users\analyst\AppData\Local\Temp\evidence-robocopy_20261014T160909Z_22671_robocopy_20261014T160909Z.log
 ===============================================================================
 
 --- Copy pass: Large files (100 MiB and over), threads: 1 ---
@@ -162,28 +180,27 @@ Destination
   Options : *.* /V /X /TS /FP /BYTES /TEE /S /E /DCOPY:DAT /COPY:DAT /J /NP /XJ /MIN:104857600 /MT:1 /R:1 /W:2
 ...
                Total    Copied   Skipped  Mismatch    FAILED    Extras
-    Dirs :         7         7         1         0         0         0
-   Files :        28         1        27         0         0         0
-   Bytes : 330770479 178021472 152749007         0         0         0
-   Times :   0:00:08   0:00:02                       0:00:00   0:00:02
+    Dirs :         6         6         1         0         0         0
+   Files :        32         0        32         0         0         0
+   Bytes :  17325358         0  17325358         0         0         0
 ...
-Robocopy exit code: 1
-  [INFO] Files were copied.
+Robocopy exit code: 0
+  [INFO] No files were copied in this pass.
 
 --- Copy pass: Small files (under 100 MiB), threads: 8 ---
 ...
                Total    Copied   Skipped  Mismatch    FAILED    Extras
-    Dirs :         7         7         7         0         0         0
-   Files :        28        27         1         0         0         0
-   Bytes : 330770479 152749007 178021472         0         0         0
-   Times :   0:00:25   0:00:03                       0:00:00   0:00:00
+    Dirs :         6         6         6         0         0         0
+   Files :        32        32         0         0         0         0
+   Bytes :  17325358  17325358         0         0         0         0
+   Times :   0:00:03   0:00:00                       0:00:00   0:00:00
 ...
 Robocopy exit code: 1
   [INFO] Files were copied.
 
-Destination folder: cleared Read-only (carried over from the source folder).
+Destination folder attributes unchanged.
 
---- Verification (SHA-256) ---
+--- Verification: metadata and SHA-256 hashes ---
 
 --- Metadata check: size and last-modified time, compared to 2 s, as FAT/exFAT is involved ---
 
@@ -191,27 +208,32 @@ Destination folder: cleared Read-only (carried over from the source folder).
 
 --- Hashing the destination ---
 
---- Destination vs reference record: robocopy_20261013T125701Z_hashes_source.csv ---
+--- Destination vs reference record: robocopy_20261014T160909Z_hashes_source.csv ---
 
 ===============================================================================
 Result
-  Finished (UTC)    : 2026-10-13T12:57:20Z
+  Finished (UTC)    : 2026-10-14T16:09:17Z
+
   Copy (robocopy)   : OK (robocopy exit codes combined: 1)
-  Verification      : PASS: 28 of 28 files in the reference record match the destination
-                      0 differ, 0 missing, 0 unreadable, 0 invalid in the record; added since: 0 custody record(s), 0 other file(s)
+  Hash (SHA-256)    : PASS: 31 of 31 files in the reference record match the destination
+                      0 differ, 0 missing, 0 unreadable, 0 invalid in the record; added since: 1 custody record(s), 0 other file(s)
   Metadata          : PASS: size and last-modified time match for every file (compared to 2 s, as FAT/exFAT is involved)
-  Reference record  : robocopy_20261013T125701Z_hashes_source.csv
+
+  Reference record  : robocopy_20261014T160909Z_hashes_source.csv
+  Script copy       : not needed: the source holds a copy, copied with the evidence
+
   OVERALL RESULT    : PASS - the copy completed, every file in the reference record is in the destination with the same SHA-256, and size and last-modified time match the source
   Exit code         : 0
-  Log               : I:\Case-0042\robocopy_20261013T125701Z.log
+  Log               : C:\Cases\Case-0042\robocopy_20261014T160909Z.log
 ===============================================================================
 ```
 
-After the log is saved, the console also shows the seal:
+The custody record "added since" is the script itself, which travelled with
+the evidence. After the log is saved, the console also shows the seal:
 
 ```
-Custody records sealed in: robocopy_20261013T125701Z.sha256
-  SHA-256: 73a3c0cdc56e0e718fcb4cfcf90e33cfeb43175c5e5ccada680d5474ee596d2c
+Custody records sealed in: robocopy_20261014T160909Z.sha256
+  SHA-256: 4113f49d07bdce52e08dc1223ca4e70c7a86c2666421457fea7dcb95a909a6b8
 Record this value in your chain-of-custody notes: it shows whether this
 run's log and hash CSVs are later changed.
 ```
@@ -223,9 +245,9 @@ A failed check is listed where it is found and again in the summary, e.g.
 ## Requirements
 
 - Windows with `robocopy` and `certutil` (both built in). Tested on
-  Microsoft Windows 11 Pro 25H2. Copying folder attributes (`/dcopy:DAT`) needs a
-  recent robocopy; Windows 7's only supports `/dcopy:T`. Older versions are
-  untested.
+  Microsoft Windows 11 Pro 25H2. Copying folder attributes (`/dcopy:DAT`)
+  needs a recent robocopy; Windows 7's only supports `/dcopy:T`. Older
+  versions are untested.
 - For the UTC time it uses robocopy's clock plus the registry time-zone bias
   (`ActiveTimeBias`), falling back to `wmic` where present.
 - Administrator rights are optional; they enable backup mode and, on some
@@ -234,8 +256,13 @@ A failed check is listed where it is found and again in the summary, e.g.
 
 ## Usage
 
-Run `evidence-robocopy.bat` (as administrator for backup mode) and answer the
-prompts. `evidence-robocopy.bat /?` shows a short help.
+```
+evidence-robocopy.bat                 forensic mode (default): log and verification
+evidence-robocopy.bat /nonforensic    choose whether to keep a log and verify
+evidence-robocopy.bat /?              help
+```
+
+Run as administrator for backup mode. Any other argument stops the run.
 
 ## What it does not do
 

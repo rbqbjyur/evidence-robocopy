@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.4.0 - 2026-10-14
+
+### Added
+- `/nonforensic`: asks whether to keep a log and whether to verify, each
+  with a confirmation, as before. Any other argument stops the run.
+- The script travels with the evidence: Enter at the source prompt picks
+  the script's folder; run from elsewhere, it places a verified
+  copy of itself beside the logs. Script copies at a root are custody
+  records, not evidence.
+
+### Changed
+- Forensic mode is the default: a log file is kept and every file is
+  verified without asking; only the source and destination are prompted.
+  The log header records the mode.
+
+- Summary names each check (Hash (SHA-256), Metadata) and is grouped;
+  shorter path prompts with the default path shown above the prompt;
+  licence in the banner.
+
+### Fixed
+- A robocopy pass that copied nothing (exit code 0) is reported as "No files
+  were copied in this pass", not as the destination already matching.
+
 ## 1.3.1 - 2026-10-13
 
 ### Changed

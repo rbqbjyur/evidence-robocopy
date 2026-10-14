@@ -5,9 +5,13 @@ rem evidence-robocopy - copy evidence between drives with robocopy (E01/EWF
 rem image sets first and foremost, and loose files), verify every file by
 rem SHA-256 against a reference record, and leave chain-of-custody records.
 rem
-rem Usage:   evidence-robocopy.bat       double-click or run from cmd; run as
-rem                                      administrator for backup mode (/b)
+rem Usage:   evidence-robocopy.bat       forensic mode (default): log file and
+rem                                      SHA-256 verification, no questions
+rem                                      beyond source and destination
+rem          evidence-robocopy.bat /nonforensic
+rem                                      ask whether to keep a log and verify
 rem          evidence-robocopy.bat /?    show help
+rem          Run as administrator for backup mode (/b).
 rem Exit:    0 PASS, 1 FAIL, 2 UNVERIFIED (see EXIT_CODE_* in CONFIG)
 rem Changes: see CHANGELOG.md. Licence: 0BSD, see LICENSE.
 rem
@@ -28,7 +32,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 rem ============================== CONFIG =====================================
 
 set "SCRIPT_NAME=evidence-robocopy"
-set "SCRIPT_VERSION=1.3.1"
+set "SCRIPT_VERSION=1.4.0"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -142,6 +146,16 @@ rem source folder's name and icon (e.g. Downloads). Fields per row, separated
 rem by ":": position in a FOR %%~a attribute string, attrib letter, name.
 set "CONTAINER_ATTRS=1:r:Read-only 3:h:Hidden 4:s:System"
 
+rem The script travels with the evidence (expected layout: the evidence, the
+rem script's logs and the script, together in one folder). A copy of the
+rem script at a source or destination root is a custody tool, like the logs,
+rem not evidence: root files named SCRIPT_FILE_PREFIX*SCRIPT_FILE_EXT are left
+rem out of the source hash record and counted as custody records in the
+rem destination (so updating the script never fails a later copy). They are
+rem still copied, and covered by the metadata check.
+set "SCRIPT_FILE_PREFIX=evidence-robocopy"
+set "SCRIPT_FILE_EXT=.bat"
+
 rem SHA-256 of zero bytes. certutil -hashfile fails on empty files, so a file
 rem that certutil can't hash but whose size is 0 gets this value.
 set "EMPTY_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -186,8 +200,11 @@ rem =============================== MAIN ======================================
 
 if "%~1"=="/?" goto :show_help
 set "script_path=%~f0"
+set "script_file_name=%~nx0"
+set "script_dir=%~dp0"
 
 call :init_state
+call :parse_args "%~1" "%~2" || goto :abort
 call :show_banner
 call :check_robocopy || goto :abort
 call :detect_admin
@@ -200,6 +217,7 @@ call :write_header
 for %%P in (%COPY_PASSES%) do call :run_copy_pass %%P
 call :restore_destination_attributes
 if "%verify%"=="1" call :verify_copy
+call :place_script_copy
 call :finish
 call :publish_log
 call :write_seal
@@ -220,7 +238,14 @@ echo then optionally compares the SHA-256 of every file. The two folders are
 echo containers, not evidence: their own attributes are not carried across.
 echo Run as administrator to use backup mode (/b).
 echo.
-echo The script asks for: log file or ETA, source, destination, verification.
+echo Default (forensic mode): a log file is kept and every file is verified by
+echo SHA-256; the script asks only for the source and destination.
+echo /nonforensic: also asks whether to keep a log (or show ETA instead) and
+echo whether to verify, each with a confirmation, for non-evidence copies.
+echo The script is meant to travel with the evidence: run from the evidence
+echo folder, Enter at the source prompt picks that folder. Run
+echo from elsewhere, it puts a copy of itself beside the logs in the
+echo destination, unless the source already holds one.
 echo Output in the destination root (timestamps are UTC):
 echo   robocopy_YYYYMMDDTHHMMSSZ.log                     (log mode only)
 echo   robocopy_YYYYMMDDTHHMMSSZ_hashes_source.csv       (only if the source has none)
@@ -244,12 +269,37 @@ set "n_warnings=0"
 set "meta_mode=exact"
 set "meta_ran="
 set "exit_code=%EXIT_CODE_FAIL%"
+set "v_script_copy=not attempted"
+set "script_copy_file="
+exit /b 0
+
+:parse_args  arg1  arg2
+rem Forensic mode unless /nonforensic is given. Anything else (an unknown
+rem option, a folder dropped on the script, a second argument) stops the run,
+rem so a typo can't silently fall back to a different mode than intended.
+set "mode=forensic"
+if /i "%~1"=="/nonforensic" set "mode=nonforensic"
+if "%mode%"=="forensic" if not "%~1"=="" (
+    set "abort_reason=Unknown option. Run with /? for the options."
+    exit /b 1
+)
+if not "%~2"=="" (
+    set "abort_reason=Too many options. Run with /? for the options."
+    exit /b 1
+)
+if "%mode%"=="forensic" (
+    set "mode_text=forensic (default): log file and SHA-256 verification"
+) else (
+    set "mode_text=non-forensic (/nonforensic): log and verification chosen at the prompts"
+)
 exit /b 0
 
 :show_banner
 echo Script: %SCRIPT_NAME%
 echo Version: %SCRIPT_VERSION%
 echo Author: outis
+echo Licence: 0BSD
+echo.
 echo Tip: disable AV real-time scanning when copying many small files.
 echo Tip: don't click inside this window while it runs: a QuickEdit selection
 echo      pauses the copy until you press Esc.
@@ -294,7 +344,14 @@ exit /b %errorlevel%
 
 :ask_progress_mode
 rem Log mode and ETA mode are deliberately exclusive: robocopy's progress
-rem output would make the log unreadable, so the user picks one.
+rem output would make the log unreadable, so the user picks one. Forensic
+rem mode (the default) always keeps the log and doesn't ask.
+if not "%mode%"=="nonforensic" (
+    set "use_log=1"
+    set "progress_flags=/np /tee"
+    set "progress_text=log file (/np /tee)"
+    exit /b 0
+)
 echo Would you prefer a log file, or ETA and percentage?
 echo 1. Log file (but no ETA or percentage). Use this for evidence.
 echo 2. ETA and percentage (no log file: for non-evidence copies only)
@@ -325,11 +382,15 @@ exit /b 0
 
 :ask_paths
 echo The CONTENTS of the source folder are copied into the destination folder.
-echo Enter full paths (quotation marks are optional; you can drag folders in).
+call :find_default_source
 :ask_paths_loop
-call :ask_directory source "SOURCE folder (its contents are copied)" 1 || exit /b 1
+echo.
+call :ask_directory source "SOURCE folder" 1 1 || exit /b 1
+set "source_how=entered at the prompt"
+if defined dir_used_default set "source_how=the script's folder (the default, taken with Enter)"
 :ask_paths_destination
-call :ask_directory destination "DESTINATION folder (contents are copied into it)" 0 || exit /b 1
+echo.
+call :ask_directory destination "DESTINATION folder" 0 0 || exit /b 1
 call :paths_overlap && (
     echo Source and destination must not be the same, or inside each other.
     echo.
@@ -347,6 +408,17 @@ if "%dest_choice%"=="2" goto ask_paths_destination
 set "dest_state=NOT empty (user chose to continue)"
 exit /b 0
 
+:find_default_source
+rem Offer the script's own folder as the default source when it holds
+rem anything besides the script (evidence, logs and script kept together).
+set "default_source="
+set "path_in=%script_dir%"
+call :normalise_path || exit /b 0
+set "fd_n=0"
+for /f "eol=/ delims=" %%E in ('dir /b /a "%path_cmp%" 2^>nul') do set /a "fd_n+=1"
+if %fd_n% gtr 1 set "default_source=%path_out%"
+exit /b 0
+
 :destination_has_content
 rem Exit 0 if the destination folder exists and holds anything other than,
 rem at a drive root, the housekeeping items of EXCLUDED_ROOT_DIRS/FILES.
@@ -358,6 +430,11 @@ if %dh_total% gtr %dh_baggage% exit /b 0
 exit /b 1
 
 :ask_verify
+rem Forensic mode (the default) always verifies and doesn't ask.
+if not "%mode%"=="nonforensic" (
+    set "verify=1"
+    exit /b 0
+)
 echo.
 echo Once complete, compare the SHA-256 of every file?
 echo 1. Compare SHA-256. Use this for evidence.
@@ -454,7 +531,7 @@ set "v_offset=%utc_offset% (robocopy's Started/Ended times are local; its file t
 set "v_user=%USERDOMAIN%\%USERNAME%"
 set "v_excluded=volume housekeeping at a drive root only (see Source and Destination)"
 set "v_retries=%RETRY_COUNT% x %RETRY_WAIT_SECONDS% s"
-if "%verify%"=="1" (set "v_verify=SHA-256, every file") else set "v_verify=no"
+if "%verify%"=="1" (set "v_verify=SHA-256 hash and metadata (size, last-modified time), every file") else set "v_verify=no"
 set "v_reference=not used (no verification)"
 if "%verify%"=="1" set "v_reference=none found in the source root: the source is hashed and becomes the reference record"
 if defined reference_name set "v_reference=%reference_name% (oldest in the source; the destination is checked against it)"
@@ -472,6 +549,7 @@ set "msg=Environment" & call :emit msg
 call :emit_kv "Script" v_script
 call :emit_kv "Script path" script_path
 call :emit_kv "Script SHA-256" script_sha256
+call :emit_kv "Mode" mode_text
 call :emit_kv "Started (UTC)" v_started
 call :emit_kv "Local UTC offset" v_offset
 call :emit_kv "Time source" v_time_source
@@ -490,6 +568,7 @@ call :emit_kv "Verify" v_verify
 set "msg=" & call :emit msg
 set "msg=Source" & call :emit msg
 call :emit_kv "Contents of" source_cmp
+call :emit_kv "Chosen" source_how
 call :emit_kv "Volume" v_src_volume
 call :emit_kv "Hash record" v_reference
 call :emit_baggage source "Skipped at root"
@@ -566,7 +645,7 @@ rem source hash record from the source, or if the source holds none, this
 rem run's own record of the source, made now. So the source is hashed
 rem once per evidence set, and every later copy is checked back to it.
 set "msg=" & call :emit msg
-set "msg=--- Verification (SHA-256) ---" & call :emit msg
+set "msg=--- Verification: metadata and SHA-256 hashes ---" & call :emit msg
 call :check_metadata
 where /q certutil.exe || (
     set "msg=[FAIL] certutil.exe not found: verification could not run."
@@ -658,6 +737,7 @@ rem The listing includes this run's own outputs already in the destination
 rem (the source CSV, when the source had none); they are skipped, so leave
 rem them out of the total shown in the progress counter.
 if "%~2"=="destination" for %%O in (log_file csv_source csv_destination seal_file) do call :discount_output %%O
+if "%~2"=="source" if not "%n_listed%"=="?" for /f "eol=/ delims=" %%F in ('dir /b /a-d "%source_cmp%%SCRIPT_FILE_PREFIX%*%SCRIPT_FILE_EXT%" 2^>nul') do set /a "n_listed-=1"
 for /f "usebackq tokens=*" %%L in ("%tmp_list%") do (
     set "entry=%%L"
     call :hash_listed_entry %~1 %~2
@@ -707,11 +787,15 @@ set "msg=" & call :emit msg
 set "msg================================================================================" & call :emit msg
 set "msg=Result" & call :emit msg
 call :emit_kv "Finished (UTC)" end_iso
+set "msg=" & call :emit msg
 call :emit_kv "Copy (robocopy)" v_copy
-call :emit_kv "Verification" v_verify
+call :emit_kv "Hash (SHA-256)" v_verify
 if defined v_verify_detail call :emit_more v_verify_detail
 call :emit_kv "Metadata" v_meta
+set "msg=" & call :emit msg
 call :emit_kv "Reference record" v_ref_used
+call :emit_kv "Script copy" v_script_copy
+set "msg=" & call :emit msg
 call :emit_kv "OVERALL RESULT" v_result
 call :emit_kv "Exit code" exit_code
 call :emit_kv "Log" log_file
@@ -1075,6 +1159,39 @@ endlocal & exit /b 1
 
 rem ---------------------- Chain of custody helpers ---------------------------
 
+:place_script_copy
+rem The script travels with the evidence. If the source root holds a copy of
+rem it, that copy went across with the evidence. Otherwise put a copy of this
+rem script beside the logs in the destination, check it against the Script
+rem SHA-256 in the header, and seal it with the logs. Never overwrites a file.
+set "sc_has="
+for /f "eol=/ delims=" %%F in ('dir /b /a-d "%source_cmp%%SCRIPT_FILE_PREFIX%*%SCRIPT_FILE_EXT%" 2^>nul') do set "sc_has=1"
+if defined sc_has (
+    set "v_script_copy=not needed: the source holds a copy, copied with the evidence"
+    exit /b 0
+)
+set "sc_target=%destination_cmp%%script_file_name%"
+if exist "%sc_target%" (
+    set "v_script_copy=not placed: the destination already holds a file named %script_file_name%"
+    set "msg=[WARN] The script was not copied to the destination: a file named %script_file_name% is already there."
+    call :emit msg
+    call :add_problem msg
+    exit /b 0
+)
+copy /b "%script_path%" "%sc_target%" >nul 2>&1
+set "sc_hash="
+if exist "%sc_target%" call :get_sha256 sc_target sc_hash
+if defined sc_hash if /i "%sc_hash%"=="%script_sha256%" (
+    set "v_script_copy=placed in the destination as %script_file_name%; its SHA-256 matches the Script SHA-256 above"
+    set "script_copy_file=%sc_target%"
+    exit /b 0
+)
+set "v_script_copy=FAILED: no verified copy of the script in the destination"
+set "msg=[WARN] Could not place a verified copy of the script in the destination."
+call :emit msg
+call :add_problem msg
+exit /b 0
+
 :find_reference_csv
 rem Find the reference record: the oldest source hash record in the source
 rem root (robocopy_<UTC>_hashes_source.csv, oldest by name, as names start
@@ -1209,6 +1326,10 @@ if "!cs_rel:\=!"=="!cs_rel!" if /i "!cs_rel:~0,9!"=="robocopy_" (
     set "d_records=1"
     exit /b 0
 )
+call :is_script_copy cs_rel && (
+    set "d_records=1"
+    exit /b 0
+)
 set "msg=[WARN] Not in the reference record (added since, so not verified against it): !cs_rel!"
 call :emit msg
 call :add_problem msg
@@ -1256,9 +1377,12 @@ rem Seal this run's custody records: write the SHA-256 of the log and hash
 rem CSVs to robocopy_<UTC>.sha256 in the destination, then show the seal's
 rem own SHA-256 for the user's chain-of-custody notes. With that value
 rem recorded elsewhere, any later change to these records can be detected.
+rem With neither a log nor hash CSVs there is no record to seal, so a copy of
+rem the script alone isn't sealed either.
+if not "%use_log%"=="1" if not "%verify%"=="1" exit /b 0
 setlocal EnableDelayedExpansion
 set "sealed=0"
-for %%F in (log_file csv_source csv_destination) do (
+for %%F in (log_file csv_source csv_destination script_copy_file) do (
     if exist "!%%F!" (
         set "sf=!%%F!"
         call :get_sha256 sf sh
@@ -1318,6 +1442,7 @@ call :relative_path full %~1 rel || (
     endlocal & set /a "n_anomalies+=1" & exit /b 0
 )
 for %%O in (log_file csv_source csv_destination seal_file) do if /i "!full!"=="!%%O!" (endlocal & exit /b 0)
+if "%~2"=="source" call :is_script_copy rel && (endlocal & exit /b 0)
 set /a "seq=n_hashed_%~2 + 1"
 set "msg=[!seq!/!n_listed!] Hashing %~2: !rel!" & call :say msg
 call :get_sha256 full h
@@ -1393,7 +1518,7 @@ setlocal EnableDelayedExpansion
 set /a "rc=!%~1!"
 set "msg=Robocopy exit code: !rc!" & call :emit msg
 if !rc! equ 0 (
-    set "msg=  [INFO] Nothing needed copying: the destination already matched."
+    set "msg=  [INFO] No files were copied in this pass."
     call :emit msg
 )
 for %%B in (%RC_BITS%) do (
@@ -1431,11 +1556,15 @@ if not defined chosen (
 endlocal & set "%~1=%chosen%"
 exit /b 0
 
-:ask_directory  outVar  prompt  mustExist
+:ask_directory  outVar  prompt  mustExist  allowDefault
 rem Prompt with "<prompt>: " for a directory until it is valid. Sets outVar
-rem (full path) and outVar_cmp (full path with a trailing backslash). Exit 1
-rem (with abort_reason) after MAX_PROMPT_ATTEMPTS invalid answers.
+rem (full path) and outVar_cmp (full path with a trailing backslash). With
+rem allowDefault=1, default_source is shown on the line above the prompt and
+rem an empty answer takes it (sets dir_used_default). Anything that isn't a
+rem full path is simply asked again. Exit 1 (with abort_reason) after
+rem MAX_PROMPT_ATTEMPTS invalid answers.
 set "dir_tries=0"
+set "dir_used_default="
 :ask_directory_loop
 set /a "dir_tries+=1"
 if %dir_tries% gtr %MAX_PROMPT_ATTEMPTS% (
@@ -1443,12 +1572,18 @@ if %dir_tries% gtr %MAX_PROMPT_ATTEMPTS% (
     exit /b 1
 )
 set "path_in="
-set /p "path_in=%~2: "
-call :normalise_path
-if errorlevel 1 (
-    echo Enter a full path, e.g. E:\Evidence or \\server\share\Evidence
-    goto ask_directory_loop
+set "dir_used_default="
+if "%~4"=="1" if defined default_source (
+    set "msg=Default (the script's folder): %default_source%"
+    call :say msg
 )
+set /p "path_in=%~2: "
+if not defined path_in if "%~4"=="1" if defined default_source (
+    set "path_in=%default_source%"
+    set "dir_used_default=1"
+)
+call :normalise_path
+if errorlevel 1 goto ask_directory_loop
 if exist "%path_out%" if not exist "%path_cmp%" (
     echo That is a file, not a directory.
     goto ask_directory_loop
@@ -1700,6 +1835,18 @@ for %%N in (!rp_len!) do (
 if /i not "!rp_prefix!"=="!%~2!" exit /b 1
 if not defined %~3 exit /b 1
 exit /b 0
+
+:is_script_copy  relVar
+rem Exit 0 if the relative path is a root-level copy of this script:
+rem SCRIPT_FILE_PREFIX ... SCRIPT_FILE_EXT, case-insensitive.
+setlocal EnableDelayedExpansion
+set "r=!%~1!"
+if not "!r:\=!"=="!r!" (endlocal & exit /b 1)
+call :strlen SCRIPT_FILE_PREFIX pl
+call :strlen SCRIPT_FILE_EXT el
+for %%P in (!pl!) do if /i not "!r:~0,%%P!"=="!SCRIPT_FILE_PREFIX!" (endlocal & exit /b 1)
+for %%E in (!el!) do if /i not "!r:~-%%E!"=="!SCRIPT_FILE_EXT!" (endlocal & exit /b 1)
+endlocal & exit /b 0
 
 :is_drive_root  pathVar
 rem Exit 0 if the path (in its trailing-backslash form) is a drive root: "X:\".
