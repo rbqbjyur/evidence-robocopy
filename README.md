@@ -154,9 +154,9 @@ Warnings (read before relying on this copy)
   [WARN] No hash record was found in the source root: the source is hashed now and becomes the reference record, so this copy is not checked against any earlier record.
 
 Environment
-  Script            : evidence-robocopy 1.5.0
+  Script            : evidence-robocopy 1.5.1
   Script path       : E:\Case-0042\evidence-robocopy.bat
-  Script SHA-256    : 234a0079cf932562daf7479771f4b24b187544c9bd41ec1832f5a0bdc9057d6b
+  Script SHA-256    : 3c087f9fca4cbd2a1129cc15606b057e2fbabe170653282cc2a3f362fbc92596
   Mode              : forensic (default): log file and SHA-256 verification
   Started (UTC)     : 2026-10-14T16:09:09Z (source: robocopy)
   Local UTC offset  : +01:00 (robocopy's Started/Ended times are local; its file times are UTC)
@@ -313,23 +313,25 @@ Run as administrator for backup mode. Any other argument stops the run.
 Behaviour is set by tables in the CONFIG section at the top of the script,
 each documented beside it, so most changes are a new row rather than code:
 
-- `EXCLUDED_ROOT_DIRS`, `EXCLUDED_ROOT_FILES`: housekeeping skipped at a
-  drive root, one row per origin (Windows, macOS, Linux).
-- `RECOVERED_ROOT_DIRS`: root folders that raise the recovered-fragments
-  warning.
+- `DRIVE_ROOT_HOUSEKEEPING_DIRS`, `DRIVE_ROOT_HOUSEKEEPING_FILES`:
+  housekeeping skipped at a drive root, one row per origin (Windows, macOS,
+  Linux).
+- `DRIVE_ROOT_RECOVERED_DIRS`: drive-root folders that raise the
+  recovered-fragments warning.
 - `COPY_PASSES`, `PASS_<id>_*`: the robocopy passes (size split, threads,
   flags).
-- `RC_<bit>_*`: what each robocopy exit-code bit means and whether it fails
-  the copy.
-- `FS_WARN_<file system>`: destination file systems that get a warning.
+- `ROBOCOPY_EXIT_<bit>_*`: what each robocopy exit-code bit means and whether
+  it fails the copy.
+- `FILESYSTEM_WARNING_<file system>`: destination file systems that get a
+  warning.
 - `SLEEP_SETTINGS`: power settings read for the sleep advice.
-- `CONTAINER_ATTRS`: attributes cleared from the destination folder.
-- `UTC_METHODS`, `ADMIN_CHECKS`, `FS_METHODS`: ordered fallbacks; each
-  name is a helper (`:utc_from_<name>`, `:admin_check_<name>`,
-  `:fs_from_<name>`).
+- `CONTAINER_ATTRIBUTES`: attributes cleared from the destination folder.
+- `UTC_METHODS`, `ELEVATION_CHECKS`, `FILESYSTEM_METHODS`: ordered
+  fallbacks; each name is a helper (`:utc_from_<name>`,
+  `:elevation_check_<name>`, `:filesystem_from_<name>`).
 
-The script header lists the batch conventions (paths with special
-characters, output to console and log, error handling).
+The script header lists the conventions for contributors: naming, paths
+with special characters, what goes to the console and what to the log.
 
 ## Licence
 

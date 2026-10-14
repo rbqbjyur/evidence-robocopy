@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.5.1 - 2026-10-14
+
+### Changed
+- Script rewritten for review: full-word names that match what each
+  variable holds or each function does, one meaning per variable, inputs
+  passed as parameters, forensic defaults set visibly in MAIN, no clever
+  constructs. CONFIG tables renamed accordingly (see README, Extending).
+  Output unchanged, except that an empty reference record now says so.
+
 ## 1.5.0 - 2026-10-14
 
 ### Added
