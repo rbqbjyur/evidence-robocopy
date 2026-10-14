@@ -46,7 +46,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 rem ============================== CONFIG =====================================
 
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=1.5.1"
+set "TOOL_VERSION=1.5.2"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -269,7 +269,7 @@ echo whether to verify, each with a confirmation, for non-evidence copies.
 echo The script is meant to travel with the evidence: run from the evidence
 echo folder, Enter at the source prompt picks that folder. Run
 echo from elsewhere, it puts a copy of itself beside the logs in the
-echo destination, unless the source already holds one.
+echo destination, unless the source already holds one (log mode only).
 echo Output in the destination root (timestamps are UTC):
 echo   robocopy_YYYYMMDDTHHMMSSZ.log                     (log mode only)
 echo   robocopy_YYYYMMDDTHHMMSSZ_hashes_source.csv       (only if the source has none)
@@ -444,7 +444,8 @@ set "temp_hash_rows_source=%temp_path_prefix%_source.tmp"
 set "temp_hash_rows_destination=%temp_path_prefix%_destination.tmp"
 set "temp_compare_lines=%temp_path_prefix%_compare.tmp"
 set "temp_compare_lines_sorted=%temp_path_prefix%_compare_sorted.tmp"
-set "temp_problems=%temp_path_prefix%_problems.tmp"
+set "temp_summary_warnings=%temp_path_prefix%_summary_warnings.tmp"
+set "temp_summary_failures=%temp_path_prefix%_summary_failures.tmp"
 set "temp_warnings=%temp_path_prefix%_warnings.tmp"
 set "temp_clock_status=%temp_path_prefix%_clock.tmp"
 set "temp_housekeeping_source=%temp_path_prefix%_housekeeping_source.tmp"
@@ -770,26 +771,30 @@ call :log_field "Script copy" result_script_copy
 call :log_field "Reference record" result_reference
 if defined reference_seal_result_text call :log_field_continued reference_seal_result_text
 call :log_field "Log" log_destination_text
+rem Warnings that did not fail the run, then the overall result, each check
+rem that feeds into it in the order they ran and what the result covers,
+rem then everything that failed the run.
 set "msg=" & call :show_and_log msg
-rem The overall result, each check that feeds into it in the order they ran,
-rem and what the result covers.
+call :log_summary_list "Warnings (did not fail the run)" warnings
+set "msg=" & call :show_and_log msg
 call :log_result_line "OVERALL RESULT" result_overall
 call :log_check_line "Copy (robocopy)" result_copy
 call :log_check_line "Metadata" result_metadata
 call :log_check_line "Hash (SHA-256)" result_hash result_hash_detail
 call :show_and_log result_meaning
+set "msg=" & call :show_and_log msg
+call :log_summary_list "Failures" failures
 set "msg================================================================================" & call :show_and_log msg
-call :show_problems
 exit /b 0
 
 :describe_failure
 rem The closing line of a FAIL summary: each failed check, in the order they
-rem ran, then a pointer to the problems.
+rem ran, then a pointer to the failures listed below the result.
 set "result_meaning="
 if not "%copy_status%"=="PASS" call :add_failure_clause "The copy failed" "the copy failed"
 if "%verification_enabled%"=="1" if not "%metadata_status%"=="PASS" call :add_failure_clause "The metadata check failed" "the metadata check failed"
 if "%verification_enabled%"=="1" if not "%hash_status%"=="PASS" call :add_failure_clause "The SHA-256 verification failed" "the SHA-256 verification failed"
-call :add_failure_clause "See the problems listed" "see the problems listed"
+call :add_failure_clause "See the failures listed below" "see the failures listed below"
 exit /b 0
 
 :add_failure_clause  asFirstClause  asLaterClause
@@ -961,10 +966,10 @@ endlocal & exit /b 0
 
 :add_warning  msgVar
 rem Add "[WARN] <text>" to the warnings list (the first section of the log
-rem header) and to the problems listed at the end of the run.
+rem header) and to the warnings repeated in the summary.
 setlocal EnableDelayedExpansion
 >>"!temp_warnings!" echo([WARN] !%~1!
->>"!temp_problems!" echo([WARN] !%~1!
+>>"!temp_summary_warnings!" echo([WARN] !%~1!
 endlocal & exit /b 0
 
 :read_clock_status
@@ -1255,7 +1260,12 @@ rem The script travels with the evidence. If the source root holds a copy of
 rem it, that copy went across with the evidence. Otherwise add a copy of this
 rem script to the custody records (staging folder), check it against the
 rem Script SHA-256 in the header, and seal it with them. Never overwrites a
-rem file in the destination.
+rem file in the destination. Without a log (ETA mode) the run is a plain copy
+rem with no custody record for the script to travel with, so none is placed.
+if not "%log_enabled%"=="1" (
+    set "result_script_copy=not placed: no log kept (ETA mode)"
+    exit /b 0
+)
 set "script_copy_in_source="
 for /f "eol=/ delims=" %%F in ('dir /b /a-d "%source_with_backslash%%SCRIPT_FILE_PREFIX%*%SCRIPT_FILE_EXT%" 2^>nul') do set "script_copy_in_source=1"
 if defined script_copy_in_source (
@@ -1527,7 +1537,7 @@ if %hash_problem_count% neq 0 set "hash_status=FAIL"
 if %match_count% equ 0 set "hash_status=FAIL"
 set "result_hash=%hash_status%: %match_count% of %reference_row_count% files in the reference record match the destination"
 set "result_hash_detail=%differ_count% differ, %missing_count% missing, %unreadable_count% unreadable, %invalid_row_count% invalid in the record; added since: %added_record_count% custody record(s), %added_other_count% other file(s)"
-if %hash_check_incomplete% neq 0 set "result_hash_detail=%result_hash_detail%; INCOMPLETE (see problems)"
+if %hash_check_incomplete% neq 0 set "result_hash_detail=%result_hash_detail%; INCOMPLETE (see failures)"
 if %unexpected_listing_lines% neq 0 set "result_hash_detail=%result_hash_detail%; %unexpected_listing_lines% unexpected listing line(s)"
 if %reference_seal_failed% neq 0 set "result_hash_detail=%result_hash_detail%; the reference record failed its seal check"
 if %hash_check_incomplete% equ 0 if %reference_row_count% equ 0 set "result_hash_detail=%result_hash_detail%; the reference record lists no files"
@@ -1698,7 +1708,7 @@ exit /b 0
 
 :report_robocopy_exit_code  exitCodeVar
 rem Explain each bit set in a robocopy exit code (see ROBOCOPY_EXIT_* in
-rem CONFIG); anything but INFO goes on the problems list.
+rem CONFIG); anything but INFO is listed in the summary (:remember_problem).
 setlocal EnableDelayedExpansion
 set /a "robocopy_exit_code=!%~1!"
 set "msg=Robocopy exit code: !robocopy_exit_code!" & call :show_and_log msg
@@ -2126,19 +2136,40 @@ call :show_and_log msg
 endlocal & exit /b 0
 
 :remember_problem  msgVar
-rem Add a line to the problems listed at the end of the run.
+rem Remember a [FAIL] or [WARN] line for the summary: [FAIL] lines (anything
+rem that fails the run) go to the failures listed below the result, all others
+rem to the warnings listed above it. Leading spaces are dropped.
 setlocal EnableDelayedExpansion
->>"!temp_problems!" echo(!%~1!
+set "line=!%~1!"
+:remember_problem_trim
+if "!line:~0,1!"==" " (
+    set "line=!line:~1!"
+    goto remember_problem_trim
+)
+if "!line:[FAIL]=!"=="!line!" (
+    >>"!temp_summary_warnings!" echo(!line!
+) else (
+    >>"!temp_summary_failures!" echo(!line!
+)
 endlocal & exit /b 0
 
-:show_problems
-rem List the remembered problems on the console at the end of the run (in
-rem log mode each is also in the log, where it was found).
-setlocal EnableDelayedExpansion
-if not exist "!temp_problems!" (endlocal & exit /b 0)
-echo.
-echo Problems found during this run:
-type "!temp_problems!"
+:log_summary_list  title  kind
+rem Show and log a titled list for the summary, one item per line, or
+rem "none". kind is "warnings" or "failures".
+setlocal DisableDelayedExpansion
+if "%~2"=="failures" (set "list_path=%temp_summary_failures%") else set "list_path=%temp_summary_warnings%"
+set "msg=  %~1"
+call :show_and_log msg
+set "item_count=0"
+if exist "%list_path%" for /f "usebackq delims=" %%L in ("%list_path%") do (
+    set "msg=    %%L"
+    call :show_and_log msg
+    set /a "item_count+=1"
+)
+if %item_count% equ 0 (
+    set "msg=    none"
+    call :show_and_log msg
+)
 endlocal & exit /b 0
 
 :relative_path  fullVar  baseVar  outVar
@@ -2210,7 +2241,7 @@ exit /b 0
 :cleanup_temp
 rem Delete this run's temporary files; a failed delete never stops the run.
 setlocal EnableDelayedExpansion
-for %%T in (temp_file_list temp_metadata_list temp_hash_rows_source temp_hash_rows_destination temp_compare_lines temp_compare_lines_sorted temp_problems temp_warnings temp_clock_status temp_housekeeping_source temp_housekeeping_destination) do (
+for %%T in (temp_file_list temp_metadata_list temp_hash_rows_source temp_hash_rows_destination temp_compare_lines temp_compare_lines_sorted temp_summary_warnings temp_summary_failures temp_warnings temp_clock_status temp_housekeeping_source temp_housekeeping_destination) do (
     if defined %%T if exist "!%%T!" del /f /q "!%%T!" >nul 2>&1
 )
 rem The staging folder goes only if empty: if it still holds records,

@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.5.2 - 2026-10-14
+
+### Changed
+- In ETA mode (`/nonforensic`, no log) the script no longer places a copy
+  of itself in the destination: the copy carries no custody record for it
+  to travel with.
+
+### Fixed
+- The end-of-run list of warnings and failures was shown on screen only.
+  It is now part of the summary, in the log too: warnings that didn't fail
+  the run just above the overall result, everything that failed it just
+  below.
+
 ## 1.5.1 - 2026-10-14
 
 ### Changed

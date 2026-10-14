@@ -23,20 +23,21 @@ scripts are restricted, so it can travel with the evidence too.
   ETA instead) and whether to verify; dropping either is for non-evidence
   copies and has to be confirmed.
 - **The script travels with the evidence.** Kept in the evidence folder
-  with its logs, it offers that folder as the default source.
-  Run from elsewhere, it places a copy of itself beside the logs in the
-  destination, unless the source already holds one, and checks the copy's
-  SHA-256 against the run's log. Copies of the script at a root count as
-  custody records, not evidence, so updating it never fails a later copy.
+  with its logs, it offers that folder as the default source. Run from
+  elsewhere, it places a copy of itself beside the logs in the destination,
+  unless the source already holds one, and checks the copy's SHA-256
+  against the run's log. Without a log (`/nonforensic`, ETA mode) no copy
+  is placed. Copies of the script at a root count as custody
+  records, not evidence, so updating it never fails a later copy.
 - **SHA-256 verification against a reference record.** If the source holds
   no hash record from an earlier copy, the source is hashed and recorded,
   and a warning says so. That record is the reference for this and every
   later copy: each copy hashes its destination with `certutil` and compares
   every file by relative path, so it is checked back to the original record,
-  not only to its immediate source. Later copies don't hash the source again;
-  they first check the reference record against its own run's seal, so a
-  record changed since it was made fails the run (a reference record with no
-  seal gets a warning). Files that differ, are missing or are
+  not only to its immediate source. Later copies don't hash the source
+  again; they first check the reference record against its own run's seal,
+  so a record changed since it was made fails the run (a reference record
+  with no seal gets a warning). Files that differ, are missing or are
   unreadable fail the run.
 - **Verified from the drive, not from memory.** Every copy pass and the
   run's own records are written unbuffered (`robocopy /j`), so hashing
@@ -57,18 +58,26 @@ scripts are restricted, so it can travel with the evidence too.
   | Result     | Exit code | Meaning |
   |------------|-----------|---------|
   | PASS       | 0         | The copy completed, every file in the reference record is in the destination with the same SHA-256, and sizes and last-modified times match the source. |
-  | FAIL       | 1         | The copy failed, a file in the reference record differs, is missing or unreadable, a file's size or last-modified time differs, or the run could not start. |
+  | FAIL       | 1         | The copy failed, a file in the reference record differs, is missing or unreadable, the reference record has changed since it was sealed, a file's size or last-modified time differs, or the run could not start. |
   | UNVERIFIED | 2         | Copied without failures; verification (SHA-256 and metadata) declined with `/nonforensic`. |
 
   Files added since the reference record are listed as warnings and don't
-  fail the run.
+  fail the run. The summary lists every warning just above the result and
+  everything that failed the run just below it, in the log as on screen.
 - **Warnings up front.** Before copying, everything to be wary of is listed
-  in one **Warnings** section at the top of the log header (and repeated in
-  the summary): the machine may sleep or hibernate (power plan or lid), the
-  clock isn't synchronised with a time source, the destination is FAT32/FAT
-  or wasn't empty, a drive root holds fragments recovered by file-system
-  repairs (`FOUND.nnn`, `LOST.DIR`; copied as contents), no UTC time source
-  worked.
+  in one **Warnings** section at the top of the log header, and repeated in
+  the summary:
+  - the machine may sleep or hibernate (power plan or lid), or its power
+    settings can't be read;
+  - the clock isn't synchronised with a time source, or its status can't be
+    read; no UTC time source worked;
+  - the destination is FAT32/FAT, or wasn't empty;
+  - a copy pass doesn't write unbuffered (`/j`), so its files may be
+    verified from the Windows cache;
+  - a drive root holds fragments recovered by file-system repairs
+    (`FOUND.nnn`, `LOST.DIR`; copied as contents);
+  - the source holds no hash record, so this copy isn't checked against any
+    earlier record; or its reference record has no seal.
 - **What is preserved.** Data, attributes and timestamps of files and
   subfolders (`/copy:DAT /dcopy:DAT`), so anything hidden stays hidden;
   empty folders (`/e`). Junctions are not followed (`/xj`). Exact byte sizes
@@ -91,13 +100,13 @@ scripts are restricted, so it can travel with the evidence too.
   - any Read-only, Hidden or System attribute robocopy carries from the
     source folder onto the destination folder is cleared, unless the
     destination already had it.
-- **Copying:** two passes, files of 100 MiB or more unbuffered (`/j`) and
+- **Copying:** two passes, both unbuffered (`/j`): files of 100 MiB or more
   single-threaded, smaller files with half the logical processors (1–128).
   A failed file is retried once after 2 s, so real failures surface quickly.
 - **Prompts:** source (default: the script's folder, when it holds
-  anything besides the script) and destination. Paths can be typed, pasted with
-  quotes, or dragged in; relative paths, and a source and destination that
-  are the same or inside each other, are refused. A destination that
+  anything besides the script) and destination. Paths can be typed, pasted
+  with quotes, or dragged in; relative paths, and a source and destination
+  that are the same or inside each other, are refused. A destination that
   already holds files has to be confirmed (robocopy overwrites same-named
   files that differ).
 
@@ -110,13 +119,14 @@ Written to the destination root, named with the UTC start time:
   host, user, Windows version, elevation, UTC start, local offset, time
   source and last sync, options; source and destination: folder, volume
   label, serial and file system, reference record, each housekeeping item
-  skipped at a drive root), the robocopy output with
-  exact byte sizes, problems and the summary. Robocopy's Started/Ended times
-  are local; its per-file times are UTC. During the run the log and the
-  other records are kept in a staging folder in `%TEMP%`; at the end they
-  are written to the destination unbuffered and read back by SHA-256. If
-  that fails, they stay in `%TEMP%` and the console shows where. The log records
-  the process; the hash CSVs are the authoritative per-file record.
+  skipped at a drive root), the robocopy output with exact byte sizes,
+  problems as they are found, and the summary (warnings, result, failures).
+  Robocopy's Started/Ended times are local; its per-file times are UTC.
+  During the run the log and the other records are kept in a staging folder
+  in `%TEMP%`; at the end they are written to the destination unbuffered and
+  read back by SHA-256. If that fails, they stay in `%TEMP%` and the console
+  shows where. The log records the process; the hash CSVs are the
+  authoritative per-file record.
 - `robocopy_YYYYMMDDTHHMMSSZ_hashes_destination.csv` (when verifying), and
   when the source holds no hash record also `..._hashes_source.csv`, the
   reference record:
@@ -128,7 +138,7 @@ Written to the destination root, named with the UTC start time:
   and CSVs (and of the script copy, if one was placed). Its own SHA-256 is
   shown at the end of the run.
 - `evidence-robocopy.bat`: a copy of the script, if the source root held
-  none.
+  none (log mode only).
 
 All of a run's files share its UTC start time in their names.
 
@@ -144,9 +154,10 @@ from the source, and verifies every file.
 
 A first copy of an evidence folder on an exFAT USB drive to an internal
 drive, with the script kept in the evidence folder and the source picked by
-pressing Enter; not elevated. Real output, anonymised (host, user, paths,
-volume labels and serials replaced; times, counts, sizes and results as
-recorded), with robocopy's file lists left out:
+pressing Enter; not elevated. Output of a real run, anonymised (host, user,
+paths, volume labels and serials replaced; times, counts, sizes and results
+as recorded), shown in the current header and summary layout, with
+robocopy's file lists left out:
 
 ```
 ===============================================================================
@@ -154,9 +165,9 @@ Warnings (read before relying on this copy)
   [WARN] No hash record was found in the source root: the source is hashed now and becomes the reference record, so this copy is not checked against any earlier record.
 
 Environment
-  Script            : evidence-robocopy 1.5.1
+  Script            : evidence-robocopy 1.5.2
   Script path       : E:\Case-0042\evidence-robocopy.bat
-  Script SHA-256    : 3c087f9fca4cbd2a1129cc15606b057e2fbabe170653282cc2a3f362fbc92596
+  Script SHA-256    : bde74db0c84c51e6d7cb35fed8b288d441f22a9f1fef40c472799d33fabcdbf7
   Mode              : forensic (default): log file and SHA-256 verification
   Started (UTC)     : 2026-10-14T16:09:09Z (source: robocopy)
   Local UTC offset  : +01:00 (robocopy's Started/Ended times are local; its file times are UTC)
@@ -234,12 +245,18 @@ Result
                       made by this run; sealed at the end of it
   Log               : C:\Cases\Case-0042\robocopy_20261014T160909Z.log
 
+  Warnings (did not fail the run)
+    [WARN] No hash record was found in the source root: the source is hashed now and becomes the reference record, so this copy is not checked against any earlier record.
+
   OVERALL RESULT        : PASS (exit code 0)
     |-Copy (robocopy)   : PASS (robocopy exit codes combined: 1)
     |-Metadata          : PASS: size and last-modified time match for every file (compared to 2 s, as FAT/exFAT is involved)
     |-Hash (SHA-256)    : PASS: 31 of 31 files in the reference record match the destination
                           0 differ, 0 missing, 0 unreadable, 0 invalid in the record; added since: 1 custody record(s), 0 other file(s)
 The copy completed, every file in the reference record is in the destination with the same SHA-256, and size and last-modified time match the source
+
+  Failures
+    none
 ===============================================================================
 ```
 
@@ -257,10 +274,11 @@ Custody records written to the destination and read back: 4 of 4 match.
 Log saved: C:\Cases\Case-0042\robocopy_20261014T160909Z.log
 ```
 
-A failed check is listed where it is found and again in the summary, e.g.
-`[FAIL] DIFFERS from the reference record: <file>`, with
+A failed check is listed where it is found and again under **Failures** below
+the result, e.g. `[FAIL] DIFFERS from the reference record: <file>`, with
 `OVERALL RESULT : FAIL (exit code 1)`, the failed check marked FAIL beneath
-it, and the closing line `The SHA-256 verification failed; see the problems listed`.
+it, and the closing line
+`The SHA-256 verification failed; see the failures listed below`.
 
 ## Requirements
 
