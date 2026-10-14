@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.5.0 - 2026-10-14
+
+### Added
+- A reference record carried with the evidence is checked against its own
+  run's seal before use: changed, unlisted or unhashable fails the hash
+  verification; no seal is a warning. The seal's SHA-256 is logged.
+
+### Changed
+- Small files are copied unbuffered too (`/j`), and the log, CSVs, seal and
+  script copy are staged in TEMP, then written to the destination
+  unbuffered and read back: verification reads every file from the drive,
+  not from the Windows cache. Slower on many small files.
+- User (with SID) and host are read from `whoami` and `hostname` instead of
+  environment variables.
+- Help and header describe evidence of any kind and both checks; the
+  antivirus banner line states its effect on the copy.
+- Summary: the overall result and exit code, with the copy, metadata and
+  hash checks beneath it in the order they run, and a closing line stating
+  what it covers. The no-seal warning is shown up front.
+
+### Fixed
+- The hashing progress counter's total was one too high (it counted a
+  blank line in robocopy's listing).
+
 ## 1.4.0 - 2026-10-14
 
 ### Added
@@ -19,7 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Forensic mode is the default: a log file is kept and every file is
   verified without asking; only the source and destination are prompted.
   The log header records the mode.
-
 - Summary names each check (Hash (SHA-256), Metadata) and is grouped;
   shorter path prompts with the default path shown above the prompt;
   licence in the banner.
