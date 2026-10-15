@@ -5,6 +5,54 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.0.0 - 2026-10-15
+
+Changes the contract: how sets are laid out, the records and their names,
+and `/nonforensic`. Records made by 1.5.x and earlier aren't read: a 1.x set
+(the script beside the evidence files) is refused, and without the script it
+is copied as raw evidence, starting a new reference record.
+
+### Added
+- Set and evidence directories: the evidence is copied as one directory,
+  under its own name, into a set directory that also holds the custody files
+  (script, history, records directory). Rules S1-S4 (source) and D1-D4
+  (destination) decide which set is copied and where it goes; sets are never
+  mixed.
+- Run records: each run writes its log, hash CSVs (evidence, and custody
+  files separately) and history into
+  `evidence-robocopy-records\<run UTC>\`, sealed, written as `.partial` and
+  renamed once read back.
+- History: one row per run (`evidence-robocopy-history.csv`), sealed in
+  every run record; each run fills in the previous run's seal SHA-256. Every
+  copy checks every run record against its seal and the history (new "Run
+  records" check). A history beside the evidence that is missing or doesn't
+  match is set aside for the newest sealed history, if that matches, and
+  the copy fails.
+- Script check against the previous run: newer version warns; older
+  version, or the same version with a different SHA-256, fails.
+- Location check: a source set moved or copied by other means since the run
+  that made it is flagged.
+
+### Changed
+- Records are UTF-8 (console switched to code page 65001 for the run) with
+  CRLF line endings; every CSV cell is quoted; files are named
+  `evidence-robocopy_<UTC>...`.
+- A forensic run stops if no UTC time can be read.
+- `/nonforensic` is a plain copy utility: ETA progress, no log, no records,
+  optional verification shown on screen only, no default source.
+- Evidence counts never include custody files.
+- The script copy beside the evidence is the script that ran, unless the
+  source set's copy is a newer version; never copied and then overwritten.
+- If the run record can't be written to the destination, the exit code is
+  FAIL (the files stay in TEMP).
+- The destination must be an existing directory, in both modes.
+- "Directory" replaces "folder" in all output and documentation.
+- Help text no longer says what kinds of files it copies.
+
+### Fixed
+- Names outside the console's old code page are hashed and logged
+  correctly (were UNREADABLE, so the copy failed).
+
 ## 1.5.2 - 2026-10-14
 
 ### Changed
