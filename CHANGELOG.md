@@ -5,6 +5,44 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.0.1 - 2026-10-16
+
+Known issue (in every release so far, fixed in the next): an evidence file
+whose name contains `%NAME%` for a defined environment variable (e.g.
+`x %OS% y.txt`) is hashed under the expanded name. It is reported
+UNREADABLE (the copy fails) or, if a file with the expanded name exists in
+the same directory, gets that file's hash, so a changed copy could pass.
+
+### Added
+- A junction or symbolic link in the source that isn't copied (robocopy
+  `/xj`) is listed as a warning.
+
+### Fixed
+- A set whose records directory held only an interrupted write-back
+  (`<run>.partial`) was treated as having run records but no history, so
+  copying it on always failed; it now counts as having no earlier runs, with
+  the `.partial` warned about up front.
+- A first copy from a drive root always failed ("Could not create the
+  destination set directory"): the volume label wasn't read.
+- Logs of runs with a robocopy ERROR had CR CR LF line endings after the
+  error text; records are CRLF throughout again.
+- Answers piped to the prompts were lost: `chcp` and `fsutil` no longer
+  read the console input.
+- "Row n of the history" in Run records messages was one too high.
+- An empty evidence directory failed without listing the reason with the
+  failures.
+- `/nonforensic` header: the script's SHA-256 is shown, and the Writes line
+  no longer mentions custody records.
+- A leftover `.partial` run record is listed once in the summary warnings,
+  not twice.
+- Wording: "S1" in the help, capitalised failure lines, the abort for
+  unrelated histories, robocopy's ERROR times labelled as local, the
+  custody-pass note on extra items, a run record lost with its drive (said
+  "nothing is there" when the drive couldn't be read), the Metadata result
+  when there were no files to compare, the history fallback warning (read as
+  if the source's history were replaced), and the volume line's "no
+  label.;".
+
 ## 2.0.0 - 2026-10-15
 
 Changes the contract: how sets are laid out, the records and their names,
