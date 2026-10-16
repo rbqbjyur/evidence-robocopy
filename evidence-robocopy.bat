@@ -62,7 +62,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.1.0"
+set "TOOL_VERSION=2.1.1"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -923,7 +923,7 @@ rem volume label (first line of "fsutil fsinfo volumeinfo", in any display
 rem language), or the volume serial if there is no label ("Volume_<serial>").
 rem The name is read with delayed expansion off: a FOR value assigned while
 rem it is on loses any "!" ("Ev!dence" would become "Evdence"; review,
-rem 2026-10-16). The results go back through two ENDLOCALs to a caller
+rem 2026-10-16). The results go back through the ENDLOCALs to a caller
 rem whose delayed expansion is off, so "!" survives.
 setlocal DisableDelayedExpansion
 call :copy_variable %~1 directory
@@ -931,24 +931,26 @@ for %%A in ("%directory%") do set "name=%%~nxA"
 setlocal EnableDelayedExpansion
 if not "!directory:~3!"=="" (endlocal & endlocal & set "%~2=%name%" & exit /b 0)
 if not "!directory:~1,2!"==":\" (endlocal & endlocal & set "%~2=%name%" & exit /b 0)
+endlocal
+rem A drive root. Its label is read with delayed expansion off as well: a
+rem volume label may hold "!" (static check, 2026-10-16). The drive ("E:") is
+rem in its own variable, as a comma inside a FOR /F command is a separator.
+set "volume_drive=%directory:~0,2%"
 set "label="
 set "label_read="
-rem The drive ("E:") in its own variable: inside a FOR /F command a comma,
-rem as in !directory:~0,2!, is a separator and would break the command.
-set "volume_drive=!directory:~0,2!"
-fsutil fsinfo volumeinfo !volume_drive! >nul 2>&1 <nul || set "label_read=1"
-for /f "tokens=1* delims=:" %%A in ('fsutil fsinfo volumeinfo !volume_drive! 2^>nul ^<nul') do if not defined label_read (
+fsutil fsinfo volumeinfo %volume_drive% >nul 2>&1 <nul || set "label_read=1"
+for /f "tokens=1* delims=:" %%A in ('fsutil fsinfo volumeinfo %volume_drive% 2^>nul ^<nul') do if not defined label_read (
     set "label_read=1"
     set "label=%%B"
 )
-if defined label set "label=!label:~1!"
+if defined label set "label=%label:~1%"
 rem A label containing "%" would make a path the prompts refuse (see
 rem :path_has_percent): use the serial instead.
-if defined label if not "!label:%%=!"=="!label!" set "label="
-if defined label (endlocal & endlocal & set "%~2=%label%" & exit /b 0)
+if defined label call :path_has_percent label && set "label="
+if defined label (endlocal & set "%~2=%label%" & exit /b 0)
 set "serial=unknown"
-for /f "skip=1 tokens=*" %%L in ('vol !volume_drive! 2^>nul') do for %%T in (%%L) do set "serial=%%T"
-endlocal & endlocal & set "%~2=Volume_%serial%"
+for /f "skip=1 tokens=*" %%L in ('vol %volume_drive% 2^>nul') do for %%T in (%%L) do set "serial=%%T"
+endlocal & set "%~2=Volume_%serial%"
 exit /b 0
 
 :ask_plain_paths
@@ -1824,6 +1826,7 @@ if %warning_count% equ 0 (
     set "msg=  %%L"
     call :show_and_log msg
 )
+set "msg=  Findings made after the copy (such as links not copied) are in the summary." & call :show_and_log msg
 set "msg=" & call :show_and_log msg
 set "msg=Environment" & call :show_and_log msg
 call :log_field "Script" header_script
@@ -1912,6 +1915,8 @@ if "%utc_clock_failed%"=="1" (
     call :add_warning msg
 )
 if defined destination_filesystem if defined FILESYSTEM_WARNING_%destination_filesystem% call :warn_destination_filesystem
+if not defined source_filesystem if not "%source_volume_serial%"=="n/a" call :warn_unknown_filesystem source "%source_path:~0,2%"
+if not defined destination_filesystem if not "%destination_volume_serial%"=="n/a" call :warn_unknown_filesystem destination "%destination_volume_directory:~0,2%"
 call :check_write_mode
 call :check_recovered_fragments
 call :find_drive_root_housekeeping source yes
@@ -2345,6 +2350,18 @@ for /f "delims=" %%L in ('chkntfs %~1 2^>nul') do for %%T in (%%L) do for %%F in
 )
 exit /b 0
 
+:warn_unknown_filesystem  side  drive
+rem No method in FILESYSTEM_METHODS could read the side's file system (not
+rem elevated, fsutil and chkntfs can't read the system volume; test round
+rem 8). Times are then compared exactly unless the other side needs /fft, so
+rem a FAT or exFAT volume could fail the metadata check: the warning says why
+rem in advance. The verdict is unaffected.
+set "msg=The %~1 volume's file system (%~2) couldn't be read"
+if not defined is_elevated set "msg=%msg% (not elevated: fsutil and chkntfs can't read some volumes, such as the system volume)"
+set "msg=%msg%: if it is FAT or exFAT, last-modified times compared exactly can differ by up to 2 s and fail the metadata check."
+call :add_warning msg
+exit /b 0
+
 :warn_destination_filesystem
 rem Warn about a destination file system listed in FILESYSTEM_WARNING_<name>.
 rem A warning only: robocopy fails any file that doesn't fit.
@@ -2397,6 +2414,7 @@ set "log_option="
 if "!log_enabled!"=="1" set log_option=/unilog:"!temp_robocopy_unicode_output!"
 call :ignored_names_as_robocopy_arguments ignored_arguments
 set "custody_exit_codes=0"
+set "custody_extras_explained="
 set "custody_found="
 set "source_records_directory=!source_set_with_backslash!!RECORDS_DIR_NAME!"
 call :is_directory source_records_directory && (
@@ -3170,11 +3188,7 @@ if not exist "!seal_path!" (
 )
 call :get_sha256 seal_path seal_sha256
 if not defined seal_sha256 set "seal_sha256=unknown"
-for /f "usebackq tokens=1,*" %%A in ("!seal_path!") do (
-    set "listed_sha256=%%A"
-    set "listed_name=%%B"
-    call :check_sealed_file run run_dir listed_name listed_sha256
-)
+call :check_seal_lines run run_dir seal_path
 call :check_run_record_files run run_dir seal_path
 set "msg=Run record !run!: !matches! file(s) match its seal, !problems! problem(s). Seal SHA-256: !seal_sha256!"
 call :show_and_log msg
@@ -3207,6 +3221,21 @@ for /f "eol=/ delims=" %%F in ('dir /b /s /a-d "%record_files_dir%\" 2^>nul') do
 endlocal & set /a "problems+=%problems%"
 exit /b 0
 
+:check_seal_lines  runVar  runDirVar  sealPathVar
+rem Every "SHA-256 *name" line of a run record's seal, through
+rem :check_sealed_file. The lines are read with delayed expansion off, so a
+rem "!" in a listed name survives (section 6 of the conventions); matches and
+rem problems, plain numbers, go back to the caller (:check_run_record).
+setlocal DisableDelayedExpansion
+call :copy_variable %~3 seal_lines_path
+for /f "usebackq tokens=1,*" %%A in ("%seal_lines_path%") do (
+    set "listed_sha256=%%A"
+    set "listed_name=%%B"
+    call :check_sealed_file %~1 %~2 listed_name listed_sha256
+)
+endlocal & set "matches=%matches%" & set "problems=%problems%"
+exit /b 0
+
 :check_sealed_file  runVar  runDirVar  nameVar  sha256Var
 rem One "SHA-256 *name" line of a seal: the file must exist in the run record
 rem with that SHA-256. Counts into the caller's matches or problems.
@@ -3232,12 +3261,21 @@ endlocal & set /a "problems+=1" & exit /b 0
 
 :check_file_listed_in_seal  runVar  runDirVar  sealPathVar  filePathVar
 rem A file in a run record must be the seal itself, an ignored name, or
-rem listed in the seal (by its path inside the run record).
+rem listed in the seal (by its path inside the run record). The file's own
+rem name is cut from its path with !var! operations, not taken from a FOR
+rem value: with delayed expansion on, a FOR value loses its "!", and a file
+rem planted as "!._x" or "desk!top.ini" would then match an ignored name and
+rem go unchecked (static check, 2026-10-16).
 setlocal EnableDelayedExpansion
 set "file_path=!%~4!"
-for %%N in ("!file_path!") do set "file_name=%%~nxN"
 set "run_dir_with_backslash=!%~2!\"
 call :relative_path file_path run_dir_with_backslash name_in_record || goto check_file_listed_in_seal_unresolved
+set "file_name=!name_in_record!"
+:check_file_listed_in_seal_name
+if not "!file_name:\=!"=="!file_name!" (
+    set "file_name=!file_name:*\=!"
+    goto check_file_listed_in_seal_name
+)
 if /i "!name_in_record!"=="!RECORD_FILE_PREFIX!!%~1!.sha256" (endlocal & exit /b 0)
 call :name_matches_list file_name IGNORED_CUSTODY_FILES && (endlocal & exit /b 0)
 findstr /l /e /c:" *!name_in_record!" "!%~3!" >nul 2>&1 && (endlocal & exit /b 0)
@@ -3304,7 +3342,7 @@ set "end_utc_iso=%utc_iso%"
 set /a "copy_failed_bits=copy_exit_codes & ROBOCOPY_FAIL_MASK"
 set "copy_status=PASS"
 if %copy_failed_bits% neq 0 set "copy_status=FAIL"
-set "result_copy=%copy_status% (robocopy exit codes combined: %copy_exit_codes%)"
+set "result_copy=%copy_status%: robocopy exit codes combined: %copy_exit_codes%"
 set "metadata_status=NOT RUN"
 set "hash_status=NOT RUN"
 set "run_records_status=NOT RUN"
@@ -3342,14 +3380,17 @@ if "%run_mode%"=="forensic" call :log_result_records
 set "msg=" & call :show_and_log msg
 call :log_summary_list "Warnings (did not fail the run)" warnings
 set "msg=" & call :show_and_log msg
-rem The overall result, each check that feeds into it in the order they ran,
-rem and what the result covers.
+rem The overall result, each check that feeds into it in the order they ran
+rem (owner, 2026-10-16: the Script check before the copy; the copy; then
+rem metadata, the run records, and last the SHA-256 compare, which relies on
+rem the reference record having passed its seal), and what the result
+rem covers.
 call :log_result_line "OVERALL RESULT" result_overall
-call :log_check_line "Copy (robocopy)" result_copy
-call :log_check_line "Metadata" result_metadata
-call :log_check_line "Hash (SHA-256)" result_hash result_hash_detail
-if "%run_mode%"=="forensic" call :log_check_line "Run records" result_run_records
 if "%run_mode%"=="forensic" call :log_check_line "Script" result_script
+call :log_check_line "Copy" result_copy
+call :log_check_line "Metadata" result_metadata
+if "%run_mode%"=="forensic" call :log_check_line "Run records" result_run_records
+call :log_check_line "Hash (SHA-256)" result_hash result_hash_detail
 call :show_and_log result_meaning
 set "msg=" & call :show_and_log msg
 call :log_summary_list "Failures" failures
@@ -3387,11 +3428,11 @@ exit /b 0
 rem The closing line of a FAIL summary: each failed check, in the order they
 rem ran, then a pointer to the failures listed below the result.
 set "result_meaning="
+if "%script_status%"=="FAIL" call :add_failure_clause "The script check failed" "the script check failed"
 if not "%copy_status%"=="PASS" call :add_failure_clause "The copy failed" "the copy failed"
 if defined verification_ran if not "%metadata_status%"=="PASS" call :add_failure_clause "The metadata check failed" "the metadata check failed"
-if defined verification_ran if not "%hash_status%"=="PASS" call :add_failure_clause "The SHA-256 verification failed" "the SHA-256 verification failed"
 if "%run_records_status%"=="FAIL" call :add_failure_clause "The run records check failed" "the run records check failed"
-if "%script_status%"=="FAIL" call :add_failure_clause "The script check failed" "the script check failed"
+if defined verification_ran if not "%hash_status%"=="PASS" call :add_failure_clause "The SHA-256 verification failed" "the SHA-256 verification failed"
 call :add_failure_clause "See the failures listed below" "see the failures listed below"
 exit /b 0
 
@@ -3887,9 +3928,12 @@ rem CONFIG); anything but INFO is listed in the summary (:remember_problem).
 rem With "custody" (a custody pass), extras (bit 2) are expected on a rerun
 rem or update: the destination set holds its own run records and history,
 rem which the source set doesn't; the Run records check verifies them all,
-rem so they are reported as INFO.
+rem so they are reported as INFO, in full for the first custody pass that
+rem has them and as "see above" after that (custody_extras_explained, in the
+rem custody passes' scope).
 setlocal EnableDelayedExpansion
 set /a "robocopy_exit_code=!%~1!"
+set "extras_explained_after=!custody_extras_explained!"
 set "msg=Robocopy exit code: !robocopy_exit_code!" & call :show_and_log msg
 if !robocopy_exit_code! equ 0 (
     set "msg=  [INFO] No files were copied in this pass."
@@ -3902,13 +3946,16 @@ for %%B in (%ROBOCOPY_EXIT_BITS%) do (
     if "%~2"=="custody" if %%B equ 2 (
         set "severity=INFO"
         set "text=Items in the destination set that the source set doesn't hold, left as they are (such as its own run records and history, or files at a drive root): run records among them are checked by the Run records check below."
+        if defined custody_extras_explained set "text=Items in the destination set that the source set doesn't hold, left as they are (see above)."
     )
     if !bit_value! neq 0 (
         set "msg=  [!severity!] !text!"
         call :show_and_log msg
         if not "!severity!"=="INFO" call :remember_problem msg
+        if "%~2"=="custody" if %%B equ 2 set "extras_explained_after=1"
     )
 )
+if "%~2"=="custody" (endlocal & set "custody_extras_explained=%extras_explained_after%" & exit /b 0)
 endlocal & exit /b 0
 
 rem -- Input ------------------------------------------------------------------
@@ -4372,13 +4419,15 @@ endlocal & exit /b 0
 :abort
 rem Stop before anything is copied. No run record is written: an aborted run
 rem leaves nothing in the destination. Its log, if one was started, stays in
-rem TEMP and its path is shown.
+rem TEMP and its path is shown; the reason is shown once, as logged.
 echo.
-echo [FAIL] %abort_reason%
 if defined log_ready (
     set "msg=[FAIL] Run aborted: %abort_reason%"
     call :show_and_log msg
     set "msg=The log of this aborted run is kept here: %log_staged_path%"
+    call :show msg
+) else (
+    set "msg=[FAIL] %abort_reason%"
     call :show msg
 )
 call :cleanup_temp

@@ -5,7 +5,38 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.1.1 - 2026-10-16
+
+### Added
+- A warning when a volume's file system can't be read (e.g. the system
+  volume when not elevated): times are then compared exactly, so a FAT or
+  exFAT volume could fail the metadata check.
+
+### Changed
+- The header's Warnings section says that findings made after the copy
+  (such as links not copied) are in the summary.
+- The summary lists the checks in the order they run: Script, Copy,
+  Metadata, Run records, Hash (SHA-256); the closing sentence names failed
+  checks in that order. "Copy (robocopy)" is now "Copy".
+- An aborted run shows its reason once; a second custody pass with extra
+  items in the destination refers to the first one's explanation.
+
+### Fixed
+- A file planted in a run record under a name with a `!` that reduces to an
+  ignored name (e.g. `!._x`, `desk!top.ini`) was not checked against the
+  seal, so the Run records check could pass with an unsealed file present.
+- A seal line naming a file with a `!` was read without it, so that file
+  was reported missing.
+- A drive-root first copy from a volume whose label holds a `!` named the
+  set without it.
+
 ## 2.1.0 - 2026-10-16
+
+Known issue (fixed in 2.1.1): a file planted in a run record under a name
+with a `!` that reduces to an ignored name (e.g. `!._x`, `desk!top.ini`) is
+not checked against the seal, so the Run records check can pass with an
+unsealed file present. It needs a deliberate plant; evidence files and their
+hashes are not affected.
 
 ### Changed
 - Source and destination paths containing `%` are refused at the prompt;
