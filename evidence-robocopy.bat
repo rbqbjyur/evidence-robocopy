@@ -62,7 +62,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.0.1"
+set "TOOL_VERSION=2.1.0"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -255,6 +255,7 @@ set "script_dir=%~dp0"
 call :init_state
 call :parse_args "%~1" "%~2" || goto :abort
 call :switch_console_to_utf8
+call :check_script_path || goto :abort
 call :read_carriage_return
 call :show_banner
 call :check_robocopy || goto :abort
@@ -394,6 +395,7 @@ set "exit_code=%EXIT_CODE_FAIL%"
 set "result_script_copy=not attempted"
 set "staging_dir="
 set "staging_dir_missing="
+set "seal_incomplete="
 set "original_code_page="
 set "history_base_path="
 set "history_base_side="
@@ -471,6 +473,8 @@ echo       is written: it slows copies of many small files, and a file it
 echo       quarantines fails verification as MISSING.
 echo Tip: don't click inside this window while it runs: a QuickEdit selection
 echo      pauses the copy until you press Esc.
+echo Check: a copy of this script that travelled with evidence should match
+echo        the published release (its SHA-256 is in the log header).
 echo.
 exit /b 0
 
@@ -550,11 +554,13 @@ rem source_set_with_backslash (empty for raw evidence), evidence_directory_name,
 rem set_directory_name and source_set_rule.
 echo The evidence directory is copied, under its own name, into a set directory.
 call :find_default_source_set
+set "source_set_rejected_answers=0"
 :ask_source_set_again
 echo.
 call :ask_directory source_given "SOURCE directory" 1 1 || exit /b 1
 call :identify_source_set && exit /b 0
 call :show identify_problem
+call :count_rejected_answer source_set_rejected_answers "source directory" || exit /b 1
 goto ask_source_set_again
 
 :find_default_source_set
@@ -608,6 +614,12 @@ set "inspect_directory_with_backslash=%source_set_with_backslash%"
 call :inspect_set_directory
 call :check_set_directory_contents source || exit /b 1
 set "evidence_directory_name=%inspect_evidence_name%"
+rem The evidence directory's name is found, not typed, so the prompt's check
+rem for "%" doesn't cover it (review, 2026-10-16): same rule, same reason.
+call :path_has_percent evidence_directory_name && (
+    set "identify_problem=The set's evidence directory name contains %%, which can't be handled safely yet: rename it or choose another set."
+    exit /b 1
+)
 set "source_path=%source_set_with_backslash%%evidence_directory_name%"
 set "source_with_backslash=%source_path%\"
 call :name_directory_for_copy source_set_path set_directory_name
@@ -657,11 +669,13 @@ rem README, "Set and evidence directories"). Sets destination_set_path /
 rem destination_set_with_backslash, destination_path /
 rem destination_with_backslash (the evidence directory in it),
 rem destination_set_rule, destination_state_text and destination_was_empty.
+set "destination_set_rejected_answers=0"
 :ask_destination_set_again
 echo.
 call :ask_directory destination_given "DESTINATION directory" 1 0 || exit /b 1
 call :identify_destination_set || (
     call :show identify_problem
+    call :count_rejected_answer destination_set_rejected_answers "destination directory" || exit /b 1
     goto ask_destination_set_again
 )
 set "overlap_first_with_backslash=%source_with_backslash%"
@@ -669,6 +683,7 @@ if defined source_set_with_backslash set "overlap_first_with_backslash=%source_s
 set "overlap_second_with_backslash=%destination_set_with_backslash%"
 call :paths_overlap && (
     echo Source and destination must not be the same, or inside each other.
+    call :count_rejected_answer destination_set_rejected_answers "destination directory" || exit /b 1
     goto ask_destination_set_again
 )
 if "%destination_was_empty%"=="1" exit /b 0
@@ -771,7 +786,7 @@ rem     rerun or update, confirmed before copying.
 rem   otherwise: a new set; it may hold nothing but an empty directory named
 rem     like the evidence directory (junk names aside).
 rem On a problem, set identify_problem (naming the layout rule) and exit 1.
-if not exist "%destination_candidate_with_backslash%" goto check_destination_set_state_new
+call :is_directory destination_candidate_with_backslash || goto check_destination_set_state_new
 call :holds_custody_files destination_candidate_with_backslash || goto check_destination_set_state_new_existing
 set "inspect_directory_with_backslash=%destination_candidate_with_backslash%"
 call :inspect_set_directory
@@ -825,7 +840,8 @@ rem directory, or a copy of the script.
 setlocal EnableDelayedExpansion
 set "directory=!%~1!"
 if exist "!directory!!HISTORY_FILE_NAME!" (endlocal & exit /b 0)
-if exist "!directory!!RECORDS_DIR_NAME!\" (endlocal & exit /b 0)
+set "custody_records_directory=!directory!!RECORDS_DIR_NAME!"
+call :is_directory custody_records_directory && (endlocal & exit /b 0)
 if exist "!directory!!SCRIPT_FILE_PREFIX!*!SCRIPT_FILE_EXT!" (endlocal & exit /b 0)
 endlocal & exit /b 1
 
@@ -850,7 +866,8 @@ exit /b 0
 
 :inspect_set_directory_entry
 rem Caller's scope (:inspect_set_directory): one entry, in inspect_entry_name.
-if exist "%inspect_directory_with_backslash%%inspect_entry_name%\" goto inspect_set_directory_entry_directory
+set "inspect_entry_path=%inspect_directory_with_backslash%%inspect_entry_name%"
+call :is_directory inspect_entry_path && goto inspect_set_directory_entry_directory
 call :is_custody_file_name inspect_entry_name && exit /b 0
 call :name_matches_list inspect_entry_name IGNORED_CUSTODY_FILES && exit /b 0
 if defined inspect_directory_is_drive_root call :name_matches_list inspect_entry_name DRIVE_ROOT_HOUSEKEEPING_FILES && exit /b 0
@@ -904,11 +921,16 @@ goto name_matches_list_next
 rem The name a copied directory takes: its own name, or for a drive root its
 rem volume label (first line of "fsutil fsinfo volumeinfo", in any display
 rem language), or the volume serial if there is no label ("Volume_<serial>").
+rem The name is read with delayed expansion off: a FOR value assigned while
+rem it is on loses any "!" ("Ev!dence" would become "Evdence"; review,
+rem 2026-10-16). The results go back through two ENDLOCALs to a caller
+rem whose delayed expansion is off, so "!" survives.
+setlocal DisableDelayedExpansion
+call :copy_variable %~1 directory
+for %%A in ("%directory%") do set "name=%%~nxA"
 setlocal EnableDelayedExpansion
-set "directory=!%~1!"
-for %%A in ("!directory!") do set "name=%%~nxA"
-if not "!directory:~3!"=="" (endlocal & set "%~2=%name%" & exit /b 0)
-if not "!directory:~1,2!"==":\" (endlocal & set "%~2=%name%" & exit /b 0)
+if not "!directory:~3!"=="" (endlocal & endlocal & set "%~2=%name%" & exit /b 0)
+if not "!directory:~1,2!"==":\" (endlocal & endlocal & set "%~2=%name%" & exit /b 0)
 set "label="
 set "label_read="
 rem The drive ("E:") in its own variable: inside a FOR /F command a comma,
@@ -920,10 +942,13 @@ for /f "tokens=1* delims=:" %%A in ('fsutil fsinfo volumeinfo !volume_drive! 2^>
     set "label=%%B"
 )
 if defined label set "label=!label:~1!"
-if defined label (endlocal & set "%~2=%label%" & exit /b 0)
+rem A label containing "%" would make a path the prompts refuse (see
+rem :path_has_percent): use the serial instead.
+if defined label if not "!label:%%=!"=="!label!" set "label="
+if defined label (endlocal & endlocal & set "%~2=%label%" & exit /b 0)
 set "serial=unknown"
 for /f "skip=1 tokens=*" %%L in ('vol !volume_drive! 2^>nul') do for %%T in (%%L) do set "serial=%%T"
-endlocal & set "%~2=Volume_%serial%"
+endlocal & endlocal & set "%~2=Volume_%serial%"
 exit /b 0
 
 :ask_plain_paths
@@ -931,6 +956,7 @@ rem /nonforensic: ask for the source and destination directories; the source's
 rem contents are copied into the destination. No default source.
 echo The CONTENTS of the source directory are copied into the destination
 echo directory.
+set "plain_paths_rejected_answers=0"
 :ask_plain_paths_source
 echo.
 call :ask_directory source "SOURCE directory" 1 0 || exit /b 1
@@ -941,6 +967,7 @@ set "overlap_first_with_backslash=%source_with_backslash%"
 set "overlap_second_with_backslash=%destination_with_backslash%"
 call :paths_overlap && (
     echo Source and destination must not be the same, or inside each other.
+    call :count_rejected_answer plain_paths_rejected_answers "source and destination" || exit /b 1
     goto ask_plain_paths_source
 )
 set "destination_was_empty=1"
@@ -961,7 +988,7 @@ exit /b 0
 rem /nonforensic: exit 0 if the destination directory exists and holds anything
 rem other than, at a drive root, the items of DRIVE_ROOT_HOUSEKEEPING_DIRS and
 rem _FILES.
-if not exist "%destination_with_backslash%" exit /b 1
+call :is_directory destination_with_backslash || exit /b 1
 set "destination_entry_count=0"
 for /f "eol=/ delims=" %%E in ('dir /b /a "%destination_with_backslash%" 2^>nul') do set /a "destination_entry_count+=1"
 call :find_drive_root_housekeeping destination no
@@ -1022,17 +1049,17 @@ set "staged_history_path=%staged_records_dir%\%record_file_stem%_history.csv"
 set "staged_outside_history_path=%staged_records_dir%\%record_file_stem%_runs_outside_history.csv"
 set "staged_seal_path=%staged_records_dir%\%seal_file_name%"
 set "staged_root_history_path=%staged_root_dir%\%HISTORY_FILE_NAME%"
-if not exist "%destination_set_with_backslash%" mkdir "%destination_set_path%" >nul 2>&1
-if not exist "%destination_set_with_backslash%" (
+call :is_directory destination_set_with_backslash || mkdir "%destination_set_path%" >nul 2>&1
+call :is_directory destination_set_with_backslash || (
     set "abort_reason=Could not create the destination set directory."
     exit /b 1
 )
 set "destination_attributes_before="
-if exist "%destination_with_backslash%" for %%A in ("%destination_path%") do set "destination_attributes_before=%%~aA"
+call :is_directory destination_with_backslash && for %%A in ("%destination_path%") do set "destination_attributes_before=%%~aA"
 mkdir "%staged_records_dir%" >nul 2>&1
 mkdir "%staged_root_dir%" >nul 2>&1
-if not exist "%staged_records_dir%\" set "staging_dir_missing=1"
-if not exist "%staged_root_dir%\" set "staging_dir_missing=1"
+call :is_directory staged_records_dir || set "staging_dir_missing=1"
+call :is_directory staged_root_dir || set "staging_dir_missing=1"
 if defined staging_dir_missing (
     set "abort_reason=Could not create the staging directory in the temporary directory."
     exit /b 1
@@ -1059,9 +1086,9 @@ set "plain_hash_csv_destination=%temp_path_prefix%_hashes_destination.csv"
 set "staged_hash_csv_source=%plain_hash_csv_source%"
 set "staged_hash_csv_destination=%plain_hash_csv_destination%"
 set "destination_attributes_before="
-if exist "%destination_with_backslash%" for %%A in ("%destination_path%") do set "destination_attributes_before=%%~aA"
-if not exist "%destination_with_backslash%" mkdir "%destination_path%" >nul 2>&1
-if not exist "%destination_with_backslash%" (
+call :is_directory destination_with_backslash && for %%A in ("%destination_path%") do set "destination_attributes_before=%%~aA"
+call :is_directory destination_with_backslash || mkdir "%destination_path%" >nul 2>&1
+call :is_directory destination_with_backslash || (
     set "abort_reason=Could not create the destination directory."
     exit /b 1
 )
@@ -1072,9 +1099,11 @@ rem Temporary directory for working files and the staging directory, in order:
 rem TEMP, TMP, LOCALAPPDATA\Temp. Never the destination: files there would be
 rem hashed as evidence.
 set "temp_dir="
-if defined TEMP if exist "%TEMP%\" set "temp_dir=%TEMP%"
-if not defined temp_dir if defined TMP if exist "%TMP%\" set "temp_dir=%TMP%"
-if not defined temp_dir if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\Temp\" set "temp_dir=%LOCALAPPDATA%\Temp"
+set "local_app_data_temp="
+if defined LOCALAPPDATA set "local_app_data_temp=%LOCALAPPDATA%\Temp"
+if defined TEMP call :is_directory TEMP && set "temp_dir=%TEMP%"
+if not defined temp_dir if defined TMP call :is_directory TMP && set "temp_dir=%TMP%"
+if not defined temp_dir if defined local_app_data_temp call :is_directory local_app_data_temp && set "temp_dir=%local_app_data_temp%"
 if not defined temp_dir (
     set "abort_reason=No temporary directory found (TEMP, TMP or LOCALAPPDATA\Temp)."
     exit /b 1
@@ -1087,6 +1116,7 @@ rem Working files in TEMP, all deleted by :cleanup_temp.
 set "temp_file_list=%temp_path_prefix%_list.tmp"
 set "temp_metadata_list=%temp_path_prefix%_metadata.tmp"
 set "temp_robocopy_unicode_output=%temp_path_prefix%_robocopy_unicode.tmp"
+set "temp_certutil_output=%temp_path_prefix%_certutil.tmp"
 set "temp_hash_rows_source=%temp_path_prefix%_source.tmp"
 set "temp_hash_rows_destination=%temp_path_prefix%_destination.tmp"
 set "temp_hash_rows_custody=%temp_path_prefix%_custody.tmp"
@@ -1104,6 +1134,7 @@ set "temp_history_lines=%temp_path_prefix%_history_lines.tmp"
 set "temp_history_filled=%temp_path_prefix%_history_filled.tmp"
 set "temp_outside_history=%temp_path_prefix%_outside_history.tmp"
 set "temp_partial_warned=%temp_path_prefix%_partial_warned.tmp"
+set "temp_predating_records=%temp_path_prefix%_predating_records.tmp"
 set "temp_sealed_history_source=%temp_path_prefix%_sealed_history_source.tmp"
 set "temp_sealed_history_destination=%temp_path_prefix%_sealed_history_destination.tmp"
 exit /b 0
@@ -1137,13 +1168,16 @@ set "source_history_path="
 set "source_history_origin=none"
 set "source_history_problem="
 set "source_history_sealed_run="
+set "source_history_superseded="
 if defined source_set_path call :resolve_set_history source
 if "%source_history_origin%"=="missing" set "history_base_missing=1"
 call :resolve_set_history destination
+call :continue_destination_history_instead && goto read_history_base_chosen
 set "history_base_path=%source_history_path%"
 set "history_base_side=source"
 set "history_base_set_with_backslash=%source_set_with_backslash%"
 if not defined history_base_missing if defined destination_history_path call :choose_history_base || exit /b 1
+:read_history_base_chosen
 if defined history_base_path call :count_history_rows history_base_path history_row_count
 if %history_row_count% gtr 0 call :read_history_row history_base_path 2 reference
 if %history_row_count% gtr 0 call :is_run_directory_name reference_run || set "reference_run="
@@ -1158,6 +1192,23 @@ set /a "source_history_newest_line=source_history_row_count + 1"
 if %source_history_row_count% gtr 0 call :read_history_row source_history_path %source_history_newest_line% source_last
 set /a "this_run_number=history_row_count + 1"
 call :describe_history_for_header
+exit /b 0
+
+:continue_destination_history_instead
+rem Caller's scope (:read_history). On a rerun or update the source's history
+rem may be unusable (missing, or matching no run records) while the
+rem destination set's history matches its own run records. Then this run
+rem continues the destination's history and reports the source's problem as
+rem a Run records failure, instead of restarting the history and listing the
+rem destination's good run records as outside it (owner, 2026-10-16, after
+rem the review). Exit 0 if that applies, with the history base set.
+if not "%source_history_origin%"=="missing" if not "%source_history_origin%"=="unverified" exit /b 1
+if not "%destination_history_origin%"=="beside" if not "%destination_history_origin%"=="sealed" exit /b 1
+set "history_base_missing="
+set "source_history_superseded=1"
+set "history_base_path=%destination_history_path%"
+set "history_base_side=destination"
+set "history_base_set_with_backslash=%destination_set_with_backslash%"
 exit /b 0
 
 :choose_history_base
@@ -1238,19 +1289,28 @@ rem <run>.partial directories (interrupted write-backs: outside the history,
 rem a warning) and junk names (IGNORED_CUSTODY_FILES): a run record, or
 rem anything else the Run records check must account for. A records
 rem directory holding only .partial directories means no earlier runs.
-setlocal EnableDelayedExpansion
-set "records_root=!%~1!"
-if not exist "!records_root!\" (endlocal & exit /b 1)
+setlocal DisableDelayedExpansion
+call :copy_variable %~1 records_root
+call :is_directory records_root || (endlocal & exit /b 1)
 set "holds_records="
-for /f "eol=/ delims=" %%E in ('dir /b /a "!records_root!\" 2^>nul') do if not defined holds_records (
+for /f "eol=/ delims=" %%E in ('dir /b /a "%records_root%\" 2^>nul') do if not defined holds_records (
     set "records_entry=%%E"
-    set "records_entry_counts=1"
-    if exist "!records_root!\%%E\" call :is_partial_run_directory records_entry && set "records_entry_counts="
-    if not exist "!records_root!\%%E\" call :name_matches_list records_entry IGNORED_CUSTODY_FILES && set "records_entry_counts="
-    if defined records_entry_counts set "holds_records=1"
+    call :records_entry_counts && set "holds_records=1"
 )
 if defined holds_records (endlocal & exit /b 0)
 endlocal & exit /b 1
+
+:records_entry_counts
+rem Caller's scope (:records_directory_holds_records): exit 0 if the entry in
+rem records_entry counts as a record: a directory other than a <run>.partial,
+rem or a file other than a junk name.
+set "records_entry_path=%records_root%\%records_entry%"
+call :is_directory records_entry_path || goto records_entry_counts_file
+call :is_partial_run_directory records_entry && exit /b 1
+exit /b 0
+:records_entry_counts_file
+call :name_matches_list records_entry IGNORED_CUSTODY_FILES && exit /b 1
+exit /b 0
 
 :find_newest_sealed_history  side
 rem Caller's scope (:resolve_set_history). The newest sealed history: that of
@@ -1311,9 +1371,9 @@ endlocal & endlocal & exit /b 0
 rem Caller's scope (:history_matches_records): one history row, in row_*.
 set /a "matches_rows+=1"
 call :is_run_directory_name row_run || (set "matches_problem=1" & exit /b 0)
->>"%temp_history_runs%" echo(%row_run%
+call :append_line_to_file row_run temp_history_runs
 set "matches_row_dir=%matches_records_root%\%row_run%"
-if not exist "%matches_row_dir%\" (set "matches_problem=1" & exit /b 0)
+call :is_directory matches_row_dir || (set "matches_problem=1" & exit /b 0)
 call :collect_outside_history matches_row_dir row_run
 set "matches_seal_path=%matches_row_dir%\%RECORD_FILE_PREFIX%%row_run%.sha256"
 set "matches_seal_sha256="
@@ -1347,6 +1407,7 @@ call :copy_variable %~1_history_sealed_run set_aside_run
 set "set_aside_text="
 if "%set_aside_origin%"=="sealed" set "set_aside_text=Run records: in the %~1 set, %set_aside_problem%. This run continues from the newest sealed history instead (run %set_aside_run%), which matches the run records, and writes the destination a complete history built from it."
 if "%set_aside_origin%"=="unverified" set "set_aside_text=Run records: in the %~1 set, %set_aside_problem%, and no sealed history does either: this run continues from it as found."
+if "%~1"=="source" if defined source_history_superseded set "set_aside_text=Run records: in the source set, %set_aside_problem%, and no sealed history there does either. This rerun continues from the destination set's history instead, which matches its run records."
 if not defined set_aside_text exit /b 0
 if "%~2"=="before" (
     set "msg=%set_aside_text% The Run records check fails."
@@ -1394,10 +1455,17 @@ rem :append_history_row), and each cell is cut off up to the next "|".
 rem Delayed expansion is on only inside this helper; the cells come back on
 rem one "endlocal & set" line, expanded before ENDLOCAL and assigned after
 rem it, so "!" in paths survives. Exit 1 if there is no row.
+rem History content is data, never code: the cells come back through "%...%"
+rem on a command line, so any '"' left after the separators (cells never
+rem contain one; a history edited by hand or by a spreadsheet, or a crafted
+rem one, might) is removed here. Otherwise a cell could close the quotes and
+rem run a command (review, 2026-10-16). Such a row no longer matches its
+rem sealed copy, so the Run records check still fails on it.
 if not defined history_row_line exit /b 1
 setlocal EnableDelayedExpansion
 set "remaining=!history_row_line:","=|!"
 set "remaining=!remaining:~1,-1!|"
+set "remaining=!remaining:"=!"
 for %%C in (1 2 3 4 5 6 7 8 9 10 11 12 13) do (
     set "cell_%%C="
     if defined remaining (
@@ -1464,7 +1532,7 @@ if not defined previous_sealed_newest_script (
     call :fail_script_check "the previous run's sealed history is missing or unreadable, so this script can't be compared with the one it used"
     exit /b 0
 )
-for %%V in (%previous_sealed_newest_script%) do set "previous_script_version=%%V"
+call :last_word previous_sealed_newest_script previous_script_version
 call :parse_version previous_script_version previous_version || (
     call :fail_script_check "the previous run's script version (%previous_script_version%) is not a MAJOR.MINOR.PATCH version"
     exit /b 0
@@ -1485,12 +1553,16 @@ if "%version_order%"=="newer" (
 set "previous_log=%previous_run_dir%\%RECORD_FILE_PREFIX%%previous_run%.log"
 set "previous_script_sha256="
 if exist "%previous_log%" for /f "tokens=1* delims=:" %%A in ('findstr /b /c:"  Script SHA-256      : " "%previous_log%" 2^>nul') do set "previous_script_sha256=%%B"
-if defined previous_script_sha256 set "previous_script_sha256=%previous_script_sha256: =%"
+call :clean_sha256_from_record previous_script_sha256
 if not exist "%previous_log%" (
     set "msg=Script: the SHA-256 can't be compared: the previous run's record has no log."
     call :add_warning msg
     set "script_status=PASS"
     set "result_script=PASS: same version as the previous run (%TOOL_VERSION%); SHA-256 not compared (see warnings)"
+    exit /b 0
+)
+if not defined previous_script_sha256 (
+    call :fail_script_check "this run's script is version %TOOL_VERSION%, as the previous run's was, but the previous run's log holds no valid Script SHA-256 to compare it with"
     exit /b 0
 )
 if /i not "%previous_script_sha256%"=="%script_sha256%" (
@@ -1499,6 +1571,32 @@ if /i not "%previous_script_sha256%"=="%script_sha256%" (
 )
 set "script_status=PASS"
 set "result_script=PASS: same version (%TOOL_VERSION%) and SHA-256 as the previous run's script"
+exit /b 0
+
+:clean_sha256_from_record  valueVar
+rem A SHA-256 read from a record: spaces and quotes removed, and cleared
+rem unless 64 hex characters remain, so record content can't reach a command
+rem line and a malformed value never counts as a hash.
+setlocal EnableDelayedExpansion
+set "value=!%~1!"
+if defined value set "value=!value: =!"
+if defined value set "value=!value:"=!"
+call :is_sha256 value || set "value="
+endlocal & set "%~1=%value%"
+exit /b 0
+
+:last_word  textVar  outVar
+rem Set outVar to the text after the last space of textVar (all of it if it
+rem has none), without putting the text on a command line: it comes from a
+rem record. The result is checked by the caller (e.g. :parse_version).
+setlocal EnableDelayedExpansion
+set "word=!%~1!"
+:last_word_next
+if defined word if not "!word: =!"=="!word!" (
+    set "word=!word:* =!"
+    goto last_word_next
+)
+endlocal & set "%~2=%word%"
 exit /b 0
 
 :fail_script_check  reason
@@ -1553,10 +1651,27 @@ rem Flag a set that reached this source by other means since the run that
 rem made it (README, "Location check"): its volume serial and its path,
 rem ignoring the drive letter and case, are compared with that run's
 rem destination (the newest row of the source's history). Warnings only;
-rem a different drive letter alone isn't flagged.
-if not defined source_last_run exit /b 0
+rem a different drive letter alone isn't flagged. A source set with run
+rem records whose history gives no newest row can't be checked: a warning
+rem says so (owner, 2026-10-16, after test round 7).
 if not defined source_set_path exit /b 0
-if not "%source_last_destination_serial%"=="n/a" if not "%source_volume_serial%"=="n/a" if /i not "%source_last_destination_serial%"=="%source_volume_serial%" (
+if not defined source_last_run if not "%source_history_origin%"=="none" (
+    set "msg=Location: not checked: the source set's history can't be used, so where the run that made the set copied it isn't known."
+    call :add_warning msg
+)
+if not defined source_last_run exit /b 0
+rem A serial that couldn't be read ("unknown") is not compared: it would
+rem raise a false warning, or hide a real move.
+set "serials_comparable=1"
+if "%source_last_destination_serial%"=="n/a" set "serials_comparable="
+if "%source_volume_serial%"=="n/a" set "serials_comparable="
+if "%source_last_destination_serial%"=="unknown" set "serials_comparable="
+if "%source_volume_serial%"=="unknown" set "serials_comparable="
+if "%source_volume_serial%"=="unknown" (
+    set "msg=Location: the source volume's serial couldn't be read, so it isn't compared with where the run that made the set (%source_last_run%) copied it."
+    call :add_warning msg
+)
+if defined serials_comparable if /i not "%source_last_destination_serial%"=="%source_volume_serial%" (
     set "msg=Location: the source set is on volume serial %source_volume_serial%, but the run that made it (%source_last_run%) copied it to volume serial %source_last_destination_serial%: it reached this volume by other means since."
     call :add_warning msg
 )
@@ -1628,10 +1743,12 @@ exit /b 0
 
 :precheck_history_row
 rem Caller's scope (:precheck_run_records): one history row, in row_*.
->>"%temp_history_runs%" echo(%row_run%
+call :append_line_to_file row_run temp_history_runs
 set "precheck_row_dir=%precheck_records_root%\%row_run%"
-if exist "%precheck_row_dir%\" call :collect_outside_history precheck_row_dir row_run
-if exist "%precheck_row_dir%\" exit /b 0
+call :is_directory precheck_row_dir || goto precheck_history_row_missing
+call :collect_outside_history precheck_row_dir row_run
+exit /b 0
+:precheck_history_row_missing
 set "msg=Run records: run %row_run%, listed in the history, has no run record in the source set: the Run records check will fail."
 call :add_warning msg
 exit /b 0
@@ -1803,7 +1920,10 @@ if "%run_mode%"=="forensic" if not defined history_base_path if not defined hist
     set "msg=No history or reference record was found in the source: the source is hashed now and becomes the reference record, so this copy is not checked against any earlier record."
     call :add_warning msg
 )
-if not "%destination_was_empty%"=="1" (
+rem A forensic rerun or update was confirmed at the prompt, and the header
+rem says so ("Was"): no warning (owner, 2026-10-16). In /nonforensic the
+rem destination was any non-empty directory.
+if "%run_mode%"=="nonforensic" if not "%destination_was_empty%"=="1" (
     set "msg=The destination was not empty (you chose to continue): robocopy overwrites same-named files that differ."
     call :add_warning msg
 )
@@ -1856,9 +1976,9 @@ rem and symbolic links, which robocopy doesn't follow or copy with /xj) that
 rem are not in the destination: each is a warning, since what it points to
 rem is not part of this copy. Other reparse points that robocopy did copy
 rem (e.g. cloud placeholder files) are left alone: only the outcome counts. A
-rem link inside one already listed (DIR /S looks inside links) isn't listed
-rem again.
-set "skipped_link_prefix="
+rem link inside a link that wasn't copied isn't listed again: DIR /S looks
+rem inside links, and lists what is inside one after other links, not
+rem straight after it (test round 7), so each link's directories are checked.
 for /f "eol=/ delims=" %%L in ('dir /s /b /a:l "%source_with_backslash%" 2^>nul') do (
     set "skipped_link_path=%%L"
     call :report_skipped_link
@@ -1867,9 +1987,8 @@ exit /b 0
 
 :report_skipped_link
 rem Caller's scope (:find_skipped_links): one link, in skipped_link_path.
-if defined skipped_link_prefix call :path_is_under skipped_link_path skipped_link_prefix && exit /b 0
 call :link_was_copied skipped_link_path && exit /b 0
-set "skipped_link_prefix=%skipped_link_path%\"
+call :is_inside_skipped_link skipped_link_path && exit /b 0
 set "msg=Not copied: %skipped_link_path% is a link (a junction or symbolic link), which robocopy doesn't follow (/xj): what it points to is not part of this copy."
 call :add_warning msg
 set "msg=[WARN] %msg%"
@@ -1882,6 +2001,26 @@ setlocal EnableDelayedExpansion
 call :relative_path %~1 source_with_backslash link_relative_path || (endlocal & exit /b 1)
 if exist "!destination_with_backslash!!link_relative_path!" (endlocal & exit /b 0)
 endlocal & exit /b 1
+
+:is_inside_skipped_link  linkPathVar
+rem Exit 0 if one of the directories between the source and the link is
+rem itself a link that wasn't copied (reported already, or inside one that
+rem was). Walks up from the link's directory to the source.
+setlocal DisableDelayedExpansion
+call :copy_variable %~1 enclosing_path
+:is_inside_skipped_link_up
+set "previous_enclosing_path=%enclosing_path%"
+for %%A in ("%enclosing_path%\..") do set "enclosing_path=%%~fA"
+if "%enclosing_path:~-1%"=="\" set "enclosing_path=%enclosing_path:~0,-1%"
+if /i "%enclosing_path%"=="%previous_enclosing_path%" (endlocal & exit /b 1)
+if /i "%enclosing_path%\"=="%source_with_backslash%" (endlocal & exit /b 1)
+set "enclosing_with_backslash=%enclosing_path%\"
+call :path_is_under enclosing_with_backslash source_with_backslash || (endlocal & exit /b 1)
+set "enclosing_attributes="
+for %%A in ("%enclosing_path%") do set "enclosing_attributes=%%~aA"
+if not "%enclosing_attributes:~8,1%"=="l" goto is_inside_skipped_link_up
+call :link_was_copied enclosing_path && goto is_inside_skipped_link_up
+endlocal & exit /b 0
 
 :path_is_under  pathVar  prefixVar
 rem Exit 0 if the path starts with the prefix (a directory path ending in
@@ -1925,7 +2064,8 @@ rem at callback_drive_root. An exact name is tested with IF EXIST (DIR on a
 rem directory would list its contents); a pattern with * or ? is expanded with
 rem DIR.
 echo(%~1| findstr /r "[*?]" >nul && goto find_housekeeping_dir_wildcard
-if exist "%callback_drive_root%%~1\" call :record_housekeeping_item D "%~1"
+set "housekeeping_dir_path=%callback_drive_root%%~1"
+call :is_directory housekeeping_dir_path && call :record_housekeeping_item D "%~1"
 exit /b 0
 :find_housekeeping_dir_wildcard
 for /f "eol=/ delims=" %%F in ('dir /b /ad "%callback_drive_root%%~1" 2^>nul') do call :record_housekeeping_item D "%%F"
@@ -2258,7 +2398,8 @@ if "!log_enabled!"=="1" set log_option=/unilog:"!temp_robocopy_unicode_output!"
 call :ignored_names_as_robocopy_arguments ignored_arguments
 set "custody_exit_codes=0"
 set "custody_found="
-if exist "!source_set_with_backslash!!RECORDS_DIR_NAME!\" (
+set "source_records_directory=!source_set_with_backslash!!RECORDS_DIR_NAME!"
+call :is_directory source_records_directory && (
     set "custody_found=1"
     robocopy "!source_set_with_backslash!!RECORDS_DIR_NAME! " "!destination_set_with_backslash!!RECORDS_DIR_NAME! " *.* !COPY_FLAGS! /xf !ignored_arguments! /j /mt:1 /r:!RETRY_COUNT! /w:!RETRY_WAIT_SECONDS! !robocopy_progress_flags! !backup_flag! !log_option!
     set "pass_exit_code=!errorlevel!"
@@ -2419,7 +2560,6 @@ set "msg=" & call :show msg
 set "msg=--- Hashing the destination ---" & call :show msg
 call :hash_directory destination || set "hash_check_incomplete=1"
 call :write_hash_csv destination
-set "reference_name=the source"
 set "reference_csv_path=%staged_hash_csv_source%"
 call :compare_with_reference
 exit /b 0
@@ -2486,6 +2626,13 @@ for %%F in (%COARSE_TIME_FILESYSTEMS%) do (
     if /i "!destination_filesystem!"=="%%F" set "fft_flag=/fft"
 )
 if defined fft_flag set "time_precision=to 2 s, as FAT/exFAT is involved"
+rem A network share may store coarser times than the file system it copies
+rem from; robocopy's documentation recommends /fft for shares (owner,
+rem 2026-10-16, after the reviews).
+if not defined fft_flag if "!source_path:~0,2!"=="\\" set "time_precision=to 2 s, as a network share is involved"
+if not defined fft_flag if "!destination_path:~0,2!"=="\\" set "time_precision=to 2 s, as a network share is involved"
+if not defined fft_flag if "!source_path:~0,2!"=="\\" set "fft_flag=/fft"
+if not defined fft_flag if "!destination_path:~0,2!"=="\\" set "fft_flag=/fft"
 set "msg=" & call :show_and_log msg
 set "msg=--- Metadata check: size and last-modified time, compared !time_precision! ---"
 call :show_and_log msg
@@ -2607,10 +2754,30 @@ rem fails or prints anything else, so a failure can never look like a hash.
 rem certutil can't hash empty files: a file of size 0 gets EMPTY_SHA256. The
 rem size check is skipped for names containing "?" (a character the console
 rem code page couldn't show), where FOR could match a different file.
+rem certutil runs here, not inside a FOR /F command: FOR /F runs its
+rem command in a child cmd, which would expand %NAME% in a file name (e.g.
+rem "x %OS% y.txt" -> "x Windows_NT y.txt") and hash another file (test
+rem runner round 6). Its output goes to temp_certutil_output and is read
+rem from there.
 setlocal EnableDelayedExpansion
 set "file_path=!%~1!"
 set "sha256="
-for /f "skip=1 delims=" %%H in ('certutil -hashfile "!file_path!" SHA256 2^>nul') do if not defined sha256 set "sha256=%%H"
+del "!temp_certutil_output!" >nul 2>&1
+rem certutil gets the extended-length form (\\?\, \\?\UNC\ for shares): Windows
+rem then takes the name as it is, instead of normalising it (a trailing dot or
+rem space dropped, so "report." would be hashed as "report"; reserved names
+rem such as "nul"), and paths over 260 characters can be read (review,
+rem 2026-10-16). The form isn't normalised either, so a path holding "\\",
+rem "\.\" or "\..\" keeps the plain form.
+set "hash_path=\\?\!file_path!"
+if "!file_path:~0,2!"=="\\" set "hash_path=\\?\UNC\!file_path:~2!"
+set "path_after_start=!file_path:~2!"
+if not "!path_after_start!"=="!path_after_start:\\=!" set "hash_path=!file_path!"
+if not "!file_path!"=="!file_path:\.\=!" set "hash_path=!file_path!"
+if not "!file_path!"=="!file_path:\..\=!" set "hash_path=!file_path!"
+certutil -hashfile "!hash_path!" SHA256 >"!temp_certutil_output!" 2>nul
+if exist "!temp_certutil_output!" for /f "usebackq skip=1 delims=" %%H in ("!temp_certutil_output!") do if not defined sha256 set "sha256=%%H"
+del "!temp_certutil_output!" >nul 2>&1
 if defined sha256 set "sha256=!sha256: =!"
 if defined sha256 if not "!sha256:~64!"=="" set "sha256="
 if defined sha256 if "!sha256:~63,1!"=="" set "sha256="
@@ -2629,9 +2796,13 @@ rem record must be in the destination with the same SHA-256. Both are written
 rem as compare lines "relative path*SHA-256*REF" (from the reference record)
 rem and "...*DST" (from the destination); * can't occur in Windows names.
 rem Sorted ordinally (sort /L C), each path's two lines are adjacent, so one
-rem pass pairs them up.
+rem pass pairs them up. In /nonforensic the reference is this run's hashes of
+rem the source, which are in no record: the messages say "the source".
+set "compare_reference_label=reference record"
+if "%run_mode%"=="nonforensic" set "compare_reference_label=source"
 set "msg=" & call :show_and_log msg
 set "msg=--- Destination vs reference record: %reference_name% ---"
+if "%run_mode%"=="nonforensic" set "msg=--- Destination vs source ---"
 call :show_and_log msg
 for /f "usebackq skip=1 delims=" %%L in ("%reference_csv_path%") do (
     set "reference_row=%%L"
@@ -2641,7 +2812,7 @@ if not exist "%temp_compare_lines%" type nul >"%temp_compare_lines%"
 sort /L C /O "%temp_compare_lines_sorted%" "%temp_compare_lines%"
 set "compare_line_count=0"
 for /f %%N in ('find /c /v "" ^< "%temp_compare_lines_sorted%"') do set "compare_line_count=%%N"
-set "msg=Pairing %compare_line_count% entries (reference record and destination) ..."
+set "msg=Pairing %compare_line_count% entries (%compare_reference_label% and destination) ..."
 call :show msg
 set "previous_path="
 set "previous_hash="
@@ -2708,7 +2879,7 @@ if defined previous_path if "!previous_path!"=="!file_path!" (
     if "!tag!"=="!previous_tag!" set "problem=Listed twice in the reference record" & set "outcome_counter=invalid_row_count"
     if not defined problem call :is_sha256 reference_hash || (set "problem=No valid hash in the reference record" & set "outcome_counter=invalid_row_count")
     if not defined problem if "!destination_hash!"=="UNREADABLE" set "problem=UNREADABLE in the destination" & set "outcome_counter=unreadable_count"
-    if not defined problem if /i not "!reference_hash!"=="!destination_hash!" set "problem=DIFFERS from the reference record" & set "outcome_counter=differ_count"
+    if not defined problem if /i not "!reference_hash!"=="!destination_hash!" set "problem=DIFFERS from the !compare_reference_label!" & set "outcome_counter=differ_count"
     if defined problem (
         set "msg=[FAIL] !problem!: !file_path!"
         call :show_and_log msg
@@ -2735,17 +2906,21 @@ exit /b 0
 :settle_unpaired_line  pathVar  tagVar
 rem A path found on one side only; sets outcome_counter. In the reference
 rem record but not in the destination: missing (FAIL). In the destination but
-rem not in the record: added since (a warning; custody files never get here,
-rem they are hashed separately). Caller's scope, delayed expansion on.
+rem not in the record: added since. In a forensic run that is a FAIL (owner,
+rem 2026-10-16, after the reviews): inside the evidence directory a file the
+rem reference record doesn't list is unexplained. In /nonforensic it is a file
+rem that was already in the destination: a warning. Custody files never get
+rem here; they are hashed separately. Caller's scope, delayed expansion on.
 if "!%~2!"=="REF" (
-    set "msg=[FAIL] MISSING from the destination (in the reference record): !%~1!"
+    set "msg=[FAIL] MISSING from the destination (in the !compare_reference_label!): !%~1!"
     call :show_and_log msg
     call :remember_problem msg
     set "outcome_counter=missing_count"
     exit /b 0
 )
 set "unpaired_path=!%~1!"
-set "msg=[WARN] Not in the reference record (added since, so not verified against it): !unpaired_path!"
+set "msg=[FAIL] Not in the reference record (added since, so not verified against it): !unpaired_path!"
+if "!run_mode!"=="nonforensic" set "msg=[WARN] Not in the source (already in the destination, not verified): !unpaired_path!"
 call :show_and_log msg
 call :remember_problem msg
 set "outcome_counter=added_file_count"
@@ -2775,7 +2950,9 @@ rem match the history; a run record failing its seal (:check_run_record).
 rem A leftover <run>.partial directory (an interrupted write-back) is a warning
 rem and outside the history.
 set "run_records_root=%destination_set_with_backslash%%RECORDS_DIR_NAME%"
-if not exist "%run_records_root%\" if not defined history_base_path if not defined history_base_missing exit /b 0
+set "run_records_root_found="
+call :is_directory run_records_root && set "run_records_root_found=1"
+if not defined run_records_root_found if not defined history_base_path if not defined history_base_missing exit /b 0
 set "run_records_checked=1"
 set "msg=" & call :show_and_log msg
 set "msg=--- Run records against the history and their seals ---" & call :show_and_log msg
@@ -2799,11 +2976,29 @@ for /f "eol=/ delims=" %%F in ('dir /b /a-d "%run_records_root%\" 2^>nul') do (
     set "stray_name=%%F"
     call :report_stray_record_file
 )
+type nul >"%temp_predating_records%"
 for /f "eol=/ delims=" %%R in ('dir /b /ad /on "%run_records_root%\" 2^>nul') do (
     set "record_directory_name=%%R"
     call :check_record_directory_listed
 )
+call :report_predating_records
 exit /b 0
+
+:report_predating_records
+rem One warning for all run records that predate a restarted history and
+rem whose seal files still have the SHA-256 listed for them (owner,
+rem 2026-10-16: one line per copy, not one per record).
+setlocal EnableDelayedExpansion
+set "predating_count=0"
+set "predating_names="
+for /f "usebackq delims=" %%P in ("!temp_predating_records!") do (
+    set /a "predating_count+=1"
+    set "predating_names=!predating_names!, %%P"
+)
+if !predating_count! equ 0 (endlocal & exit /b 0)
+set "msg=Run records: !predating_count! run record(s) predate the history (listed as outside it when it was restarted): !predating_names:~2!. Each one's seal file still has the SHA-256 listed for it; its files are checked against that seal separately."
+call :add_warning msg
+endlocal & exit /b 0
 
 :check_history_row
 rem Caller's scope (:check_run_records): one row of the history (row_*, on
@@ -2811,11 +3006,11 @@ rem line history_line_number). Its run record must exist and pass its seal,
 rem its seal's SHA-256 must be the row's Seal SHA-256, and its own sealed
 rem history must be the history up to this row (with this row's pending
 rem seal text, the only difference).
->>"%temp_history_runs%" echo(%row_run%
+call :append_line_to_file row_run temp_history_runs
 set "row_run_dir=%run_records_root%\%row_run%"
 rem Row 1 is line 2 of the file (line 1 is the header).
 set /a "history_row_number=history_line_number - 1"
-if not exist "%row_run_dir%\" (
+call :is_directory row_run_dir || (
     set "msg=[FAIL] Run records: run %row_run% (row %history_row_number% of the history) has no run record."
     call :show_and_log msg
     call :remember_problem msg
@@ -2881,7 +3076,8 @@ exit /b 0
 rem A leftover .partial: a warning, once (the check before the copy may have
 rem listed it already); here it is also logged with the run records.
 set "msg=Run records: %record_directory_name% is an interrupted write-back (a run record never completed); it is outside the history."
-call :show_and_log msg
+set "tagged_msg=[WARN] %msg%"
+call :show_and_log tagged_msg
 findstr /x /l /c:"%record_directory_name%" "%temp_partial_warned%" >nul 2>&1 && exit /b 0
 call :add_warning msg
 exit /b 0
@@ -2890,6 +3086,13 @@ call :check_run_record record_directory_name record_directory_dir
 set "record_directory_seal=%record_directory_dir%\%RECORD_FILE_PREFIX%%record_directory_name%.sha256"
 set "record_directory_seal_sha256="
 if exist "%record_directory_seal%" call :get_sha256 record_directory_seal record_directory_seal_sha256
+rem Listed with no seal ("none") and still without one: unchanged since the
+rem restart; the missing seal itself is a failure of :check_run_record.
+if "%outside_seal_sha256%"=="none" if not defined record_directory_seal_sha256 (
+    set "msg=Run records: %record_directory_name% predates the history: run %outside_listed_by% found it outside the history it restarted, without a seal, and it still has none."
+    call :add_warning msg
+    exit /b 0
+)
 if /i not "%record_directory_seal_sha256%"=="%outside_seal_sha256%" (
     set "msg=[FAIL] Run records: %record_directory_name%, listed by run %outside_listed_by% as outside the history it restarted, has changed since: its seal's SHA-256 isn't the one listed."
     call :show_and_log msg
@@ -2897,8 +3100,9 @@ if /i not "%record_directory_seal_sha256%"=="%outside_seal_sha256%" (
     set /a "run_record_problem_count+=1"
     exit /b 0
 )
-set "msg=Run records: %record_directory_name% predates the history: run %outside_listed_by% found it outside the history it restarted; it still matches the seal SHA-256 listed for it."
-call :add_warning msg
+rem Listed for one warning after all run records are checked
+rem (:report_predating_records), not one warning each.
+call :append_line_to_file record_directory_name temp_predating_records
 exit /b 0
 
 :list_run_outside_history
@@ -2971,10 +3175,7 @@ for /f "usebackq tokens=1,*" %%A in ("!seal_path!") do (
     set "listed_name=%%B"
     call :check_sealed_file run run_dir listed_name listed_sha256
 )
-for /f "eol=/ delims=" %%F in ('dir /b /s /a-d "!run_dir!\" 2^>nul') do (
-    set "directory_file_path=%%F"
-    call :check_file_listed_in_seal run run_dir seal_path directory_file_path
-)
+call :check_run_record_files run run_dir seal_path
 set "msg=Run record !run!: !matches! file(s) match its seal, !problems! problem(s). Seal SHA-256: !seal_sha256!"
 call :show_and_log msg
 :check_run_record_done
@@ -2986,6 +3187,24 @@ if "!run!"=="!reference_run!" (
     if !problems! gtr 0 set "reference_failed=1"
 )
 endlocal & set /a "run_record_count+=1, run_record_file_match_count+=%matches%, run_record_problem_count+=%problems%, reference_seal_failed|=%reference_failed%" & if not "%reference_text%"=="" set "reference_seal_result_text=%reference_text%"
+exit /b 0
+
+:check_run_record_files  runVar  runDirVar  sealPathVar
+rem Caller's scope (:check_run_record, delayed expansion on): every file in
+rem the run record must be listed in its seal (:check_file_listed_in_seal).
+rem The listing runs with delayed expansion off, so a "!" in the path (e.g.
+rem in the destination's name) survives the FOR value; when it was on, the
+rem "!" was lost, the path couldn't be compared and an unlisted file went
+rem unreported (review, 2026-10-16). Problems found are added to the
+rem caller's problems count.
+setlocal DisableDelayedExpansion
+call :copy_variable %~2 record_files_dir
+set "problems=0"
+for /f "eol=/ delims=" %%F in ('dir /b /s /a-d "%record_files_dir%\" 2^>nul') do (
+    set "directory_file_path=%%F"
+    call :check_file_listed_in_seal %~1 %~2 %~3 directory_file_path
+)
+endlocal & set /a "problems+=%problems%"
 exit /b 0
 
 :check_sealed_file  runVar  runDirVar  nameVar  sha256Var
@@ -3018,11 +3237,18 @@ setlocal EnableDelayedExpansion
 set "file_path=!%~4!"
 for %%N in ("!file_path!") do set "file_name=%%~nxN"
 set "run_dir_with_backslash=!%~2!\"
-call :relative_path file_path run_dir_with_backslash name_in_record || (endlocal & exit /b 0)
+call :relative_path file_path run_dir_with_backslash name_in_record || goto check_file_listed_in_seal_unresolved
 if /i "!name_in_record!"=="!RECORD_FILE_PREFIX!!%~1!.sha256" (endlocal & exit /b 0)
 call :name_matches_list file_name IGNORED_CUSTODY_FILES && (endlocal & exit /b 0)
 findstr /l /e /c:" *!name_in_record!" "!%~3!" >nul 2>&1 && (endlocal & exit /b 0)
 set "msg=[FAIL] Run record !%~1!: !name_in_record! is not listed in its seal."
+call :show_and_log msg
+call :remember_problem msg
+endlocal & set /a "problems+=1" & exit /b 0
+:check_file_listed_in_seal_unresolved
+rem A file found in the run record whose place in it can't be worked out is
+rem never taken as listed: unknown is not passed.
+set "msg=[FAIL] Run record !%~1!: !file_path! is in the run record, but its path inside it couldn't be worked out, so it can't be checked against the seal."
 call :show_and_log msg
 call :remember_problem msg
 endlocal & set /a "problems+=1" & exit /b 0
@@ -3177,7 +3403,14 @@ rem The record the destination was compared with; if hashing stopped before
 rem the comparison, the one named by the history, else none.
 set "result_reference=%reference_name%"
 if not defined result_reference set "result_reference=none"
-set /a "hash_problem_count=differ_count + missing_count + invalid_row_count + unreadable_count + unexpected_listing_lines + hash_check_incomplete + reference_seal_failed"
+rem Every row of the reference record must be accounted for (matched, or a
+rem listed problem); otherwise a counting slip could hide a file (review,
+rem 2026-10-16).
+set /a "accounted_row_count=match_count + differ_count + missing_count + invalid_row_count + unreadable_count"
+set "unaccounted_rows=0"
+if %hash_check_incomplete% equ 0 if %accounted_row_count% neq %reference_row_count% call :report_unaccounted_rows
+set /a "hash_problem_count=differ_count + missing_count + invalid_row_count + unreadable_count + unexpected_listing_lines + hash_check_incomplete + reference_seal_failed + unaccounted_rows"
+if "%run_mode%"=="forensic" set /a "hash_problem_count+=added_file_count"
 set "hash_status=PASS"
 if %hash_problem_count% neq 0 set "hash_status=FAIL"
 if %match_count% equ 0 set "hash_status=FAIL"
@@ -3188,6 +3421,9 @@ set "result_hash_detail=%differ_count% differ, %missing_count% missing, %unreada
 if "%run_mode%"=="nonforensic" set "result_hash_detail=%differ_count% differ, %missing_count% missing, %unreadable_count% unreadable"
 if %hash_check_incomplete% neq 0 set "result_hash_detail=%result_hash_detail%; INCOMPLETE (see failures)"
 if %unexpected_listing_lines% neq 0 set "result_hash_detail=%result_hash_detail%; %unexpected_listing_lines% unexpected listing line(s)"
+rem Files added since the reference fail a forensic run even when every file
+rem in the record matches: say so first.
+if "%run_mode%"=="forensic" if %added_file_count% gtr 0 set "result_hash=%hash_status%: %added_file_count% file(s) in the destination aren't in the reference record (added since); %match_count% of %reference_row_count% %reference_label% match the destination"
 rem A reference whose run record fails its checks can't be relied on, even
 rem if every file matches it: say so first, so the status can't be misread.
 if %reference_seal_failed% neq 0 set "result_hash=%hash_status%: the reference record's run record failed its checks, so the reference can't be relied on; %match_count% of %reference_row_count% %reference_label% match it"
@@ -3212,6 +3448,14 @@ if %history_row_count% gtr 0 if not defined run_records_checked set "run_records
 if defined run_records_checked set "run_records_status=PASS" & set "result_run_records=PASS: %run_record_count% run record(s) match their seals and the history (%run_record_file_match_count% sealed file(s))"
 if defined run_records_checked if %run_record_count% equ 0 if %run_record_problem_count% equ 0 set "run_records_status=NONE" & set "result_run_records=NONE: no earlier runs found in the source"
 if %run_record_problem_count% neq 0 set "run_records_status=FAIL" & set "result_run_records=FAIL: %run_record_problem_count% problem(s) in the run records (see failures)"
+exit /b 0
+
+:report_unaccounted_rows
+rem Caller's scope (:work_out_verification_status): not every row of the
+rem reference record was matched or reported.
+set "unaccounted_rows=1"
+set "msg=[FAIL] The reference record lists %reference_row_count% file(s), but only %accounted_row_count% were matched or reported: the comparison can't be relied on."
+call :remember_problem msg
 exit /b 0
 
 :report_nothing_to_verify
@@ -3371,11 +3615,16 @@ rem (staged), then show the seal's own SHA-256 for the user's
 rem chain-of-custody notes. With that value recorded elsewhere, any later
 rem change to the record can be detected. A script copy isn't listed: the
 rem sealed log records the script's SHA-256, which the copy was checked
-rem against. Sets run_seal_sha256.
+rem against. Sets run_seal_sha256, and seal_incomplete=1 if any record file
+rem or the seal itself couldn't be hashed: :publish_records then writes
+rem nothing and the run fails (owner, 2026-10-16), since a run record whose
+rem seal doesn't cover it would fail every later copy.
 setlocal EnableDelayedExpansion
 set "sealed_count=0"
+set "seal_expected_count=0"
 for %%F in (log_staged_path staged_hash_csv_source staged_hash_csv_destination staged_hash_csv_custody staged_history_path staged_outside_history_path) do (
     if defined %%F if exist "!%%F!" (
+        set /a "seal_expected_count+=1"
         set "record_path=!%%F!"
         set "record_sha256="
         call :get_sha256 record_path record_sha256
@@ -3384,13 +3633,16 @@ for %%F in (log_staged_path staged_hash_csv_source staged_hash_csv_destination s
             >>"!staged_seal_path!" echo(!record_sha256! *!record_name!
             set /a "sealed_count+=1"
         ) else (
-            echo [WARN] Could not hash !record_name! for the seal.
+            echo [FAIL] Could not hash !record_name! for the seal.
         )
     )
 )
-if !sealed_count! equ 0 (endlocal & exit /b 0)
+set "incomplete="
+if !sealed_count! neq !seal_expected_count! set "incomplete=1"
+if !sealed_count! equ 0 (endlocal & set "seal_incomplete=1" & exit /b 0)
 set "seal_sha256="
 call :get_sha256 staged_seal_path seal_sha256
+if not defined seal_sha256 set "incomplete=1"
 echo.
 echo Run record sealed in: !seal_file_name!
 if defined seal_sha256 (
@@ -3398,9 +3650,9 @@ if defined seal_sha256 (
     echo Record this value in your chain-of-custody notes: it shows whether this
     echo run's record is later changed.
 ) else (
-    echo [WARN] Could not hash the seal file.
+    echo [FAIL] Could not hash the seal file.
 )
-endlocal & set "run_seal_sha256=%seal_sha256%"
+endlocal & set "run_seal_sha256=%seal_sha256%" & set "seal_incomplete=%incomplete%"
 exit /b 0
 
 :publish_records
@@ -3418,7 +3670,8 @@ rem its staged original by SHA-256. Only if all match and the run record is
 rem in place is the staging directory removed; otherwise it is kept and its
 rem path shown, so no record is lost, and the exit code becomes FAIL.
 if not defined staging_dir exit /b 0
-if not exist "%staging_dir%\" exit /b 0
+call :is_directory staging_dir || exit /b 0
+if defined seal_incomplete goto publish_records_seal_incomplete
 setlocal
 set "record_count=0"
 set "records_matching=0"
@@ -3463,10 +3716,32 @@ rem place. Say what the destination holds of it: a .partial directory,
 rem nothing at all, or, if the destination can't be reached (e.g. the drive
 rem was removed), that this can't be told.
 set "msg=[WARN] The run record could not be written to the destination (nothing of it is there) and is not added to the history."
-if not exist "%destination_set_with_backslash%" set "msg=[WARN] The run record could not be written: the destination set directory can't be reached, so whether any of the run record is there can't be told. It is not added to the history; a later copy warns about any %run_utc_stamp%%PARTIAL_RUN_SUFFIX% left there."
-if exist "%destination_partial_run_dir%\" set "msg=[WARN] The run record was not completed in the destination: it is left as %run_utc_stamp%%PARTIAL_RUN_SUFFIX% and is not added to the history."
+call :is_directory destination_set_with_backslash || set "msg=[WARN] The run record could not be written: the destination set directory can't be reached, so whether any of the run record is there can't be told. It is not added to the history; a later copy warns about any %run_utc_stamp%%PARTIAL_RUN_SUFFIX% left there."
+call :is_directory destination_partial_run_dir && set "msg=[WARN] The run record was not completed in the destination: it is left as %run_utc_stamp%%PARTIAL_RUN_SUFFIX% and is not added to the history."
 call :show msg
 exit /b 0
+
+:publish_records_seal_incomplete
+rem The seal doesn't cover the whole run record (:write_seal): none of this
+rem run's record is written to the destination, the staging directory is
+rem kept, and the run fails. As when the write-back fails, the history this
+rem run continued is written beside the evidence, unchanged, so it matches the
+rem run records the custody pass copied there (owner, 2026-10-16, after test
+rem round 7: without it, the next copy failed for a missing history).
+setlocal
+set "record_count=0"
+set "records_matching=0"
+set "records_robocopy_exit_codes=0"
+set "continued_history_text="
+if defined history_base_path call :publish_root_history continued
+if defined history_base_path set "continued_history_text= The history this run continued was written beside the evidence, unchanged."
+if defined history_base_path if not %records_matching% equ %record_count% set "continued_history_text= The history this run continued couldn't be written beside the evidence intact (see above)."
+echo.
+set "msg=[FAIL] This run's record couldn't be sealed completely, so none of it was written to the destination.%continued_history_text% The log and summary were written before the seal; the exit code is FAIL (%EXIT_CODE_FAIL%). Everything is kept here:"
+call :show msg
+set "msg=       %staging_dir%"
+call :show msg
+endlocal & set "exit_code=%EXIT_CODE_FAIL%" & exit /b 1
 
 :publish_staged_directory  where
 rem Caller's scope (:publish_records). where: records (staged_records_dir to
@@ -3523,7 +3798,7 @@ call :get_sha256 staged_path staged_sha256
 if exist "!destination_copy_path!" call :get_sha256 destination_copy_path destination_sha256
 if defined staged_sha256 if /i "!staged_sha256!"=="!destination_sha256!" (endlocal & set /a "records_matching+=1" & exit /b 0)
 set "msg=[WARN] Not in the destination, or it differs from the staged record: !%~1!"
-if not exist "!destination_set_with_backslash!" set "msg=[WARN] Couldn't be read back (the destination set directory can't be reached): !%~1!"
+call :is_directory destination_set_with_backslash || set "msg=[WARN] Couldn't be read back (the destination set directory can't be reached): !%~1!"
 call :show msg
 endlocal & exit /b 0
 
@@ -3590,6 +3865,14 @@ if not "%~2"=="append" type nul >"%robocopy_output_file%" 2>nul
 )) >>"%robocopy_output_file%"
 del "%temp_robocopy_unicode_output%" >nul 2>&1
 endlocal & exit /b 0
+
+:check_script_path
+rem The script's own path goes on child command lines too (e.g.
+rem :read_carriage_return), so it may not contain "%" either (see
+rem :path_has_percent).
+call :path_has_percent script_path || exit /b 0
+set "abort_reason=The script's own path contains %%, which can't be handled safely yet: move or rename it."
+exit /b 1
 
 :read_carriage_return
 rem Set carriage_return to the CR character, for :save_robocopy_unicode_output
@@ -3681,11 +3964,17 @@ if not defined normalise_path_input if "%~4"=="1" if defined default_source_path
 )
 call :normalise_path
 if errorlevel 1 goto ask_directory_loop
-if exist "%normalise_path_result%" if not exist "%normalise_path_with_backslash%" (
+call :path_has_percent normalise_path_result && (
+    echo Paths containing %% can't be handled safely yet: rename the directory or choose another.
+    goto ask_directory_loop
+)
+set "answer_is_directory="
+call :is_directory normalise_path_result && set "answer_is_directory=1"
+if exist "%normalise_path_result%" if not defined answer_is_directory (
     echo That is a file, not a directory.
     goto ask_directory_loop
 )
-if "%~3"=="1" if not exist "%normalise_path_with_backslash%" (
+if "%~3"=="1" if not defined answer_is_directory (
     echo Directory not found.
     if defined is_elevated if "%normalise_path_result:~1,1%"==":" if not exist "%normalise_path_result:~0,2%\" (
         echo As administrator, drive letters mapped in your normal session are not
@@ -3696,6 +3985,31 @@ if "%~3"=="1" if not exist "%normalise_path_with_backslash%" (
 set "%~1_path=%normalise_path_result%"
 set "%~1_with_backslash=%normalise_path_with_backslash%"
 exit /b 0
+
+:count_rejected_answer  counterVar  what
+rem Count an answer that :ask_directory accepted but the caller then rejected
+rem (a set rule, or source and destination overlapping). Exit 1 (with
+rem abort_reason) after MAX_PROMPT_ATTEMPTS of them: :ask_directory's own count
+rem starts again on every call, and with S1 an empty answer takes the default
+rem each time, so a closed or redirected console would otherwise loop forever
+rem (test round 7).
+set /a "%~1+=1"
+setlocal EnableDelayedExpansion
+if !%~1! lss %MAX_PROMPT_ATTEMPTS% (endlocal & exit /b 0)
+endlocal
+set "abort_reason=No usable %~2 after %MAX_PROMPT_ATTEMPTS% attempts (no console input?)."
+exit /b 1
+
+:path_has_percent  pathVar
+rem Exit 0 if the path contains "%". Many FOR /F commands put directory paths
+rem on a child command line, where %NAME% would be expanded, so such paths
+rem are refused at the prompt for now (owner, 2026-10-16). Evidence file
+rem names inside the directories are safe: hashing doesn't use a child
+rem command line (:get_sha256).
+setlocal EnableDelayedExpansion
+set "path_to_check=!%~1!"
+if "!path_to_check:%%=!"=="!path_to_check!" (endlocal & exit /b 1)
+endlocal & exit /b 0
 
 :normalise_path
 rem Caller's scope, fixed names: IN normalise_path_input. OUT
@@ -3984,6 +4298,23 @@ if /i not "!relative_path_prefix!"=="!%~2!" exit /b 1
 if not defined %~3 exit /b 1
 exit /b 0
 
+:is_directory  pathVar
+rem Exit 0 if the path (with or without a trailing backslash) is an existing
+rem directory. Every directory test goes through here: IF EXIST "<path>\"
+rem alone is also true for a file on a network path (UNC or a mapped drive;
+rem test round 7). So where the path's attributes can be read they must include
+rem d; where none can be read (e.g. a share's root), IF EXIST decides.
+setlocal EnableDelayedExpansion
+set "directory_to_test=!%~1!"
+if not defined directory_to_test (endlocal & exit /b 1)
+if "!directory_to_test:~-1!"=="\" set "directory_to_test=!directory_to_test:~0,-1!"
+if not exist "!directory_to_test!\" (endlocal & exit /b 1)
+set "directory_attributes="
+for %%A in ("!directory_to_test!") do set "directory_attributes=%%~aA"
+if not defined directory_attributes (endlocal & exit /b 0)
+if "!directory_attributes:~0,1!"=="d" (endlocal & exit /b 0)
+endlocal & exit /b 1
+
 :is_drive_root  pathVar
 rem Exit 0 if the path (in its with-backslash form) is a drive root: "X:\".
 setlocal EnableDelayedExpansion
@@ -4026,7 +4357,7 @@ exit /b 0
 :cleanup_temp
 rem Delete this run's temporary files; a failed delete never stops the run.
 setlocal EnableDelayedExpansion
-for %%T in (temp_file_list temp_metadata_list temp_robocopy_unicode_output temp_hash_rows_source temp_hash_rows_destination temp_hash_rows_custody temp_custody_list temp_compare_lines temp_compare_lines_sorted temp_summary_warnings temp_summary_failures temp_warnings temp_clock_status temp_housekeeping_source temp_housekeeping_destination temp_history_runs temp_history_lines temp_history_filled temp_outside_history temp_partial_warned temp_sealed_history_source temp_sealed_history_destination plain_hash_csv_source plain_hash_csv_destination) do (
+for %%T in (temp_file_list temp_metadata_list temp_robocopy_unicode_output temp_certutil_output temp_hash_rows_source temp_hash_rows_destination temp_hash_rows_custody temp_custody_list temp_compare_lines temp_compare_lines_sorted temp_summary_warnings temp_summary_failures temp_warnings temp_clock_status temp_housekeeping_source temp_housekeeping_destination temp_history_runs temp_history_lines temp_history_filled temp_outside_history temp_partial_warned temp_predating_records temp_sealed_history_source temp_sealed_history_destination plain_hash_csv_source plain_hash_csv_destination) do (
     if defined %%T if exist "!%%T!" del /f /q "!%%T!" >nul 2>&1
 )
 rem The staging directories go only if empty: if they still hold records,

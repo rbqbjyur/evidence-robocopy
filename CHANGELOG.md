@@ -5,6 +5,75 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.1.0 - 2026-10-16
+
+### Changed
+- Source and destination paths containing `%` are refused at the prompt;
+  a drive-root first copy whose volume label contains `%` is named after
+  the volume serial instead.
+- A file in the evidence directory that the reference record doesn't list
+  (added since) now fails a forensic run; it was a warning.
+- A run record that couldn't be sealed completely now fails the run, and
+  none of it is written to the destination; it was a console warning. The
+  history the run continued is written there unchanged, as when the
+  write-back fails.
+- The Location check warns when it can't be made because the source set's
+  history can't be used; it was skipped silently.
+- A confirmed rerun or update no longer warns that the destination wasn't
+  empty (the header records it).
+- Metadata is compared to 2 s when a network share is involved (robocopy's
+  /fft), as it is for FAT and exFAT.
+- Run records that predate a restarted history are listed in one warning.
+- The banner says to check a travelled copy of the script against the
+  published release.
+
+### Fixed
+- A file whose name ends in a dot or space (e.g. `report.` beside `report`)
+  was hashed under the name Windows normalises it to: the other file's hash,
+  so a changed copy could pass. Files are now hashed through the
+  extended-length path form, which also verifies paths over 260 characters
+  (previously UNREADABLE) and names such as `nul`.
+- With a `!` in the destination path, a file added to a sealed run record
+  went unreported (the path lost its `!` and the check skipped it). Run
+  record files are now listed with delayed expansion off, and a file whose
+  place in a run record can't be worked out fails the check.
+- A history edited by hand or crafted with a `"` in a cell could run a
+  command while being read. History cells and the Script SHA-256 read from
+  a log are now treated as data only.
+- A `!` in an evidence directory's name was dropped from its copy's name.
+- An evidence directory name containing `%` inside a set is refused, like
+  typed paths; so is a script path containing `%`.
+- On a rerun, a source whose history was unusable restarted the history and
+  listed the destination's good run records as outside it; the
+  destination's history is now continued, and the copy fails for the
+  source's problem.
+- Every row of the reference record must now be matched or reported, or
+  the Hash check fails; an "unknown" volume serial is no longer compared in
+  the location check (a warning says so); a run record listed without a
+  seal by a history restart is no longer reported as changed when it still
+  has none.
+- An evidence file name containing `%NAME%` for a defined variable (e.g.
+  `x %OS% y.txt`) was hashed under the expanded name: UNREADABLE, or the
+  hash of another file with that name, which could let a changed copy pass.
+  Hashing no longer passes file names through a child command line (the
+  known issue of 2.0.1 and earlier).
+- A set on a network path (UNC or a mapped drive) was refused as a source
+  or rerun destination: there, Windows reports a file as a directory when
+  asked with a trailing `\`, so the history and the script copy counted as
+  evidence directories. Directories are now told by their attributes.
+- With the console input closed, a source refused by the set rules after
+  Enter (the script's directory) was asked again forever; answers refused
+  by the set rules now count towards the prompt's attempts limit.
+- A link inside a link that wasn't copied could be listed again as a
+  separate warning.
+- Wording: the Script check names a previous log that holds no valid Script
+  SHA-256 instead of calling it a different SHA-256; /nonforensic compare
+  lines say "the source", not "the reference record".
+- Wording: the `.partial` line in the Run records log carries "[WARN]"; the
+  warning for a run record outside a restarted history now says "its seal
+  file still has the SHA-256 listed for it (its files are checked against
+  that seal separately)".
+
 ## 2.0.1 - 2026-10-16
 
 Known issue (in every release so far, fixed in the next): an evidence file

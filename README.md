@@ -37,7 +37,7 @@ scripts are restricted, so it can travel with the evidence too.
 - **Metadata check.** After the copy, robocopy compares every source file
   with its copy in list-only mode: any file whose size or last-modified
   time differs, or that wasn't copied, fails the run. Times are compared
-  exactly, or to 2 s where FAT or exFAT is involved.
+  exactly, or to 2 s where FAT or exFAT or a network share is involved.
 - **A sealed record of every copy, and a history.** Each run writes its
   log, hash CSVs and history into a run record of its own, sealed with
   their SHA-256s. On every copy, every earlier run record is checked against
@@ -55,24 +55,26 @@ scripts are restricted, so it can travel with the evidence too.
   | Result     | Exit code | Meaning |
   |------------|-----------|---------|
   | PASS       | 0         | The copy completed, every file in the reference record is in the destination with the same SHA-256, sizes and last-modified times match the source, and every earlier run record matches its seal and the history. |
-  | FAIL       | 1         | The copy failed, a file in the reference record differs, is missing or unreadable, a file's size or last-modified time differs, a run record or the history doesn't check out, the script check failed, or the run could not start. |
+  | FAIL       | 1         | The copy failed, a file in the reference record differs, is missing or unreadable, a file in the evidence directory isn't in the reference record, a file's size or last-modified time differs, a run record or the history doesn't check out, the script check failed, the run record couldn't be sealed or written back, or the run could not start. |
   | UNVERIFIED | 2         | `/nonforensic` only: copied without failures, verification declined. |
 
   The summary names each check (Copy, Metadata, Hash, Run records, Script)
   and lists every warning just above the result and everything that failed
-  the run just below it, in the log as on screen. Files added since the
-  reference record are warnings.
+  the run just below it, in the log as on screen. A file in the evidence
+  directory that the reference record doesn't list (added since) fails the
+  run: it is unexplained and not verified against anything.
 - **Warnings up front.** Before copying, everything to be wary of is listed
   in one **Warnings** section at the top of the log header, and repeated in
   the summary: the machine may sleep or hibernate, or its power settings
   can't be read; the clock isn't synchronised with a time source, or its
-  status can't be read; the destination is FAT32/FAT, or already holds the
-  set; a copy pass doesn't write unbuffered; a drive root holds fragments
+  status can't be read; the destination is FAT32/FAT; a copy pass doesn't write unbuffered; a drive root holds fragments
   recovered by file-system repairs (`FOUND.nnn`, `LOST.DIR`; copied as
   contents); the source has no history, so the copy isn't checked against
   an earlier record; run records the Run records check will fail; a newer
   script than the previous run's; the set was moved or copied by other
-  means; the console couldn't be switched to UTF-8.
+  means; the console couldn't be switched to UTF-8. Links in the source
+  that weren't copied are found after the copy, so they are listed with the
+  summary's warnings.
 - **What is preserved.** Data, attributes and timestamps of files and
   subdirectories (`/copy:DAT /dcopy:DAT`), so anything hidden stays hidden;
   empty directories (`/e`). Junctions and symbolic links are not followed (`/xj`); each one not copied is listed as a warning. Exact byte sizes
@@ -247,15 +249,19 @@ warning and outside the history.
 A rerun into the same destination is a full run (robocopy copies what
 differs; every file is verified) and gets its own row, e.g. run 3 FAIL,
 run 4 PASS. A destination set whose history doesn't continue the source's
-is refused before copying: sets are never mixed. The history follows this
-copy's line of descent: copies branched off earlier don't see each other.
+is refused before copying: sets are never mixed. If the source's history is
+unusable but the destination's matches its run records, a rerun continues
+the destination's history and the copy fails for the source's problem. The
+history follows this copy's line of descent: copies branched off earlier
+don't see each other.
 
 An interrupted run leaves a partial copy and no run record in the
 destination; its log stays in `%TEMP%` (header "Log during run"). A
 destination holding a partial copy without custody files is refused: delete
 the partial copy and run again. If the
-run record can't be written at the end, the destination keeps the history
-it had, the files stay in `%TEMP%`, and the exit code is FAIL. The run's log
+run record can't be sealed completely or written at the end, the
+destination gets the history the run continued, unchanged, the files stay
+in `%TEMP%`, and the exit code is FAIL. The run's log
 is sealed before that write, so a log left in the TEMP staging directory or
 in a `<UTC>.partial` shows the verification result (e.g. PASS), not the
 failed write; later copies warn about the `.partial`.
@@ -313,23 +319,24 @@ Run as administrator for backup mode. Any other argument stops the run.
 ## Example
 
 The third copy of a set, from its set directory (S2) into an empty
-directory (D3). Header and summary of the log; the robocopy and per-file
-lines are left out. Names, paths, host, user and serial are anonymised.
+directory (D3), on a machine whose clock wasn't synchronised (hence the
+warning). Header and summary of the log; the robocopy and per-file lines are
+left out. Names, paths, host, user and serial are anonymised.
 
 ```
 ===============================================================================
 Warnings (read before relying on this copy)
-  none
+  [WARN] The clock is not synchronised with a time source (w32tm reports leap indicator 3, not synchronised): times in this record rely on this machine's own clock.
 
 Environment
-  Script              : evidence-robocopy 2.0.1
+  Script              : evidence-robocopy 2.1.0
   Script path         : C:\Tools\evidence-robocopy.bat
-  Script SHA-256      : 1f663674f4dc55e3cc0aaf909f87a72da9dae3d9a5f94cd741482b40db923166
+  Script SHA-256      : 6bc772a4660b84fd9ac4c37004ee23a11fe4951622c99c41b685dafd2160c47e
   Mode                : forensic (default): log, SHA-256 verification and run records
-  Started (UTC)       : 2026-10-16T00:27:55Z (source: robocopy)
+  Started (UTC)       : 2026-10-16T18:31:45Z (source: robocopy)
   Local UTC offset    : +01:00 (robocopy's Started/Ended and ERROR times are local; its file times are UTC)
   Time source         : time.windows.com,0x9
-  Last time sync      : 15/10/2026 22:32:24 (local time, as w32tm reports it)
+  Last time sync      : 16/10/2026 15:14:54 (local time, as w32tm reports it)
   Host                : WORKSTATION-01
   User                : workstation-01\analyst (SID S-1-5-21-1111111111-2222222222-3333333333-1001)
   OS                  : Microsoft Windows 11 Pro 25H2
@@ -350,9 +357,9 @@ Source
   Chosen              : S2: the directory holds the custody files: it is the set directory
   Volume              : Volume in drive C is OS; serial 1A2B-3C4D; NTFS
   Skipped at root     : n/a (not a drive root)
-  Reference record    : evidence-robocopy-records\20261016T002718Z\evidence-robocopy_20261016T002718Z_hashes_source.csv (row 1 of the history)
+  Reference record    : evidence-robocopy-records\20261016T183124Z\evidence-robocopy_20261016T183124Z_hashes_source.csv (row 1 of the history)
   History             : 2 earlier run(s); this is run 3
-  Previous run        : 20261016T002738Z (PASS, host WORKSTATION-01, seal SHA-256 34f7698af54d9627a500bf5f20b6b0d23f09d14bc0aa2fad9b913529ad633048)
+  Previous run        : 20261016T183133Z (PASS, host WORKSTATION-01, seal SHA-256 69ed341d35528281085280ca045e55d811903b2d70579cab15d960be135c9ce4)
 
 Destination
   Set directory       : C:\Processing\EV03\
@@ -360,41 +367,41 @@ Destination
   Chosen              : D3: the directory is empty or holds only a directory with the evidence directory's name: it is the set directory
   Was                 : new set (empty, or only an empty evidence directory)
   Volume              : Volume in drive C is OS; serial 1A2B-3C4D; NTFS
-  Run record          : C:\Processing\EV03\evidence-robocopy-records\20261016T002755Z\
-  Log                 : C:\Processing\EV03\evidence-robocopy-records\20261016T002755Z\evidence-robocopy_20261016T002755Z.log
-  Log during run      : C:\Users\analyst\AppData\Local\Temp\evidence-robocopy_20261016T002755Z_27161_staging\records\evidence-robocopy_20261016T002755Z.log
+  Run record          : C:\Processing\EV03\evidence-robocopy-records\20261016T183145Z\
+  Log                 : C:\Processing\EV03\evidence-robocopy-records\20261016T183145Z\evidence-robocopy_20261016T183145Z.log
+  Log during run      : C:\Users\analyst\AppData\Local\Temp\evidence-robocopy_20261016T183145Z_17871_staging\records\evidence-robocopy_20261016T183145Z.log
 ===============================================================================
 
 --- Script check against the previous run ---
-  Script              : PASS: same version (2.0.1) and SHA-256 as the previous run's script
+  Script              : PASS: same version (2.1.0) and SHA-256 as the previous run's script
 
 [...]
 
 --- Run records against the history and their seals ---
-Run record 20261016T002718Z: 5 file(s) match its seal, 0 problem(s). Seal SHA-256: 311b111ac7ed9f7f69780b401ebf3ac1fc4becf489e88d8c77ccc6073d2ee57a
-Run record 20261016T002738Z: 4 file(s) match its seal, 0 problem(s). Seal SHA-256: 34f7698af54d9627a500bf5f20b6b0d23f09d14bc0aa2fad9b913529ad633048
+Run record 20261016T183124Z: 5 file(s) match its seal, 0 problem(s). Seal SHA-256: 74602e510f8a219a9b2b5fc3770c8f0e3ae35a4dc96aecb22d58385933314e54
+Run record 20261016T183133Z: 4 file(s) match its seal, 0 problem(s). Seal SHA-256: 69ed341d35528281085280ca045e55d811903b2d70579cab15d960be135c9ce4
 
---- Destination vs reference record: evidence-robocopy_20261016T002718Z_hashes_source.csv ---
+--- Destination vs reference record: evidence-robocopy_20261016T183124Z_hashes_source.csv ---
 
 ===============================================================================
 Result
-  Finished (UTC)      : 2026-10-16T00:28:06Z
+  Finished (UTC)      : 2026-10-16T18:31:56Z
   Script copy         : placed in the destination set directory as evidence-robocopy.bat; its SHA-256 matches the Script SHA-256 above
-  Reference record    : evidence-robocopy_20261016T002718Z_hashes_source.csv
-                        matches its seal evidence-robocopy_20261016T002718Z.sha256 (seal SHA-256 311b111ac7ed9f7f69780b401ebf3ac1fc4becf489e88d8c77ccc6073d2ee57a)
+  Reference record    : evidence-robocopy_20261016T183124Z_hashes_source.csv
+                        matches its seal evidence-robocopy_20261016T183124Z.sha256 (seal SHA-256 74602e510f8a219a9b2b5fc3770c8f0e3ae35a4dc96aecb22d58385933314e54)
   History             : run 3 (2 earlier run(s) in the history)
-  Log                 : C:\Processing\EV03\evidence-robocopy-records\20261016T002755Z\evidence-robocopy_20261016T002755Z.log
+  Log                 : C:\Processing\EV03\evidence-robocopy-records\20261016T183145Z\evidence-robocopy_20261016T183145Z.log
 
   Warnings (did not fail the run)
-    none
+    [WARN] The clock is not synchronised with a time source (w32tm reports leap indicator 3, not synchronised): times in this record rely on this machine's own clock.
 
   OVERALL RESULT          : PASS (exit code 0)
     |-Copy (robocopy)     : PASS (robocopy exit codes combined: 1)
     |-Metadata            : PASS: size and last-modified time match for every file (compared exact)
-    |-Hash (SHA-256)      : PASS: 31 of 31 files in the reference record match the destination
+    |-Hash (SHA-256)      : PASS: 48 of 48 files in the reference record match the destination
                             0 differ, 0 missing, 0 unreadable, 0 invalid in the record; added since: 0 file(s)
     |-Run records         : PASS: 2 run record(s) match their seals and the history (9 sealed file(s))
-    |-Script              : PASS: same version (2.0.1) and SHA-256 as the previous run's script
+    |-Script              : PASS: same version (2.1.0) and SHA-256 as the previous run's script
 The copy completed, every file in the reference record is in the destination with the same SHA-256, and size and last-modified time match the source; every earlier run record matches its seal and the history
 
   Failures
@@ -402,12 +409,46 @@ The copy completed, every file in the reference record is in the destination wit
 ===============================================================================
 ```
 
+## What the records prove
+
+- Each run record shows what that run did and found: when (UTC, with the
+  clock's source and sync state), on which host and under which account,
+  with which script (its SHA-256), from where to where, robocopy's own
+  output, and the SHA-256 of every evidence file. Its seal makes any later
+  change to it detectable.
+- Every copy is verified against the reference record made at the first
+  copy, not only against the copy before it. Nothing before the first copy
+  is covered: the reference record is not compared with an acquisition
+  hash.
+- The history shows the order of the runs and that no run record has been
+  removed from it or added outside it. Each sealed history holds every
+  earlier run's seal SHA-256, so the newest seal SHA-256 anchors the whole
+  chain.
+- A set is checked only when it is copied again; between copies nothing
+  checks it.
+- The seals are plain SHA-256 values, not signatures: they make a change
+  detectable, not impossible. Someone with write access to the set and the
+  script can build a new, consistent chain, or remove the newest run record
+  together with its history row; only seal SHA-256 values recorded outside
+  the set (e.g. in the custody notes) show either.
+- A record can't show what happened after it was sealed: a write-back that
+  failed afterwards is shown by the exit code, not by the log.
+- The script never vouches for itself: the Script check flags a different
+  or older script, but only the published release shows which one is
+  genuine.
+- Host, user and times are what that machine reported (`hostname`, the
+  logon token, its clock).
+- Outside the seals: junk names (`desktop.ini`, `Thumbs.db`, `.DS_Store`
+  and the like) in the records directory, and `.partial` directories
+  (interrupted write-backs: warned about, outside the history). A set
+  copied by other means gets no history row; only the Location warning
+  shows it.
+
 ## What it does not do
 
-- Hash a file whose name contains `%NAME%` for a defined environment
-  variable (e.g. `x %OS% y.txt`) correctly (known issue, to be fixed in the
-  next release): it is reported UNREADABLE, so the copy fails, or, if a file
-  with the expanded name exists beside it, it gets that file's hash.
+- Accept a source or destination path containing `%`: such paths are
+  refused at the prompt (rename the directory or choose another). File and
+  directory names inside the evidence may contain `%`.
 - Replace chain-of-custody documentation: it records copies, not who held
   the media, why, seals or signatures.
 - Verify an image against its acquisition hash.
@@ -416,14 +457,16 @@ The copy completed, every file in the reference record is in the destination wit
 - Verify alternate data streams, empty directories, attributes or creation
   times. Robocopy copies them; only each file's main data stream is hashed,
   and only size and last-modified time are compared.
-- Hash files whose paths exceed 260 characters, or that only backup mode
-  can read. Robocopy copies them, but they are reported as unreadable
-  (FAIL).
+- Hash files that only backup mode can read. Robocopy copies them, but
+  they are reported as unreadable (FAIL).
 - Flush file-system metadata or a drive's own write cache: file contents
   are written unbuffered, but only ejecting or dismounting the drive
   flushes the rest.
 - Recognise a mapped drive and its UNC path as the same place (in the
   check that source and destination don't overlap).
+- Copy files named like DOS devices (`nul`, `aux` and the like) to a network
+  (UNC) destination: Windows refuses to create them there, so the copy
+  fails and reports them missing. They copy and verify on local drives.
 - Keep the evidence directory's own timestamps as new: robocopy gives it the
   source directory's (`/dcopy:T`), and batch has no way to set them back.
 - Read records made by 1.5.x and earlier: their first 2.0 copy starts a
