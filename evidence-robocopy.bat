@@ -62,7 +62,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.1.1"
+set "TOOL_VERSION=2.2.0"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -245,6 +245,27 @@ set "EXIT_CODE_PASS=0"
 set "EXIT_CODE_FAIL=1"
 set "EXIT_CODE_UNVERIFIED=2"
 
+rem Output layout (shared rules: 80-character output, scannable output).
+rem Every line the script writes itself keeps to OUTPUT_WIDTH characters,
+rem broken at spaces with a hanging indent (:emit_wrapped); a line of exactly
+rem 80 makes some 80-column consoles add an empty line, hence 79. A word
+rem longer than the room left (a SHA-256, a path) stays whole. Sections open
+rem with a blank line, RULE_LIGHT and a title (:write_section_heading); the
+rem header and the result block sit between RULE_HEAVY lines. BLANKS is a
+rem run of spaces to cut indents from.
+set "OUTPUT_WIDTH=79"
+set "RULE_HEAVY================================================================================"
+set "RULE_LIGHT=-------------------------------------------------------------------------------"
+set "BLANKS=                                                                                "
+
+rem Console colours (ANSI SGR codes; :init_console_colour): on the console
+rem only, never in the log or any record, and the words PASS, WARN and FAIL
+rem are always written as well. COLOUR_<what>=code; verdicts are bold too.
+set "COLOUR_PASS=32"
+set "COLOUR_WARN=33"
+set "COLOUR_FAIL=31"
+set "COLOUR_BOLD=1"
+
 rem =============================== MAIN ======================================
 
 if "%~1"=="/?" goto :show_help
@@ -253,6 +274,7 @@ set "script_file_name=%~nx0"
 set "script_dir=%~dp0"
 
 call :init_state
+call :init_console_colour
 call :parse_args "%~1" "%~2" || goto :abort
 call :switch_console_to_utf8
 call :check_script_path || goto :abort
@@ -286,6 +308,9 @@ call :report_result
 call :write_history
 call :write_seal
 call :publish_records
+call :work_out_final_result
+call :write_result_block console
+call :show_closing_lines
 call :cleanup_temp
 call :restore_console_code_page
 pause
@@ -321,37 +346,40 @@ rem --------------------------- Run steps -------------------------------------
 echo %TOOL_NAME% %TOOL_VERSION%
 echo.
 echo Forensic mode (default): copies an evidence directory, under its own name,
-echo into a set directory in the destination, beside the custody files (this
-echo script, %HISTORY_FILE_NAME%, %RECORDS_DIR_NAME%\).
+echo   into a set directory in the destination, beside the custody files (this
+echo   script, %HISTORY_FILE_NAME%, %RECORDS_DIR_NAME%\).
 echo A log is kept, every file is verified by SHA-256 against the reference
-echo record (the set's first hash record) and by size and last-modified time,
-echo and every earlier run record must still match its seal and the history.
+echo   record (the set's first hash record) and by size and last-modified time,
+echo   and every earlier run record must still match its seal and the history.
 echo Each run adds its record in %RECORDS_DIR_NAME%\^<run UTC^>\ and a row
-echo to the history. Nothing is ever written to the source.
+echo   to the history. Nothing is ever written to the source.
 echo.
 echo Source: Enter takes the script's own directory as the set directory
-echo (S1). A typed directory is a set directory if it holds the custody files
-echo (S2), the set's evidence directory if its parent does (S3), or raw
-echo evidence (S4, a first copy).
+echo   (S1). A typed directory is a set directory if it holds the custody
+echo   files (S2), the set's evidence directory if its parent does (S3), or
+echo   raw evidence (S4, a first copy).
 echo Destination: an existing directory. The set directory is, by the first
-echo rule that fits: the directory, if it holds custody files (D1); its
-echo parent, if the directory has the evidence directory's name and the
-echo parent holds custody files or nothing else (D2); the directory, if it is
-echo empty or holds only a directory with the evidence directory's name (D3);
-echo otherwise a directory in it named after the set (D4). A set directory
-echo holding custody files is a rerun or update (confirmed); otherwise it must
-echo hold nothing but an empty evidence directory. Nothing is written into
-echo another set.
+echo   rule that fits: the directory, if it holds custody files (D1); its
+echo   parent, if the directory has the evidence directory's name and the
+echo   parent holds custody files or nothing else (D2); the directory, if it
+echo   is empty or holds only a directory with the evidence directory's name
+echo   (D3); otherwise a directory in it named after the set (D4). A set
+echo   directory holding custody files is a rerun or update (confirmed);
+echo   otherwise it must hold nothing but an empty evidence directory. Nothing
+echo   is written into another set.
 echo.
 echo /nonforensic: a plain copy utility for non-evidence copies: copies the
-echo source directory's contents into the destination with ETA progress, no log
-echo and no records; optional SHA-256 verification, shown on screen only.
+echo   source directory's contents into the destination with ETA progress, no
+echo   log and no records; optional SHA-256 verification, shown on screen only.
 echo.
 echo Records are UTF-8 with CRLF line endings. Files are written unbuffered
-echo (robocopy /j), so verification reads them back from the drive.
+echo   (robocopy /j), so verification reads them back from the drive.
 echo Run as administrator to use backup mode (/b).
 echo.
-echo Exit codes: %EXIT_CODE_PASS% PASS, %EXIT_CODE_FAIL% FAIL, %EXIT_CODE_UNVERIFIED% UNVERIFIED (copied, not verified).
+echo Exit codes:
+echo   %EXIT_CODE_PASS% PASS
+echo   %EXIT_CODE_FAIL% FAIL
+echo   %EXIT_CODE_UNVERIFIED% UNVERIFIED (copied, not verified)
 exit /b 0
 
 :init_state
@@ -404,11 +432,51 @@ set "reference_run="
 set "reference_name="
 set "reference_csv_path="
 set "reference_seal_result_text="
+set "reference_seal_sha256_text="
 set "previous_run="
 set "script_status=NONE"
 set "result_script=NONE: no earlier run in the history"
 set "script_failure_message="
 set "verification_enabled="
+set "result_hash_detail_count=0"
+set "result_record_written=FAIL: the record's write-back did not run"
+set "final_result_overall="
+set "log_published="
+set "record_kept_in_staging="
+set "run_seal_sha256="
+exit /b 0
+
+:init_console_colour
+rem Colour on the console only where it takes ANSI sequences: Windows 10 or
+rem later (by version number), not the legacy console (HKCU\Console ForceV2
+rem = 0), and not when NO_COLOR is set (the common way to ask for none).
+rem Sets console_colour and the coloured status words :colour_for_console
+rem puts in. The escape character is made here, at run time, so the file
+rem itself stays plain ASCII.
+set "console_colour="
+if defined NO_COLOR exit /b 0
+rem Registry values are read as :describe_windows reads them (the line that
+rem names the value, then its data).
+set "windows_major_version=0"
+for /f "tokens=2,*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v CurrentMajorVersionNumber 2^>nul ^<nul ^| find /i "CurrentMajorVersionNumber"') do set /a "windows_major_version=%%B" 2>nul
+if %windows_major_version% lss 10 exit /b 0
+set "legacy_console="
+for /f "tokens=2,*" %%A in ('reg query "HKCU\Console" /v ForceV2 2^>nul ^<nul ^| find /i "ForceV2"') do if /i "%%B"=="0x0" set "legacy_console=1"
+if defined legacy_console exit /b 0
+set "escape_character="
+for /f %%E in ('echo prompt $E^| cmd /d 2^>nul') do set "escape_character=%%E"
+if not defined escape_character exit /b 0
+if not "%escape_character:~1%"=="" exit /b 0
+set "colour_end=%escape_character%[0m"
+set "coloured_pass=%escape_character%[%COLOUR_PASS%mPASS%colour_end%"
+set "coloured_fail=%escape_character%[%COLOUR_FAIL%mFAIL%colour_end%"
+set "coloured_not_run=%escape_character%[%COLOUR_WARN%mNOT RUN%colour_end%"
+set "coloured_warn_tag=%escape_character%[%COLOUR_WARN%m[WARN]%colour_end%"
+set "coloured_fail_tag=%escape_character%[%COLOUR_FAIL%m[FAIL]%colour_end%"
+set "coloured_verdict_pass=%escape_character%[%COLOUR_BOLD%;%COLOUR_PASS%mPASS%colour_end%"
+set "coloured_verdict_fail=%escape_character%[%COLOUR_BOLD%;%COLOUR_FAIL%mFAIL%colour_end%"
+set "coloured_verdict_unverified=%escape_character%[%COLOUR_BOLD%;%COLOUR_WARN%mUNVERIFIED%colour_end%"
+set "console_colour=1"
 exit /b 0
 
 :parse_args  arg1  arg2
@@ -469,12 +537,12 @@ echo Author: outis
 echo Licence: 0BSD
 echo.
 echo Note: real-time antivirus scanning, where active, scans each file as it
-echo       is written: it slows copies of many small files, and a file it
-echo       quarantines fails verification as MISSING.
+echo        is written: it slows copies of many small files, and a file it
+echo        quarantines fails verification as MISSING.
 echo Tip: don't click inside this window while it runs: a QuickEdit selection
-echo      pauses the copy until you press Esc.
+echo       pauses the copy until you press Esc.
 echo Check: a copy of this script that travelled with evidence should match
-echo        the published release (its SHA-256 is in the log header).
+echo         the published release (its SHA-256 is in the log header).
 echo.
 exit /b 0
 
@@ -496,12 +564,12 @@ if defined is_elevated (
     set "backup_flag=/b"
     set "header_elevated=yes (detected by %elevation_detected_by%), backup mode /b"
     echo You are running as Administrator. Backup mode lets robocopy read files
-    echo regardless of their permissions, but may be slower.
+    echo   regardless of their permissions, but may be slower.
 ) else (
     set "backup_flag="
     set "header_elevated=no"
     echo You are not running as Administrator. Files your account can't read
-    echo will fail to copy.
+    echo   will fail to copy.
 )
 echo.
 exit /b 0
@@ -524,8 +592,8 @@ exit /b 0
 :confirm_nonforensic
 rem /nonforensic is for non-evidence copies; choosing it must be confirmed.
 echo NON-FORENSIC MODE: a plain copy with ETA progress. No log and no records
-echo are kept, and custody files and histories are copied like any other file:
-echo not for evidence.
+echo   are kept, and custody files and histories are copied like any other
+echo   file: not for evidence.
 echo 1. Continue with a non-forensic copy
 echo 2. Stop
 call :ask_choice nonforensic_answer "1 2" || exit /b 1
@@ -689,7 +757,7 @@ call :paths_overlap && (
 if "%destination_was_empty%"=="1" exit /b 0
 echo.
 echo The destination already holds this set (a rerun or an update): files
-echo that differ are copied again, and every file is verified.
+echo   that differ are copied again, and every file is verified.
 echo 1. Continue with this destination
 echo 2. Enter a different destination
 call :ask_choice destination_answer "1 2" || exit /b 1
@@ -957,7 +1025,7 @@ exit /b 0
 rem /nonforensic: ask for the source and destination directories; the source's
 rem contents are copied into the destination. No default source.
 echo The CONTENTS of the source directory are copied into the destination
-echo directory.
+echo   directory.
 set "plain_paths_rejected_answers=0"
 :ask_plain_paths_source
 echo.
@@ -977,7 +1045,7 @@ set "destination_state_text=empty"
 call :destination_has_content || exit /b 0
 echo.
 echo The destination directory is not empty. Robocopy overwrites files there
-echo that have the same name but a different size or timestamp.
+echo   that have the same name but a different size or timestamp.
 echo 1. Continue with this destination
 echo 2. Enter a different destination
 call :ask_choice destination_answer "1 2" || exit /b 1
@@ -1341,63 +1409,13 @@ call :history_matches_records head_filled_path resolve_records_root || exit /b 1
 exit /b 0
 
 :history_matches_records  historyVar  recordsRootVar
-rem Quiet check before the copy: exit 0 if a history and the run records
-rem agree as the Run records check requires after it. Every row names a run
-rem record that exists, whose seal has the row's Seal SHA-256 and whose
-rem sealed history is the history up to that row; every run record is in
-rem the history, a .partial directory, or listed outside it by a history
-rem restart. The files inside each run record are checked against their
-rem seals after the copy (:check_run_records).
-setlocal EnableDelayedExpansion
-set "matches_history=!%~1!"
-set "matches_records_root=!%~2!"
+rem Before the copy, to choose which history to continue (:resolve_set_history,
+rem :find_newest_sealed_history): exit 0 if the history and the run records
+rem agree in their structure (:check_history_against_records, quiet).
 setlocal DisableDelayedExpansion
-set "matches_problem="
-set "matches_rows=0"
-type nul >"%temp_history_runs%"
-type nul >"%temp_outside_history%"
-for /f "tokens=1* delims=:" %%A in ('findstr /n "^" "%matches_history%" 2^>nul') do if %%A gtr 1 if not defined matches_problem (
-    set "history_row_line=%%B"
-    call :split_history_line row
-    call :history_row_matches_record
-)
-if %matches_rows% equ 0 set "matches_problem=1"
-if not defined matches_problem for /f "eol=/ delims=" %%R in ('dir /b /ad "%matches_records_root%\" 2^>nul') do (
-    set "record_directory_name=%%R"
-    call :record_directory_in_history
-)
-if defined matches_problem (endlocal & endlocal & exit /b 1)
-endlocal & endlocal & exit /b 0
-
-:history_row_matches_record
-rem Caller's scope (:history_matches_records): one history row, in row_*.
-set /a "matches_rows+=1"
-call :is_run_directory_name row_run || (set "matches_problem=1" & exit /b 0)
-call :append_line_to_file row_run temp_history_runs
-set "matches_row_dir=%matches_records_root%\%row_run%"
-call :is_directory matches_row_dir || (set "matches_problem=1" & exit /b 0)
-call :collect_outside_history matches_row_dir row_run
-set "matches_seal_path=%matches_row_dir%\%RECORD_FILE_PREFIX%%row_run%.sha256"
-set "matches_seal_sha256="
-if exist "%matches_seal_path%" call :get_sha256 matches_seal_path matches_seal_sha256
-if not defined matches_seal_sha256 (set "matches_problem=1" & exit /b 0)
-if /i not "%matches_seal_sha256%"=="%row_seal%" (set "matches_problem=1" & exit /b 0)
-set "matches_sealed_history=%matches_row_dir%\%RECORD_FILE_PREFIX%%row_run%_history.csv"
-if not exist "%matches_sealed_history%" (set "matches_problem=1" & exit /b 0)
-set "matches_pending_text=see %RECORD_FILE_PREFIX%%row_run%.sha256"
-call :write_history_with_seal matches_sealed_history matches_pending_text row_seal temp_history_filled
-call :history_starts_with matches_history temp_history_filled || set "matches_problem=1"
-exit /b 0
-
-:record_directory_in_history
-rem Caller's scope (:history_matches_records): one directory in the records
-rem directory, in record_directory_name.
-if defined matches_problem exit /b 0
-call :is_partial_run_directory record_directory_name && exit /b 0
-findstr /x /l /c:"%record_directory_name%" "%temp_history_runs%" >nul 2>&1 && exit /b 0
-call :find_outside_history && exit /b 0
-set "matches_problem=1"
-exit /b 0
+call :check_history_against_records quiet %~1 %~2
+set "history_matches_exit_code=%errorlevel%"
+endlocal & exit /b %history_matches_exit_code%
 
 :report_history_set_aside  side  when
 rem The history beside the evidence of side (source or destination) wasn't
@@ -1412,7 +1430,7 @@ if "%set_aside_origin%"=="unverified" set "set_aside_text=Run records: in the %~
 if "%~1"=="source" if defined source_history_superseded set "set_aside_text=Run records: in the source set, %set_aside_problem%, and no sealed history there does either. This rerun continues from the destination set's history instead, which matches its run records."
 if not defined set_aside_text exit /b 0
 if "%~2"=="before" (
-    set "msg=%set_aside_text% The Run records check fails."
+    set "msg=%set_aside_text% The Run records check will fail."
     call :add_warning msg
     exit /b 0
 )
@@ -1509,7 +1527,9 @@ call :copy_variable %history_base_side%_history_origin header_history_origin
 call :copy_variable %history_base_side%_history_sealed_run header_history_sealed_run
 if "%header_history_origin%"=="sealed" set "header_history=%header_history%; taken from the newest sealed history (run %header_history_sealed_run%), not the history beside the evidence (see Warnings)"
 set "header_previous_run=none"
-if defined previous_run set "header_previous_run=%previous_run% (%previous_result%, host %previous_host%, seal SHA-256 %previous_seal%)"
+set "header_previous_run_seal="
+if defined previous_run set "header_previous_run=%previous_run% (%previous_result%, host %previous_host%)"
+if defined previous_run set "header_previous_run_seal=seal SHA-256: %previous_seal%"
 exit /b 0
 
 rem -- Checks before the copy -------------------------------------------------
@@ -1549,7 +1569,7 @@ if "%version_order%"=="newer" (
     set "msg=Script: this run's script (version %TOOL_VERSION%) is newer than the previous run's (version %previous_script_version%)."
     call :add_warning msg
     set "script_status=PASS"
-    set "result_script=PASS: version %TOOL_VERSION%, newer than the previous run's %previous_script_version% (see warnings)"
+    set "result_script=PASS: version %TOOL_VERSION%, newer than the previous run's %previous_script_version% (see Warnings)"
     exit /b 0
 )
 set "previous_log=%previous_run_dir%\%RECORD_FILE_PREFIX%%previous_run%.log"
@@ -1560,7 +1580,7 @@ if not exist "%previous_log%" (
     set "msg=Script: the SHA-256 can't be compared: the previous run's record has no log."
     call :add_warning msg
     set "script_status=PASS"
-    set "result_script=PASS: same version as the previous run (%TOOL_VERSION%); SHA-256 not compared (see warnings)"
+    set "result_script=PASS: same version as the previous run (%TOOL_VERSION%); SHA-256 not compared (see Warnings)"
     exit /b 0
 )
 if not defined previous_script_sha256 (
@@ -1605,7 +1625,7 @@ exit /b 0
 rem Record a failed script check; it is shown after the header and listed
 rem with the failures.
 set "script_status=FAIL"
-set "result_script=FAIL: %~1"
+set "result_script=FAIL: %~1 (see Script above, and Failures)"
 set "script_failure_message=[FAIL] Script: %~1. Verify both against the published release before relying on either copy."
 exit /b 0
 
@@ -1700,23 +1720,19 @@ call :report_history_set_aside destination before
 call :precheck_partial_directories source
 call :precheck_partial_directories destination
 if defined history_base_missing (
-    set "msg=Run records: the source set holds run records but no history file (%HISTORY_FILE_NAME%): the Run records check fails, and the history starts again with this run."
+    set "msg=Run records: the source set holds run records but no history file (%HISTORY_FILE_NAME%): the Run records check will fail, and the history starts again with this run."
     call :add_warning msg
-    exit /b 0
 )
-if not defined history_base_path exit /b 0
+rem The full check of the earlier runs, before the copy (owner, 2026-10-16):
+rem the history this run continues against the run records of the set that
+rem holds it, every run record against its seal; each problem is a warning
+rem here, and the check of their copies after the copy decides the result.
+set "precheck_history=%history_base_path%"
 set "precheck_records_root=%history_base_set_with_backslash%%RECORDS_DIR_NAME%"
-type nul >"%temp_history_runs%"
-type nul >"%temp_outside_history%"
-for /f "tokens=1* delims=:" %%A in ('findstr /n "^" "%history_base_path%" 2^>nul') do if %%A gtr 1 (
-    set "history_row_line=%%B"
-    call :split_history_line row
-    call :precheck_history_row
-)
-for /f "eol=/ delims=" %%R in ('dir /b /ad "%precheck_records_root%\" 2^>nul') do (
-    set "record_directory_name=%%R"
-    call :precheck_record_directory
-)
+if defined history_base_missing set "precheck_history="
+if defined history_base_missing set "precheck_records_root=%source_set_with_backslash%%RECORDS_DIR_NAME%"
+if not defined history_base_missing if not defined history_base_path exit /b 0
+call :check_history_against_records warn precheck_history precheck_records_root
 exit /b 0
 
 :precheck_partial_directories  side
@@ -1743,30 +1759,6 @@ call :add_warning msg
 >>"%temp_partial_warned%" echo(%record_directory_name%
 exit /b 0
 
-:precheck_history_row
-rem Caller's scope (:precheck_run_records): one history row, in row_*.
-call :append_line_to_file row_run temp_history_runs
-set "precheck_row_dir=%precheck_records_root%\%row_run%"
-call :is_directory precheck_row_dir || goto precheck_history_row_missing
-call :collect_outside_history precheck_row_dir row_run
-exit /b 0
-:precheck_history_row_missing
-set "msg=Run records: run %row_run%, listed in the history, has no run record in the source set: the Run records check will fail."
-call :add_warning msg
-exit /b 0
-
-:precheck_record_directory
-rem Caller's scope (:precheck_run_records): one directory in the records
-rem directory, in record_directory_name.
-rem Leftover .partial directories were warned about already
-rem (:precheck_partial_directories).
-call :is_partial_run_directory record_directory_name && exit /b 0
-findstr /x /l /c:"%record_directory_name%" "%temp_history_runs%" >nul 2>&1 && exit /b 0
-call :find_outside_history && exit /b 0
-set "msg=Run records: %record_directory_name% in the records directory is not in the history: the Run records check will fail."
-call :add_warning msg
-exit /b 0
-
 :is_partial_run_directory  nameVar
 rem Exit 0 if the directory name ends in PARTIAL_RUN_SUFFIX.
 setlocal EnableDelayedExpansion
@@ -1777,8 +1769,8 @@ endlocal & exit /b 1
 
 :log_pre_copy_findings
 rem After the header: the script check's result, and its failure if any.
-set "msg=" & call :show_and_log msg
-set "msg=--- Script check against the previous run ---" & call :show_and_log msg
+set "heading=Script: checked against the previous run"
+call :write_section_heading heading both
 call :log_field "Script" result_script
 if not defined script_failure_message exit /b 0
 call :show_and_log script_failure_message
@@ -1869,6 +1861,7 @@ call :log_housekeeping source "Skipped at root"
 call :log_field "Reference record" header_reference_record
 call :log_field "History" header_history
 call :log_field "Previous run" header_previous_run
+if defined header_previous_run_seal call :log_field_continued header_previous_run_seal
 set "msg=" & call :show_and_log msg
 set "msg=Destination" & call :show_and_log msg
 call :log_field "Set directory" destination_set_with_backslash
@@ -2120,11 +2113,29 @@ endlocal & exit /b 0
 
 :add_warning  msgVar
 rem Add "[WARN] <text>" to the warnings list (the first section of the log
-rem header) and to the warnings repeated in the summary.
+rem header) and to the warnings repeated in the summary, unless the same
+rem warning is listed already (the history checks before and after the copy
+rem can find the same thing). The list is read with delayed expansion off,
+rem so a "!" in a listed warning survives the comparison.
+setlocal DisableDelayedExpansion
+call :copy_variable %~1 warning_text
+set "warning_already_listed="
+if exist "%temp_warnings%" for /f "usebackq delims=" %%L in ("%temp_warnings%") do (
+    set "listed_warning=%%L"
+    call :is_same_warning && set "warning_already_listed=1"
+)
+if defined warning_already_listed (endlocal & exit /b 0)
 setlocal EnableDelayedExpansion
->>"!temp_warnings!" echo([WARN] !%~1!
->>"!temp_summary_warnings!" echo([WARN] !%~1!
-endlocal & exit /b 0
+>>"!temp_warnings!" echo([WARN] !warning_text!
+>>"!temp_summary_warnings!" echo([WARN] !warning_text!
+endlocal & endlocal & exit /b 0
+
+:is_same_warning
+rem Caller's scope (:add_warning): exit 0 if listed_warning is "[WARN] "
+rem followed by warning_text.
+setlocal EnableDelayedExpansion
+if "!listed_warning!"=="[WARN] !warning_text!" (endlocal & exit /b 0)
+endlocal & exit /b 1
 
 :read_clock_status
 rem Set header_time_source and header_last_sync from "w32tm /query /status",
@@ -2383,8 +2394,7 @@ set "excluded_files="
 call :add_housekeeping_exclusions source
 call :add_housekeeping_exclusions destination
 call :build_exclusion_args
-set "msg=" & call :show_and_log msg
-set "msg=--- Copy pass: !label!, threads: !threads! ---" & call :show_and_log msg
+set "heading=Copy: !label!, threads: !threads!" & call :write_section_heading heading both
 set "log_option="
 if "!log_enabled!"=="1" set log_option=/unilog:"!temp_robocopy_unicode_output!"
 robocopy "!source_path! " "!destination_path! " *.* !COPY_FLAGS! !PASS_%~1_FILTER! !PASS_%~1_FLAGS! /mt:!threads! /r:!RETRY_COUNT! /w:!RETRY_WAIT_SECONDS! !robocopy_progress_flags! !backup_flag! !exclusion_args! !log_option!
@@ -2403,8 +2413,7 @@ rem isn't copied: this run writes a new one (:publish_records). Raw evidence
 rem (a first copy) has none. Same copy flags as the evidence passes,
 rem unbuffered.
 setlocal EnableDelayedExpansion
-set "msg=" & call :show_and_log msg
-set "msg=--- Copy pass: Custody records (not evidence) ---" & call :show_and_log msg
+set "heading=Copy: custody records (not evidence)" & call :write_section_heading heading both
 if not defined source_set_path (
     set "msg=No custody files to copy: raw evidence (a first copy)."
     call :show_and_log msg
@@ -2512,8 +2521,6 @@ rem record, then the run records against the history and their seals. The
 rem reference record is row 1's source hash record or, if the source has no
 rem history, this run's own record of the source, made now. So the source is
 rem hashed once per set, and every later copy is checked back to it.
-set "msg=" & call :show_and_log msg
-set "msg=--- Verification: metadata, SHA-256 hashes and run records ---" & call :show_and_log msg
 call :check_metadata
 where /q certutil.exe || (
     set "msg=[FAIL] certutil.exe not found: verification could not run."
@@ -2523,18 +2530,17 @@ where /q certutil.exe || (
     exit /b 1
 )
 if not defined reference_run (
-    set "msg=" & call :show_and_log msg
-    set "msg=--- Hashing the source (no reference record in the source's history): it becomes the reference record ---"
-    call :show_and_log msg
+    set "heading=Hash (SHA-256): hashing the source, which becomes the reference record (none in the source's history)"
+    call :write_section_heading heading both
     call :hash_directory source || set "hash_check_incomplete=1"
     call :write_hash_csv source
 )
-set "msg=" & call :show_and_log msg
-set "msg=--- Hashing the destination ---" & call :show_and_log msg
+set "heading=Hash (SHA-256): hashing the destination"
+call :write_section_heading heading both
 call :hash_directory destination || set "hash_check_incomplete=1"
 call :write_hash_csv destination
-set "msg=" & call :show_and_log msg
-set "msg=--- Hashing the custody files in the destination set (not evidence) ---" & call :show_and_log msg
+set "heading=Hash (SHA-256): hashing the custody files in the destination set (not evidence)"
+call :write_section_heading heading both
 call :hash_custody_files
 call :write_hash_csv custody
 rem The reference record: row 1's, read from its copy in the destination;
@@ -2560,8 +2566,6 @@ exit /b 0
 rem Non-forensic run: hash every source file and its copy and compare them,
 rem with the metadata check. Working files stay in TEMP; nothing is written
 rem beside the copy, and the result is shown on screen only.
-set "msg=" & call :show msg
-set "msg=--- Verification: metadata and SHA-256 hashes (on screen only) ---" & call :show msg
 call :check_metadata
 where /q certutil.exe || (
     set "msg=[FAIL] certutil.exe not found: verification could not run."
@@ -2570,12 +2574,10 @@ where /q certutil.exe || (
     set "hash_check_incomplete=1"
     exit /b 1
 )
-set "msg=" & call :show msg
-set "msg=--- Hashing the source ---" & call :show msg
+set "heading=Hash (SHA-256): hashing the source" & call :write_section_heading heading console
 call :hash_directory source || set "hash_check_incomplete=1"
 call :write_hash_csv source
-set "msg=" & call :show msg
-set "msg=--- Hashing the destination ---" & call :show msg
+set "heading=Hash (SHA-256): hashing the destination" & call :write_section_heading heading console
 call :hash_directory destination || set "hash_check_incomplete=1"
 call :write_hash_csv destination
 set "reference_csv_path=%staged_hash_csv_source%"
@@ -2651,9 +2653,8 @@ if not defined fft_flag if "!source_path:~0,2!"=="\\" set "time_precision=to 2 s
 if not defined fft_flag if "!destination_path:~0,2!"=="\\" set "time_precision=to 2 s, as a network share is involved"
 if not defined fft_flag if "!source_path:~0,2!"=="\\" set "fft_flag=/fft"
 if not defined fft_flag if "!destination_path:~0,2!"=="\\" set "fft_flag=/fft"
-set "msg=" & call :show_and_log msg
-set "msg=--- Metadata check: size and last-modified time, compared !time_precision! ---"
-call :show_and_log msg
+set "heading=Metadata: size and last-modified time, compared !time_precision!"
+call :write_section_heading heading both
 set "excluded_dirs="
 set "excluded_files="
 call :add_housekeeping_exclusions source
@@ -2818,10 +2819,9 @@ rem pass pairs them up. In /nonforensic the reference is this run's hashes of
 rem the source, which are in no record: the messages say "the source".
 set "compare_reference_label=reference record"
 if "%run_mode%"=="nonforensic" set "compare_reference_label=source"
-set "msg=" & call :show_and_log msg
-set "msg=--- Destination vs reference record: %reference_name% ---"
-if "%run_mode%"=="nonforensic" set "msg=--- Destination vs source ---"
-call :show_and_log msg
+set "heading=Hash (SHA-256): destination vs reference record %reference_name%"
+if "%run_mode%"=="nonforensic" set "heading=Hash (SHA-256): destination vs source"
+call :write_section_heading heading both
 for /f "usebackq skip=1 delims=" %%L in ("%reference_csv_path%") do (
     set "reference_row=%%L"
     call :add_reference_row reference_row
@@ -2972,8 +2972,7 @@ set "run_records_root_found="
 call :is_directory run_records_root && set "run_records_root_found=1"
 if not defined run_records_root_found if not defined history_base_path if not defined history_base_missing exit /b 0
 set "run_records_checked=1"
-set "msg=" & call :show_and_log msg
-set "msg=--- Run records against the history and their seals ---" & call :show_and_log msg
+set "heading=Run records: against the history and their seals" & call :write_section_heading heading both
 call :report_history_set_aside source after
 call :report_history_set_aside destination after
 if defined history_base_missing (
@@ -2982,24 +2981,87 @@ if defined history_base_missing (
     call :remember_problem msg
     set /a "run_record_problem_count+=1"
 )
+set "run_records_history=%history_base_path%"
+if defined history_base_missing set "run_records_history="
+call :check_history_against_records fail run_records_history run_records_root
+exit /b 0
+
+:check_history_against_records  mode  historyVar  recordsRootVar
+rem The one history checker (README, "History and run records"): a history
+rem (none when the history restarts) against the records directory of the
+rem set that holds it. Caller's scope (working names history_check_*);
+rem the caller's delayed expansion is off. mode:
+rem   quiet  before the copy, choosing which history to continue: rows,
+rem          run record names, seals' SHA-256 and sealed histories only; no
+rem          output; exit 1 if anything doesn't match.
+rem   warn   before the copy, on the set holding the history this run
+rem          continues (owner, 2026-10-16): everything, every run record
+rem          against its seal too; each problem a header warning.
+rem   fail   after the copy, on the destination set: everything; each
+rem          problem fails the Run records check, and the run records'
+rem          counts and the reference record's seal result are kept.
+rem What is checked: every row names a run record (YYYYMMDDTHHMMSSZ) that
+rem exists, whose seal has the row's Seal SHA-256 and whose own sealed
+rem history is the history up to that row; every run record matches its seal
+rem (warn, fail); no file lies loose in the records directory (warn, fail);
+rem every directory there is a run the history lists, a leftover
+rem <run>.partial (a warning), or a run record a history restart listed as
+rem outside its history (a warning while its seal still has the SHA-256
+rem listed for it). With no history (a restart), every run record found is
+rem checked against its seal and, after the copy, listed as outside the new
+rem history.
+set "history_check_mode=%~1"
+call :copy_variable %~2 history_check_history
+call :copy_variable %~3 history_check_records_root
+set "history_check_problem="
+set "history_check_rows=0"
 type nul >"%temp_history_runs%"
 type nul >"%temp_outside_history%"
-if defined history_base_path for /f "tokens=1* delims=:" %%A in ('findstr /n "^" "%history_base_path%" 2^>nul') do if %%A gtr 1 (
+type nul >"%temp_predating_records%"
+if defined history_check_history for /f "tokens=1* delims=:" %%A in ('findstr /n "^" "%history_check_history%" 2^>nul') do if %%A gtr 1 (
     set "history_row_line=%%B"
     set "history_line_number=%%A"
-    call :split_history_line row
     call :check_history_row
 )
-for /f "eol=/ delims=" %%F in ('dir /b /a-d "%run_records_root%\" 2^>nul') do (
+if "%history_check_mode%"=="quiet" if %history_check_rows% equ 0 set "history_check_problem=1"
+if "%history_check_mode%"=="quiet" if defined history_check_problem exit /b 1
+if not "%history_check_mode%"=="quiet" for /f "eol=/ delims=" %%F in ('dir /b /a-d "%history_check_records_root%\" 2^>nul') do (
     set "stray_name=%%F"
     call :report_stray_record_file
 )
-type nul >"%temp_predating_records%"
-for /f "eol=/ delims=" %%R in ('dir /b /ad /on "%run_records_root%\" 2^>nul') do (
+for /f "eol=/ delims=" %%R in ('dir /b /ad /on "%history_check_records_root%\" 2^>nul') do (
     set "record_directory_name=%%R"
     call :check_record_directory_listed
 )
-call :report_predating_records
+if not "%history_check_mode%"=="quiet" call :report_predating_records
+if defined history_check_problem exit /b 1
+exit /b 0
+
+:history_finding  textVar
+rem Caller's scope (the history checker and the run record checks). One
+rem problem, named as a sentence in textVar: in quiet mode only noted
+rem (history_check_problem; inside a run record's check that note stays
+rem there, which quiet mode never runs); in warn mode a header warning; in
+rem fail mode a failure of the Run records check, shown, logged and listed.
+rem The count of failures is kept by the caller.
+set "history_check_problem=1"
+if "%history_check_mode%"=="quiet" exit /b 0
+setlocal EnableDelayedExpansion
+if "!history_check_mode!"=="warn" (
+    set "msg=!%~1! The Run records check will fail."
+    call :add_warning msg
+    endlocal & exit /b 0
+)
+set "msg=[FAIL] !%~1!"
+call :show_and_log msg
+call :remember_problem msg
+endlocal & exit /b 0
+
+:history_problem  textVar
+rem Caller's scope (the history checker): a problem with the history or the
+rem records directory itself (:history_finding), counted after the copy.
+call :history_finding %~1
+if "%history_check_mode%"=="fail" set /a "run_record_problem_count+=1"
 exit /b 0
 
 :report_predating_records
@@ -3019,87 +3081,94 @@ call :add_warning msg
 endlocal & exit /b 0
 
 :check_history_row
-rem Caller's scope (:check_run_records): one row of the history (row_*, on
-rem line history_line_number). Its run record must exist and pass its seal,
-rem its seal's SHA-256 must be the row's Seal SHA-256, and its own sealed
-rem history must be the history up to this row (with this row's pending
-rem seal text, the only difference).
-call :append_line_to_file row_run temp_history_runs
-set "row_run_dir=%run_records_root%\%row_run%"
+rem Caller's scope (:check_history_against_records): one row of the history,
+rem in history_row_line (line history_line_number of the file). Its run
+rem record must exist (and, in warn and fail modes, pass its seal), its
+rem seal's SHA-256 must be the row's Seal SHA-256, and its own sealed history
+rem must be the history up to this row (this row's pending seal text the
+rem only difference). The row's run cell must be a run's UTC time before it
+rem is used in a path (record content is data: test round 10).
+set /a "history_check_rows+=1"
+if "%history_check_mode%"=="quiet" if defined history_check_problem exit /b 0
+call :split_history_line row
 rem Row 1 is line 2 of the file (line 1 is the header).
 set /a "history_row_number=history_line_number - 1"
-call :is_directory row_run_dir || (
-    set "msg=[FAIL] Run records: run %row_run% (row %history_row_number% of the history) has no run record."
-    call :show_and_log msg
-    call :remember_problem msg
-    set /a "run_record_problem_count+=1"
+set "finding=Run records: row %history_row_number% of the history doesn't name a run record (a run's UTC time, YYYYMMDDTHHMMSSZ)."
+call :is_run_directory_name row_run || (
+    call :history_problem finding
     exit /b 0
 )
-call :check_run_record row_run row_run_dir
+call :append_line_to_file row_run temp_history_runs
+set "row_run_dir=%history_check_records_root%\%row_run%"
+set "finding=Run records: run %row_run% (row %history_row_number% of the history) has no run record."
+call :is_directory row_run_dir || (
+    call :history_problem finding
+    exit /b 0
+)
+if not "%history_check_mode%"=="quiet" call :check_run_record row_run row_run_dir
 call :collect_outside_history row_run_dir row_run
 set "row_seal_path=%row_run_dir%\%RECORD_FILE_PREFIX%%row_run%.sha256"
 set "row_seal_sha256="
 if exist "%row_seal_path%" call :get_sha256 row_seal_path row_seal_sha256
-if exist "%row_seal_path%" if /i not "%row_seal_sha256%"=="%row_seal%" (
-    set "msg=[FAIL] Run records: run %row_run%'s seal doesn't have the SHA-256 the history records for it."
-    call :show_and_log msg
-    call :remember_problem msg
-    set /a "run_record_problem_count+=1"
-)
+rem No seal at all is a failure of the run record's own check; when only
+rem choosing a history (quiet), it means this history can't be shown to match.
+if not exist "%row_seal_path%" if "%history_check_mode%"=="quiet" set "history_check_problem=1"
+set "finding=Run records: run %row_run%'s seal doesn't have the SHA-256 the history records for it."
+if exist "%row_seal_path%" if /i not "%row_seal_sha256%"=="%row_seal%" call :history_problem finding
 set "row_sealed_history=%row_run_dir%\%RECORD_FILE_PREFIX%%row_run%_history.csv"
+rem A missing sealed history is a file missing from a sealed run record,
+rem which the run record's own check reports (warn, fail).
+if not exist "%row_sealed_history%" if "%history_check_mode%"=="quiet" set "history_check_problem=1"
 if not exist "%row_sealed_history%" exit /b 0
 set "row_pending_text=see %RECORD_FILE_PREFIX%%row_run%.sha256"
 call :write_history_with_seal row_sealed_history row_pending_text row_seal temp_history_filled
-call :history_starts_with history_base_path temp_history_filled && exit /b 0
-set "msg=[FAIL] Run records: run %row_run%'s sealed history doesn't match the history beside the evidence up to that run."
-call :show_and_log msg
-call :remember_problem msg
-set /a "run_record_problem_count+=1"
+call :history_starts_with history_check_history temp_history_filled && exit /b 0
+set "finding=Run records: run %row_run%'s sealed history doesn't match the history this run continues, up to that run."
+call :history_problem finding
 exit /b 0
 
 :report_stray_record_file
-rem Caller's scope (:check_run_records): a file directly in the records
-rem directory, in stray_name, outside any run record: no seal covers it.
-rem Ignored names are left alone.
+rem Caller's scope (:check_history_against_records): a file directly in the
+rem records directory, in stray_name, outside any run record: no seal covers
+rem it. Ignored names are left alone.
 call :name_matches_list stray_name IGNORED_CUSTODY_FILES && exit /b 0
-set "msg=[FAIL] Run records: %stray_name% is in the records directory but not in a run record, so no seal covers it."
-call :show_and_log msg
-call :remember_problem msg
-set /a "run_record_problem_count+=1"
+set "finding=Run records: %stray_name% is in the records directory but not in a run record, so no seal covers it."
+call :history_problem finding
 exit /b 0
 
 :check_record_directory_listed
-rem Caller's scope (:check_run_records): a directory in the records directory,
-rem in record_directory_name. A leftover <run>.partial is a warning. Any other
-rem directory must be a run the history lists, or a run record a history restart
-rem listed as outside the history it restarted (a warning, if it still matches
-rem the seal SHA-256 listed for it). When this run restarts the history itself,
-rem each run record found is checked against its own seal and listed
-rem (:list_run_outside_history).
+rem Caller's scope (:check_history_against_records): a directory in the
+rem records directory, in record_directory_name. A leftover <run>.partial is a
+rem warning. Any other directory must be a run the history lists, or a run
+rem record a history restart listed as outside the history it restarted (a
+rem warning, if it still matches the seal SHA-256 listed for it). With no
+rem history (this run restarts it), each run record found is checked against
+rem its own seal and, after the copy, listed (:list_run_outside_history).
 call :is_partial_run_directory record_directory_name && goto check_record_directory_listed_partial
 findstr /x /l /c:"%record_directory_name%" "%temp_history_runs%" >nul 2>&1 && exit /b 0
-set "record_directory_dir=%run_records_root%\%record_directory_name%"
-if defined history_base_missing (
-    call :check_run_record record_directory_name record_directory_dir
-    call :list_run_outside_history
-    exit /b 0
-)
+set "record_directory_dir=%history_check_records_root%\%record_directory_name%"
+if not defined history_check_history goto check_record_directory_listed_restart
 call :find_outside_history && goto check_record_directory_listed_outside
-set "msg=[FAIL] Run records: %record_directory_name% in the records directory is not in the history."
-call :show_and_log msg
-call :remember_problem msg
-set /a "run_record_problem_count+=1"
+set "finding=Run records: %record_directory_name% in the records directory is not in the history."
+call :history_problem finding
+exit /b 0
+:check_record_directory_listed_restart
+if "%history_check_mode%"=="quiet" exit /b 0
+call :check_run_record record_directory_name record_directory_dir
+if "%history_check_mode%"=="fail" call :list_run_outside_history
 exit /b 0
 :check_record_directory_listed_partial
-rem A leftover .partial: a warning, once (the check before the copy may have
-rem listed it already); here it is also logged with the run records.
+rem A leftover .partial: one warning (:add_warning lists it once, though
+rem the checks before and after the copy both find it); after the copy it
+rem is also logged with the run records.
+if "%history_check_mode%"=="quiet" exit /b 0
 set "msg=Run records: %record_directory_name% is an interrupted write-back (a run record never completed); it is outside the history."
 set "tagged_msg=[WARN] %msg%"
-call :show_and_log tagged_msg
-findstr /x /l /c:"%record_directory_name%" "%temp_partial_warned%" >nul 2>&1 && exit /b 0
+if "%history_check_mode%"=="fail" call :show_and_log tagged_msg
 call :add_warning msg
 exit /b 0
 :check_record_directory_listed_outside
+if "%history_check_mode%"=="quiet" exit /b 0
 call :check_run_record record_directory_name record_directory_dir
 set "record_directory_seal=%record_directory_dir%\%RECORD_FILE_PREFIX%%record_directory_name%.sha256"
 set "record_directory_seal_sha256="
@@ -3111,11 +3180,9 @@ if "%outside_seal_sha256%"=="none" if not defined record_directory_seal_sha256 (
     call :add_warning msg
     exit /b 0
 )
+set "finding=Run records: %record_directory_name%, listed by run %outside_listed_by% as outside the history it restarted, has changed since: its seal's SHA-256 isn't the one listed."
 if /i not "%record_directory_seal_sha256%"=="%outside_seal_sha256%" (
-    set "msg=[FAIL] Run records: %record_directory_name%, listed by run %outside_listed_by% as outside the history it restarted, has changed since: its seal's SHA-256 isn't the one listed."
-    call :show_and_log msg
-    call :remember_problem msg
-    set /a "run_record_problem_count+=1"
+    call :history_problem finding
     exit /b 0
 )
 rem Listed for one warning after all run records are checked
@@ -3169,8 +3236,11 @@ exit /b 1
 :check_run_record  runVar  runDirVar
 rem One run record: its seal, every file the seal lists, and every file in
 rem the directory (subdirectories must have every file listed too: later 2.x
-rem versions may add them). If it is the reference record's run, also sets
-rem reference_seal_failed and the summary text.
+rem versions may add them). Problems go through :history_finding (a warning
+rem before the copy, a failure after it). After the copy (fail mode) it also
+rem logs the record's count line, adds to the run records' counts and, for
+rem the reference record's run, sets reference_seal_failed and the summary
+rem text.
 setlocal EnableDelayedExpansion
 set "run=!%~1!"
 set "run_dir=!%~2!"
@@ -3180,9 +3250,8 @@ set "problems=0"
 set "matches=0"
 set "seal_sha256=none"
 if not exist "!seal_path!" (
-    set "msg=[FAIL] Run record !run!: no seal (!seal_name!), so its files can't be shown unchanged."
-    call :show_and_log msg
-    call :remember_problem msg
+    set "finding=Run record !run!: no seal (!seal_name!), so its files can't be shown unchanged."
+    call :history_finding finding
     set /a "problems+=1"
     goto check_run_record_done
 )
@@ -3190,17 +3259,24 @@ call :get_sha256 seal_path seal_sha256
 if not defined seal_sha256 set "seal_sha256=unknown"
 call :check_seal_lines run run_dir seal_path
 call :check_run_record_files run run_dir seal_path
-set "msg=Run record !run!: !matches! file(s) match its seal, !problems! problem(s). Seal SHA-256: !seal_sha256!"
-call :show_and_log msg
+if "!history_check_mode!"=="fail" (
+    set "msg=Run record !run!: !matches! file(s) match its seal, !problems! problem(s)."
+    call :show_and_log msg
+    set "msg=  Seal SHA-256: !seal_sha256!"
+    call :show_and_log msg
+)
 :check_run_record_done
+if not "!history_check_mode!"=="fail" (endlocal & exit /b 0)
 set "reference_text="
+set "reference_hash_text="
 set "reference_failed=0"
 if "!run!"=="!reference_run!" (
-    set "reference_text=matches its seal !seal_name! (seal SHA-256 !seal_sha256!)"
-    if !problems! gtr 0 set "reference_text=FAIL: its run record fails its seal check (!seal_name!, seal SHA-256 !seal_sha256!)"
+    set "reference_text=matches its seal !seal_name!"
+    if !problems! gtr 0 set "reference_text=FAIL: its run record fails its seal check (!seal_name!)"
+    set "reference_hash_text=seal SHA-256: !seal_sha256!"
     if !problems! gtr 0 set "reference_failed=1"
 )
-endlocal & set /a "run_record_count+=1, run_record_file_match_count+=%matches%, run_record_problem_count+=%problems%, reference_seal_failed|=%reference_failed%" & if not "%reference_text%"=="" set "reference_seal_result_text=%reference_text%"
+endlocal & set /a "run_record_count+=1, run_record_file_match_count+=%matches%, run_record_problem_count+=%problems%, reference_seal_failed|=%reference_failed%" & if not "%reference_text%"=="" set "reference_seal_result_text=%reference_text%" & set "reference_seal_sha256_text=%reference_hash_text%"
 exit /b 0
 
 :check_run_record_files  runVar  runDirVar  sealPathVar
@@ -3246,17 +3322,16 @@ set "sealed_path=!%~2!\!sealed_name!"
 set "current_sha256="
 if exist "!sealed_path!" call :get_sha256 sealed_path current_sha256
 if not exist "!sealed_path!" (
-    set "msg=[FAIL] Run record !%~1!: !sealed_name! is listed in its seal but missing."
+    set "finding=Run record !%~1!: !sealed_name! is listed in its seal but missing."
     goto check_sealed_file_failed
 )
 if /i not "!current_sha256!"=="!%~4!" (
-    set "msg=[FAIL] Run record !%~1!: !sealed_name! has changed since it was sealed."
+    set "finding=Run record !%~1!: !sealed_name! has changed since it was sealed."
     goto check_sealed_file_failed
 )
 endlocal & set /a "matches+=1" & exit /b 0
 :check_sealed_file_failed
-call :show_and_log msg
-call :remember_problem msg
+call :history_finding finding
 endlocal & set /a "problems+=1" & exit /b 0
 
 :check_file_listed_in_seal  runVar  runDirVar  sealPathVar  filePathVar
@@ -3279,16 +3354,14 @@ if not "!file_name:\=!"=="!file_name!" (
 if /i "!name_in_record!"=="!RECORD_FILE_PREFIX!!%~1!.sha256" (endlocal & exit /b 0)
 call :name_matches_list file_name IGNORED_CUSTODY_FILES && (endlocal & exit /b 0)
 findstr /l /e /c:" *!name_in_record!" "!%~3!" >nul 2>&1 && (endlocal & exit /b 0)
-set "msg=[FAIL] Run record !%~1!: !name_in_record! is not listed in its seal."
-call :show_and_log msg
-call :remember_problem msg
+set "finding=Run record !%~1!: !name_in_record! is not listed in its seal."
+call :history_finding finding
 endlocal & set /a "problems+=1" & exit /b 0
 :check_file_listed_in_seal_unresolved
 rem A file found in the run record whose place in it can't be worked out is
 rem never taken as listed: unknown is not passed.
-set "msg=[FAIL] Run record !%~1!: !file_path! is in the run record, but its path inside it couldn't be worked out, so it can't be checked against the seal."
-call :show_and_log msg
-call :remember_problem msg
+set "finding=Run record !%~1!: !file_path! is in the run record, but its path inside it couldn't be worked out, so it can't be checked against the seal."
+call :history_finding finding
 endlocal & set /a "problems+=1" & exit /b 0
 
 :write_history_with_seal  sourceFileVar  pendingTextVar  sealVar  outFileVar
@@ -3343,12 +3416,13 @@ set /a "copy_failed_bits=copy_exit_codes & ROBOCOPY_FAIL_MASK"
 set "copy_status=PASS"
 if %copy_failed_bits% neq 0 set "copy_status=FAIL"
 set "result_copy=%copy_status%: robocopy exit codes combined: %copy_exit_codes%"
+if "%copy_status%"=="FAIL" set "result_copy=%result_copy% (see Copy above, and Failures)"
 set "metadata_status=NOT RUN"
 set "hash_status=NOT RUN"
 set "run_records_status=NOT RUN"
 set "result_metadata=NOT RUN: verification was not requested"
 set "result_hash=NOT RUN: verification was not requested"
-set "result_hash_detail="
+set "result_hash_detail_count=0"
 set "result_run_records=NOT RUN"
 set "result_reference=none"
 set "verification_ran="
@@ -3372,29 +3446,24 @@ if "%verdict%"=="FAIL" set "exit_code=%EXIT_CODE_FAIL%"
 if "%verdict%"=="UNVERIFIED" set "exit_code=%EXIT_CODE_UNVERIFIED%"
 set "result_overall=%verdict% (exit code %exit_code%)"
 set "result_history=run %this_run_number% (%history_row_count% earlier run(s) in the history)"
-set "msg=" & call :show_and_log msg
-set "msg================================================================================" & call :show_and_log msg
-set "msg=Result" & call :show_and_log msg
+rem The summary (shared rule: scannable output): its fields, the warnings,
+rem the failures, the sentence saying what the result covers, and last the
+rem result block. The checks in the block are in the order they ran (owner,
+rem 2026-10-16: the Script check before the copy; the copy; then metadata,
+rem the run records, and last the SHA-256 compare, which relies on the
+rem reference record having passed its seal). In a forensic run the block
+rem goes into the log here, sealed with it; the console gets it last, after
+rem the record's write-back (:write_result_block console in MAIN).
+set "heading=Summary" & call :write_section_heading heading both
 call :log_field "Finished (UTC)" end_utc_iso
 if "%run_mode%"=="forensic" call :log_result_records
 set "msg=" & call :show_and_log msg
 call :log_summary_list "Warnings (did not fail the run)" warnings
 set "msg=" & call :show_and_log msg
-rem The overall result, each check that feeds into it in the order they ran
-rem (owner, 2026-10-16: the Script check before the copy; the copy; then
-rem metadata, the run records, and last the SHA-256 compare, which relies on
-rem the reference record having passed its seal), and what the result
-rem covers.
-call :log_result_line "OVERALL RESULT" result_overall
-if "%run_mode%"=="forensic" call :log_check_line "Script" result_script
-call :log_check_line "Copy" result_copy
-call :log_check_line "Metadata" result_metadata
-if "%run_mode%"=="forensic" call :log_check_line "Run records" result_run_records
-call :log_check_line "Hash (SHA-256)" result_hash result_hash_detail
-call :show_and_log result_meaning
-set "msg=" & call :show_and_log msg
 call :log_summary_list "Failures" failures
-set "msg================================================================================" & call :show_and_log msg
+set "msg=" & call :show_and_log msg
+call :show_and_log result_meaning
+if "%run_mode%"=="forensic" (call :write_result_block log) else call :write_result_block console
 exit /b 0
 
 :log_result_records
@@ -3402,6 +3471,7 @@ rem Forensic run: the record lines of the summary.
 call :log_field "Script copy" result_script_copy
 call :log_field "Reference record" result_reference
 if defined reference_seal_result_text call :log_field_continued reference_seal_result_text
+if defined reference_seal_sha256_text call :log_field_continued reference_seal_sha256_text
 call :log_field "History" result_history
 call :log_field "Log" log_destination_text
 exit /b 0
@@ -3433,7 +3503,7 @@ if not "%copy_status%"=="PASS" call :add_failure_clause "The copy failed" "the c
 if defined verification_ran if not "%metadata_status%"=="PASS" call :add_failure_clause "The metadata check failed" "the metadata check failed"
 if "%run_records_status%"=="FAIL" call :add_failure_clause "The run records check failed" "the run records check failed"
 if defined verification_ran if not "%hash_status%"=="PASS" call :add_failure_clause "The SHA-256 verification failed" "the SHA-256 verification failed"
-call :add_failure_clause "See the failures listed below" "see the failures listed below"
+call :add_failure_clause "See the failures listed above" "see the failures listed above"
 exit /b 0
 
 :work_out_verification_status
@@ -3458,18 +3528,33 @@ if %match_count% equ 0 set "hash_status=FAIL"
 set "reference_label=files in the reference record"
 if "%run_mode%"=="nonforensic" set "reference_label=source files"
 set "result_hash=%hash_status%: %match_count% of %reference_row_count% %reference_label% match the destination"
-set "result_hash_detail=%differ_count% differ, %missing_count% missing, %unreadable_count% unreadable, %invalid_row_count% invalid in the record; added since: %added_file_count% file(s)"
-if "%run_mode%"=="nonforensic" set "result_hash_detail=%differ_count% differ, %missing_count% missing, %unreadable_count% unreadable"
-if %hash_check_incomplete% neq 0 set "result_hash_detail=%result_hash_detail%; INCOMPLETE (see failures)"
-if %unexpected_listing_lines% neq 0 set "result_hash_detail=%result_hash_detail%; %unexpected_listing_lines% unexpected listing line(s)"
+rem The detail under the Hash check: one count per line (a list is laid
+rem out, not wrapped).
+set "result_hash_detail_count=0"
+call :add_hash_detail "%differ_count% differ"
+call :add_hash_detail "%missing_count% missing"
+call :add_hash_detail "%unreadable_count% unreadable"
+if "%run_mode%"=="forensic" call :add_hash_detail "%invalid_row_count% invalid in the record"
+if "%run_mode%"=="forensic" call :add_hash_detail "added since: %added_file_count% file(s)"
+if %hash_check_incomplete% neq 0 call :add_hash_detail "INCOMPLETE (see Failures)"
+if %unexpected_listing_lines% neq 0 call :add_hash_detail "%unexpected_listing_lines% unexpected listing line(s)"
 rem Files added since the reference fail a forensic run even when every file
 rem in the record matches: say so first.
 if "%run_mode%"=="forensic" if %added_file_count% gtr 0 set "result_hash=%hash_status%: %added_file_count% file(s) in the destination aren't in the reference record (added since); %match_count% of %reference_row_count% %reference_label% match the destination"
 rem A reference whose run record fails its checks can't be relied on, even
 rem if every file matches it: say so first, so the status can't be misread.
 if %reference_seal_failed% neq 0 set "result_hash=%hash_status%: the reference record's run record failed its checks, so the reference can't be relied on; %match_count% of %reference_row_count% %reference_label% match it"
-if "%run_mode%"=="forensic" if %hash_check_incomplete% equ 0 if %reference_row_count% equ 0 set "result_hash_detail=%result_hash_detail%; the reference record lists no files"
-if "%run_mode%"=="nonforensic" if %hash_check_incomplete% equ 0 if %reference_row_count% equ 0 set "result_hash_detail=%result_hash_detail%; the source holds no files"
+rem Nothing to verify: that is the reason, so it leads (the counts are 0).
+if "%run_mode%"=="forensic" if %hash_check_incomplete% equ 0 if %reference_row_count% equ 0 set "result_hash=%hash_status%: nothing was verified: the reference record lists no files"
+if "%run_mode%"=="nonforensic" if %hash_check_incomplete% equ 0 if %reference_row_count% equ 0 set "result_hash=%hash_status%: nothing was verified: the source holds no files"
+rem The pointer names what explains the failure: an unreliable reference is
+rem explained by the Run records check, a comparison problem by the Hash
+rem section; both are in Failures.
+set /a "comparison_problem_count=hash_problem_count - reference_seal_failed"
+set "hash_pointer=see Hash (SHA-256) above, and Failures"
+if %reference_seal_failed% neq 0 set "hash_pointer=see Run records above, and Failures"
+if %reference_seal_failed% neq 0 if %comparison_problem_count% neq 0 set "hash_pointer=see Run records and Hash (SHA-256) above, and Failures"
+if "%hash_status%"=="FAIL" set "result_hash=%result_hash% (%hash_pointer%)"
 if %hash_check_incomplete% equ 0 if %reference_row_count% equ 0 call :report_nothing_to_verify
 set "metadata_status=FAIL"
 set "result_metadata=NOT RUN"
@@ -3477,18 +3562,18 @@ if defined metadata_check_ran set "metadata_status=PASS"
 if defined metadata_check_ran set "result_metadata=PASS: size and last-modified time match for every file (compared %metadata_time_precision%)"
 if defined metadata_check_ran if %hashed_count_destination% equ 0 set "result_metadata=PASS: no differences, but there were no files to compare"
 if %metadata_differ_count% neq 0 set "metadata_status=FAIL"
-if %metadata_differ_count% neq 0 set "result_metadata=FAIL: %metadata_differ_count% file(s) differ in size or last-modified time, or were not copied"
+if %metadata_differ_count% neq 0 set "result_metadata=FAIL: %metadata_differ_count% file(s) differ in size or last-modified time, or were not copied (see Metadata above, and Failures)"
 if %metadata_check_incomplete% neq 0 set "metadata_status=FAIL"
-if %metadata_check_incomplete% neq 0 set "result_metadata=FAIL: the comparison was incomplete"
+if %metadata_check_incomplete% neq 0 set "result_metadata=FAIL: the comparison was incomplete (see Metadata above, and Failures)"
 if not "%run_mode%"=="forensic" exit /b 0
 rem Run records: NONE if the set has no earlier runs (a first copy); FAIL if
 rem there are some but the check didn't run, or found any problem.
 set "run_records_status=NONE"
 set "result_run_records=NONE: no earlier runs found in the source"
-if %history_row_count% gtr 0 if not defined run_records_checked set "run_records_status=FAIL" & set "result_run_records=FAIL: not checked (verification stopped before the run records check)"
+if %history_row_count% gtr 0 if not defined run_records_checked set "run_records_status=FAIL" & set "result_run_records=FAIL: not checked (verification stopped before the run records check; see Failures)"
 if defined run_records_checked set "run_records_status=PASS" & set "result_run_records=PASS: %run_record_count% run record(s) match their seals and the history (%run_record_file_match_count% sealed file(s))"
 if defined run_records_checked if %run_record_count% equ 0 if %run_record_problem_count% equ 0 set "run_records_status=NONE" & set "result_run_records=NONE: no earlier runs found in the source"
-if %run_record_problem_count% neq 0 set "run_records_status=FAIL" & set "result_run_records=FAIL: %run_record_problem_count% problem(s) in the run records (see failures)"
+if %run_record_problem_count% neq 0 set "run_records_status=FAIL" & set "result_run_records=FAIL: %run_record_problem_count% problem(s) in the run records (see Run records above, and Failures)"
 exit /b 0
 
 :report_unaccounted_rows
@@ -3579,7 +3664,7 @@ set "result_script_copy=%result_script_copy%; its SHA-256 matches the Script SHA
 exit /b 0
 :stage_script_copy_failed
 set "script_copy_replaces="
-set "result_script_copy=FAILED: no verified copy of the script in the destination set directory"
+set "result_script_copy=FAIL: no verified copy of the script in the destination set directory"
 set "msg=[WARN] Could not place a verified copy of the script in the destination set directory."
 call :show_and_log msg
 call :remember_problem msg
@@ -3659,7 +3744,10 @@ rem sealed log records the script's SHA-256, which the copy was checked
 rem against. Sets run_seal_sha256, and seal_incomplete=1 if any record file
 rem or the seal itself couldn't be hashed: :publish_records then writes
 rem nothing and the run fails (owner, 2026-10-16), since a run record whose
-rem seal doesn't cover it would fail every later copy.
+rem seal doesn't cover it would fail every later copy. Console only from
+rem here: the log is complete and is being sealed.
+set "heading=Record written: sealing this run's record and writing it to the destination"
+call :write_section_heading heading console
 setlocal EnableDelayedExpansion
 set "sealed_count=0"
 set "seal_expected_count=0"
@@ -3674,7 +3762,8 @@ for %%F in (log_staged_path staged_hash_csv_source staged_hash_csv_destination s
             >>"!staged_seal_path!" echo(!record_sha256! *!record_name!
             set /a "sealed_count+=1"
         ) else (
-            echo [FAIL] Could not hash !record_name! for the seal.
+            set "msg=[FAIL] Could not hash !record_name! for the seal."
+            call :show_write_back_problem msg
         )
     )
 )
@@ -3684,14 +3773,9 @@ if !sealed_count! equ 0 (endlocal & set "seal_incomplete=1" & exit /b 0)
 set "seal_sha256="
 call :get_sha256 staged_seal_path seal_sha256
 if not defined seal_sha256 set "incomplete=1"
-echo.
-echo Run record sealed in: !seal_file_name!
-if defined seal_sha256 (
-    echo   SHA-256: !seal_sha256!
-    echo Record this value in your chain-of-custody notes: it shows whether this
-    echo run's record is later changed.
-) else (
-    echo [FAIL] Could not hash the seal file.
+if not defined seal_sha256 (
+    set "msg=[FAIL] Could not hash the seal file."
+    call :show_write_back_problem msg
 )
 endlocal & set "run_seal_sha256=%seal_sha256%" & set "seal_incomplete=%incomplete%"
 exit /b 0
@@ -3709,11 +3793,14 @@ rem overwritten (/xc /xn /xo) except that history and a script copy this
 rem run replaces (:choose_script_copy). Each file is read back and compared with
 rem its staged original by SHA-256. Only if all match and the run record is
 rem in place is the staging directory removed; otherwise it is kept and its
-rem path shown, so no record is lost, and the exit code becomes FAIL.
+rem path shown, so no record is lost, and the exit code becomes FAIL. Sets
+rem result_record_written, the "Record written" row of the console's result
+rem block (it starts as a FAIL: unknown is not passed).
 if not defined staging_dir exit /b 0
 call :is_directory staging_dir || exit /b 0
 if defined seal_incomplete goto publish_records_seal_incomplete
 setlocal
+set "record_written_text=FAIL: no record files were found to write (see Record written above)"
 set "record_count=0"
 set "records_matching=0"
 set "records_robocopy_exit_codes=0"
@@ -3727,29 +3814,27 @@ if not defined run_record_in_place if defined history_base_path call :publish_ro
 if %record_count% equ 0 goto publish_records_done
 if not %records_matching% equ %record_count% goto publish_records_failed
 if not defined run_record_in_place goto publish_records_failed
-echo.
 set "msg=Custody files written to the destination and read back: %records_matching% of %record_count% match."
 call :show msg
-if defined log_ready (
-    set "msg=Log saved: %log_destination_path%"
-    call :show msg
-)
+set "record_written_text=PASS: %records_matching% of %record_count% custody files written and read back intact"
+set "log_was_published="
+if defined log_ready set "log_was_published=1"
 del /f /q "%staged_records_dir%\*" >nul 2>&1
 del /f /q "%staged_root_dir%\*" >nul 2>&1
 :publish_records_done
 rd "%staged_records_dir%" >nul 2>&1
 rd "%staged_root_dir%" >nul 2>&1
 rd "%staging_dir%" >nul 2>&1
-endlocal & exit /b 0
+endlocal & set "result_record_written=%record_written_text%" & set "log_published=%log_was_published%" & exit /b 0
 :publish_records_failed
-echo.
 set "msg=[WARN] Only %records_matching% of %record_count% custody files reached the destination intact (robocopy exit codes combined: %records_robocopy_exit_codes%). All of them are kept here:"
-call :show msg
+call :show_write_back_problem msg
 set "msg=       %staging_dir%"
 call :show msg
 set "msg=[FAIL] This run's record wasn't completed in the destination. The log and summary were sealed before the write-back; because the record is missing, the exit code is FAIL (%EXIT_CODE_FAIL%)."
-call :show msg
-endlocal & set "exit_code=%EXIT_CODE_FAIL%" & exit /b 1
+call :show_write_back_problem msg
+set "record_written_text=FAIL: only %records_matching% of %record_count% custody files reached the destination intact; all are kept in TEMP (see Record written above)"
+endlocal & set "exit_code=%EXIT_CODE_FAIL%" & set "result_record_written=%record_written_text%" & set "record_kept_in_staging=1" & exit /b 1
 
 :report_run_record_not_completed
 rem Caller's scope (:publish_records): the run record couldn't be put in
@@ -3759,7 +3844,7 @@ rem was removed), that this can't be told.
 set "msg=[WARN] The run record could not be written to the destination (nothing of it is there) and is not added to the history."
 call :is_directory destination_set_with_backslash || set "msg=[WARN] The run record could not be written: the destination set directory can't be reached, so whether any of the run record is there can't be told. It is not added to the history; a later copy warns about any %run_utc_stamp%%PARTIAL_RUN_SUFFIX% left there."
 call :is_directory destination_partial_run_dir && set "msg=[WARN] The run record was not completed in the destination: it is left as %run_utc_stamp%%PARTIAL_RUN_SUFFIX% and is not added to the history."
-call :show msg
+call :show_write_back_problem msg
 exit /b 0
 
 :publish_records_seal_incomplete
@@ -3777,12 +3862,59 @@ set "continued_history_text="
 if defined history_base_path call :publish_root_history continued
 if defined history_base_path set "continued_history_text= The history this run continued was written beside the evidence, unchanged."
 if defined history_base_path if not %records_matching% equ %record_count% set "continued_history_text= The history this run continued couldn't be written beside the evidence intact (see above)."
-echo.
 set "msg=[FAIL] This run's record couldn't be sealed completely, so none of it was written to the destination.%continued_history_text% The log and summary were written before the seal; the exit code is FAIL (%EXIT_CODE_FAIL%). Everything is kept here:"
-call :show msg
+call :show_write_back_problem msg
 set "msg=       %staging_dir%"
 call :show msg
-endlocal & set "exit_code=%EXIT_CODE_FAIL%" & exit /b 1
+set "record_written_text=FAIL: this run's record couldn't be sealed completely, so none of it was written (see Record written above)"
+endlocal & set "exit_code=%EXIT_CODE_FAIL%" & set "result_record_written=%record_written_text%" & set "record_kept_in_staging=1" & exit /b 1
+
+:work_out_final_result
+rem Forensic run, after the write-back: the verdict the console shows last,
+rem which also covers writing the record (the sealed log can't: shared rule).
+rem A record that wasn't written in full makes the run FAIL.
+set "final_verdict=%verdict%"
+if not "%result_record_written:~0,4%"=="PASS" set "final_verdict=FAIL"
+if "%final_verdict%"=="FAIL" set "exit_code=%EXIT_CODE_FAIL%"
+set "final_result_overall=%final_verdict% (exit code %exit_code%)"
+exit /b 0
+
+:show_closing_lines
+rem Forensic run, after the console's result block. With the record written:
+rem the seal's SHA-256 for the custody notes, and where the log is. With the
+rem record kept in staging instead (a failed seal or write-back): where it
+rem is and its seal's SHA-256, without asking for that to be recorded as the
+rem set's (owner, 2026-10-17). Otherwise nothing: the Record written row
+rem says what happened.
+if defined record_kept_in_staging goto show_closing_lines_kept
+if not "%result_record_written:~0,4%"=="PASS" exit /b 0
+if not defined run_seal_sha256 goto show_closing_lines_log
+set "msg=Run record sealed in: %seal_file_name%" & call :show msg
+set "msg=  SHA-256: %run_seal_sha256%" & call :show msg
+set "msg=Record this value in your chain-of-custody notes: it shows whether this run's record is later changed."
+call :show msg
+:show_closing_lines_log
+if not defined log_published exit /b 0
+set "msg=Log: %log_destination_path%" & call :show msg
+exit /b 0
+:show_closing_lines_kept
+set "msg=Run record kept in TEMP, not in the destination (see Record written above)."
+call :show msg
+if not defined run_seal_sha256 exit /b 0
+set "msg=  Its seal: %seal_file_name%"
+if defined seal_incomplete set "msg=  Its seal (incomplete): %seal_file_name%"
+call :show msg
+set "msg=  SHA-256: %run_seal_sha256%" & call :show msg
+exit /b 0
+
+:show_write_back_problem  msgVar
+rem Forensic run, after the log is sealed: show a [WARN] or [FAIL] line of
+rem the record's write-back and remember it (:remember_problem), so the
+rem console's result block counts it. The sealed log's lists and block end
+rem before the write-back and can't hold it (shared rule).
+call :show %~1
+call :remember_problem %~1
+exit /b 0
 
 :publish_staged_directory  where
 rem Caller's scope (:publish_records). where: records (staged_records_dir to
@@ -3840,7 +3972,7 @@ if exist "!destination_copy_path!" call :get_sha256 destination_copy_path destin
 if defined staged_sha256 if /i "!staged_sha256!"=="!destination_sha256!" (endlocal & set /a "records_matching+=1" & exit /b 0)
 set "msg=[WARN] Not in the destination, or it differs from the staged record: !%~1!"
 call :is_directory destination_set_with_backslash || set "msg=[WARN] Couldn't be read back (the destination set directory can't be reached): !%~1!"
-call :show msg
+call :show_write_back_problem msg
 endlocal & exit /b 0
 
 rem -- Copy helpers -----------------------------------------------------------
@@ -4012,7 +4144,8 @@ if not defined normalise_path_input if "%~4"=="1" if defined default_source_path
 call :normalise_path
 if errorlevel 1 goto ask_directory_loop
 call :path_has_percent normalise_path_result && (
-    echo Paths containing %% can't be handled safely yet: rename the directory or choose another.
+    echo Paths containing %% can't be handled safely yet: rename the
+    echo   directory or choose another.
     goto ask_directory_loop
 )
 set "answer_is_directory="
@@ -4025,7 +4158,7 @@ if "%~3"=="1" if not defined answer_is_directory (
     echo Directory not found.
     if defined is_elevated if "%normalise_path_result:~1,1%"==":" if not exist "%normalise_path_result:~0,2%\" (
         echo As administrator, drive letters mapped in your normal session are not
-        echo visible. For a network share, enter its UNC path: \\server\share\...
+        echo   visible. For a network share, enter its UNC path: \\server\share\...
     )
     goto ask_directory_loop
 )
@@ -4242,61 +4375,264 @@ endlocal & exit /b 0
 rem -- General ----------------------------------------------------------------
 
 :show  msgVar
-rem Print a variable's value to the console only (not to the log).
-setlocal EnableDelayedExpansion
-echo(!%~1!
-endlocal & exit /b 0
+rem Print a variable's value to the console only (not to the log), as free
+rem text within OUTPUT_WIDTH (:emit_free_text).
+call :emit_free_text %~1 console
+exit /b 0
 
 :show_and_log  msgVar
 rem Print a variable's value to the console and, in log mode once the log
-rem exists, append it to the log.
-setlocal EnableDelayedExpansion
-echo(!%~1!
-if defined log_ready >>"!log_staged_path!" echo(!%~1!
-endlocal & exit /b 0
+rem exists, append it to the log; free text within OUTPUT_WIDTH.
+call :emit_free_text %~1 both
+exit /b 0
 
 :log_field  label  valueVar
-rem Show and log "  label     : value", labels aligned under a section title.
+rem Show and log "  label     : value" (labels 20 wide, the value from
+rem column 25); a long value continues from column 26 (:emit_wrapped), a
+rem word that can't fit there (a SHA-256) from column 5. The value never
+rem leaves the label's line: the Script check reads the
+rem "  Script SHA-256      : " line of a sealed log (contract).
 setlocal EnableDelayedExpansion
 set "padded_label=%~1                      "
-set "msg=  !padded_label:~0,20!: !%~2!"
-call :show_and_log msg
+set "field_line=  !padded_label:~0,20!: !%~2!"
+set "field_continuation=!BLANKS:~0,25!"
+set "field_long_word_start=!BLANKS:~0,4!"
+call :emit_wrapped field_line 24 field_continuation both field_long_word_start
 endlocal & exit /b 0
 
 :log_field_continued  valueVar
-rem Show and log a continuation line, aligned with the values of :log_field.
+rem Show and log a further line of a field, starting at the value column
+rem (25); a long one continues from column 26, a word that can't fit there
+rem from column 5.
 setlocal EnableDelayedExpansion
-set "msg=                        !%~1!"
-call :show_and_log msg
+set "field_line=!BLANKS:~0,24!!%~1!"
+set "field_continuation=!BLANKS:~0,25!"
+set "field_long_word_start=!BLANKS:~0,4!"
+call :emit_wrapped field_line 24 field_continuation both field_long_word_start
 endlocal & exit /b 0
 
-:log_result_line  label  valueVar
-rem Show and log "  label   : value" for the overall result, whose value sits
-rem four columns right of :log_field's to line up with :log_check_line.
-setlocal EnableDelayedExpansion
-set "padded_label=%~1                           "
-set "msg=  !padded_label:~0,24!: !%~2!"
-call :show_and_log msg
+:write_section_heading  titleVar  target
+rem Open a section (shared rule: scannable output): an empty line, a light
+rem rule, the title. Titles start with the name the result block points to
+rem (Script, Copy, Metadata, Run records, Hash (SHA-256), Record written).
+rem target: console, log or both (:emit_line).
+setlocal
+set "section_line="
+call :emit_line section_line %~2
+set "section_line=%RULE_LIGHT%"
+call :emit_line section_line %~2
+call :emit_free_text %~1 %~2
 endlocal & exit /b 0
 
-:log_check_line  label  valueVar  [detailVar]
-rem Show and log one check under the overall result as
-rem "    |-label : value", and detailVar (if given and set) on the next line,
-rem aligned with the value.
+:emit_free_text  textVar  target
+rem Write free text (a sentence, a list item, a tagged line) within
+rem OUTPUT_WIDTH: a longer line continues two columns right of where its
+rem text starts (its own leading spaces plus two), never at the left edge.
 setlocal EnableDelayedExpansion
-set "padded_label=%~1                           "
-set "msg=    |-!padded_label:~0,20!: !%~2!"
-call :show_and_log msg
-if "%~3"=="" (endlocal & exit /b 0)
-if not defined %~3 (endlocal & exit /b 0)
-set "msg=                            !%~3!"
-call :show_and_log msg
+set "free_text=!%~1!"
+if not defined free_text goto emit_free_text_as_is
+if "!free_text:~%OUTPUT_WIDTH%!"=="" goto emit_free_text_as_is
+set "free_text_indent=0"
+:emit_free_text_indent
+for %%I in (!free_text_indent!) do if "!free_text:~%%I,1!"==" " (
+    set /a "free_text_indent+=1"
+    goto emit_free_text_indent
+)
+set /a "free_text_continuation_width=free_text_indent + 2"
+for %%I in (!free_text_continuation_width!) do set "free_text_continuation=!BLANKS:~0,%%I!"
+call :emit_wrapped free_text !free_text_indent! free_text_continuation %~2
 endlocal & exit /b 0
+:emit_free_text_as_is
+call :emit_line free_text %~2
+endlocal & exit /b 0
+
+:emit_wrapped  textVar  valueColumn  continuationVar  target  [longWordStartVar]
+rem Write one line of output within OUTPUT_WIDTH characters (shared rule:
+rem 80-character output), broken at spaces. The value starts at character
+rem valueColumn (counted from 0) and never leaves the first line, so a break
+rem comes only at a space after its first character. Each further line
+rem starts with continuationVar's text (the hanging indent). A word longer
+rem than the room left (a SHA-256, a path) stays whole: if longWordStartVar
+rem is given and the word fits within OUTPUT_WIDTH after its (shorter) text,
+rem the line starts with that instead, so an 80-column console doesn't
+rem split the word back to column 1; otherwise it runs past the width.
+setlocal EnableDelayedExpansion
+set "remaining=!%~1!"
+if not defined remaining goto emit_wrapped_last
+if "!remaining:~%OUTPUT_WIDTH%!"=="" goto emit_wrapped_last
+set "continuation=!%~3!"
+call :strlen continuation continuation_length
+set "long_word_start="
+if not "%~5"=="" set "long_word_start=!%~5!"
+if defined long_word_start call :strlen long_word_start long_word_start_length
+set /a "earliest_break=%~2 + 1"
+:emit_wrapped_next
+if "!remaining:~%OUTPUT_WIDTH%!"=="" goto emit_wrapped_last
+set "break_at="
+for /l %%I in (%OUTPUT_WIDTH%,-1,!earliest_break!) do if not defined break_at if "!remaining:~%%I,1!"==" " set "break_at=%%I"
+if not defined break_at call :find_next_space remaining %OUTPUT_WIDTH% break_at
+if not defined break_at goto emit_wrapped_last
+for %%B in (!break_at!) do (
+    set "wrapped_line=!remaining:~0,%%B!"
+    set "remaining=!remaining:~%%B!"
+)
+:emit_wrapped_trim
+if defined remaining if "!remaining:~0,1!"==" " (
+    set "remaining=!remaining:~1!"
+    goto emit_wrapped_trim
+)
+call :emit_line wrapped_line %~4
+if not defined remaining (endlocal & exit /b 0)
+set "line_start=!continuation!"
+set "line_start_length=!continuation_length!"
+if defined long_word_start call :first_word_fits_only_after remaining !continuation_length! !long_word_start_length! && (
+    set "line_start=!long_word_start!"
+    set "line_start_length=!long_word_start_length!"
+)
+set "remaining=!line_start!!remaining!"
+set /a "earliest_break=line_start_length + 1"
+goto emit_wrapped_next
+:emit_wrapped_last
+call :emit_line remaining %~4
+endlocal & exit /b 0
+
+:first_word_fits_only_after  textVar  continuationLength  longWordStartLength
+rem Exit 0 if the text's first word doesn't fit within OUTPUT_WIDTH after
+rem continuationLength characters but does after longWordStartLength
+rem (:emit_wrapped). The space added at the end ends a text of one word.
+setlocal EnableDelayedExpansion
+set "words=!%~1! "
+set /a "room_after_continuation=OUTPUT_WIDTH - %~2, room_after_long_word_start=OUTPUT_WIDTH - %~3"
+set "first_word_length="
+for /l %%I in (0,1,!room_after_long_word_start!) do if not defined first_word_length if "!words:~%%I,1!"==" " set "first_word_length=%%I"
+if not defined first_word_length (endlocal & exit /b 1)
+if !first_word_length! leq !room_after_continuation! (endlocal & exit /b 1)
+endlocal & exit /b 0
+
+:find_next_space  textVar  fromIndex  outVar
+rem Caller's scope, delayed expansion on (:emit_wrapped). Set outVar to the
+rem index of the first space at or after fromIndex, or clear it if there is
+rem none (a long unbreakable value is then written whole).
+set "%~3="
+set /a "space_probe=%~2"
+:find_next_space_next
+set "space_probe_character="
+for %%P in (!space_probe!) do set "space_probe_character=!%~1:~%%P,1!"
+if not defined space_probe_character exit /b 0
+if "!space_probe_character!"==" " (
+    set "%~3=!space_probe!"
+    exit /b 0
+)
+set /a "space_probe+=1"
+goto find_next_space_next
+
+:emit_line  lineVar  target
+rem The one place a finished line is written. target: console, log or both.
+rem The console copy gets colour when :init_console_colour turned it on; the
+rem log copy never does (records are plain text, sealed, compared byte for
+rem byte). Lines reach the log only once it exists (log_ready).
+setlocal EnableDelayedExpansion
+set "line=!%~1!"
+if "%~2"=="log" goto emit_line_to_log
+if defined line if defined console_colour call :colour_for_console line
+echo(!line!
+:emit_line_to_log
+if "%~2"=="console" (endlocal & exit /b 0)
+if defined log_ready >>"!log_staged_path!" echo(!%~1!
+endlocal & exit /b 0
+
+:colour_for_console  lineVar
+rem Caller's scope, delayed expansion on (:emit_line). Colour the status
+rem words of a console line (COLOUR_* in CONFIG): the verdict bold, PASS
+rem green, WARN and NOT RUN yellow, FAIL red. The words themselves stay.
+set "%~1=!%~1:RESULT: PASS=RESULT: %coloured_verdict_pass%!"
+set "%~1=!%~1:RESULT: FAIL=RESULT: %coloured_verdict_fail%!"
+set "%~1=!%~1:RESULT: UNVERIFIED=RESULT: %coloured_verdict_unverified%!"
+set "%~1=!%~1:[FAIL]=%coloured_fail_tag%!"
+set "%~1=!%~1:[WARN]=%coloured_warn_tag%!"
+set "%~1=!%~1:: PASS=: %coloured_pass%!"
+set "%~1=!%~1:: FAIL=: %coloured_fail%!"
+set "%~1=!%~1:: NOT RUN=: %coloured_not_run%!"
+exit /b 0
+
+:write_result_block  target
+rem The run's result block (shared rule: scannable output): between two
+rem heavy rules, the verdict, then each check in the order it ran, and the
+rem warning and failure counts; a check that didn't pass names the section
+rem and list that explain it. A wrapped value keeps the tree's "|" in column
+rem 5 and continues from column 30. target: log (the copy sealed with the
+rem log) or console (the last thing on screen; in a forensic run, after the
+rem record's write-back, with a row for it and a verdict that includes it,
+rem and counts that include its warnings and failures).
+setlocal
+set "block_target=%~1"
+set "block_overall=%result_overall%"
+if "%block_target%"=="console" if "%run_mode%"=="forensic" set "block_overall=%final_result_overall%"
+set "block_line=" & call :emit_line block_line %block_target%
+set "block_line=%RULE_HEAVY%" & call :emit_line block_line %block_target%
+set "block_line=  RESULT: %block_overall%" & call :emit_line block_line %block_target%
+if "%run_mode%"=="forensic" call :write_check_row "Script" result_script %block_target%
+call :write_check_row "Copy" result_copy %block_target%
+call :write_check_row "Metadata" result_metadata %block_target%
+if "%run_mode%"=="forensic" call :write_check_row "Run records" result_run_records %block_target%
+call :write_check_row "Hash (SHA-256)" result_hash %block_target% result_hash_detail
+if "%block_target%"=="console" if "%run_mode%"=="forensic" call :write_check_row "Record written" result_record_written %block_target%
+set "block_line=" & call :emit_line block_line %block_target%
+call :count_summary_list warnings block_warning_count
+call :count_summary_list failures block_failure_count
+set "block_warnings=%block_warning_count%"
+set "block_failures=%block_failure_count%"
+if %block_warning_count% equ 0 set "block_warnings=none"
+if %block_failure_count% equ 0 set "block_failures=none"
+set "block_line=  Warnings: %block_warnings%, Failures: %block_failures% (listed above)"
+if %block_warning_count% equ 0 if %block_failure_count% equ 0 set "block_line=  Warnings: none, Failures: none"
+call :emit_line block_line %block_target%
+set "block_line=%RULE_HEAVY%" & call :emit_line block_line %block_target%
+endlocal & exit /b 0
+
+:write_check_row  label  valueVar  target  [detailPrefix]
+rem One check in the result block: "    |-label : value" (labels 20 wide, the
+rem value from column 29), a long value continued from column 30 behind the
+rem tree's "|", a word that can't fit there from column 9. With
+rem detailPrefix, the lines <detailPrefix>_1 to _<detailPrefix>_count
+rem follow, one item per line from column 29 (a list is laid out, not
+rem wrapped).
+setlocal EnableDelayedExpansion
+set "padded_label=%~1                      "
+set "row_line=    |-!padded_label:~0,20!: !%~2!"
+set "row_continuation=    |!BLANKS:~0,24!"
+set "row_long_word_start=    |!BLANKS:~0,3!"
+call :emit_wrapped row_line 28 row_continuation %~3 row_long_word_start
+if "%~4"=="" (endlocal & exit /b 0)
+set "row_detail_count=!%~4_count!"
+if not defined row_detail_count set "row_detail_count=0"
+for /l %%D in (1,1,!row_detail_count!) do (
+    set "row_line=    |!BLANKS:~0,23!!%~4_%%D!"
+    call :emit_wrapped row_line 28 row_continuation %~3 row_long_word_start
+)
+endlocal & exit /b 0
+
+:count_summary_list  kind  outVar
+rem The number of lines in the summary's warnings or failures list; after
+rem the write-back, with the write-back's (:show_write_back_problem).
+setlocal
+if "%~1"=="failures" (set "list_path=%temp_summary_failures%") else set "list_path=%temp_summary_warnings%"
+set "list_count=0"
+if exist "%list_path%" for /f "usebackq delims=" %%L in ("%list_path%") do set /a "list_count+=1"
+endlocal & set "%~2=%list_count%"
+exit /b 0
+
+:add_hash_detail  text
+rem Caller's scope (:work_out_verification_status): one more line of the
+rem Hash check's detail list (result_hash_detail_<n>).
+set /a "result_hash_detail_count+=1"
+set "result_hash_detail_%result_hash_detail_count%=%~1"
+exit /b 0
 
 :remember_problem  msgVar
 rem Remember a [FAIL] or [WARN] line for the summary: [FAIL] lines (anything
-rem that fails the run) go to the failures listed below the result, all others
-rem to the warnings listed above it. Leading spaces are dropped.
+rem that fails the run) go to its Failures list, all others to its Warnings
+rem list. Leading spaces are dropped.
 setlocal EnableDelayedExpansion
 set "line=!%~1!"
 :remember_problem_trim
@@ -4419,15 +4755,17 @@ endlocal & exit /b 0
 :abort
 rem Stop before anything is copied. No run record is written: an aborted run
 rem leaves nothing in the destination. Its log, if one was started, stays in
-rem TEMP and its path is shown; the reason is shown once, as logged.
-echo.
+rem TEMP and its path is shown. The reason is shown once, in a result block
+rem (shared rule: scannable output), in the log too if there is one.
+set "abort_target=console"
+if defined log_ready set "abort_target=both"
+set "block_line=" & call :emit_line block_line %abort_target%
+set "block_line=%RULE_HEAVY%" & call :emit_line block_line %abort_target%
+set "block_line=  RESULT: FAIL (exit code %EXIT_CODE_FAIL%)" & call :emit_line block_line %abort_target%
+call :write_check_row "Run aborted" abort_reason %abort_target%
+set "block_line=%RULE_HEAVY%" & call :emit_line block_line %abort_target%
 if defined log_ready (
-    set "msg=[FAIL] Run aborted: %abort_reason%"
-    call :show_and_log msg
     set "msg=The log of this aborted run is kept here: %log_staged_path%"
-    call :show msg
-) else (
-    set "msg=[FAIL] %abort_reason%"
     call :show msg
 )
 call :cleanup_temp

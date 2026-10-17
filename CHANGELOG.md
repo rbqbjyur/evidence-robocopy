@@ -5,6 +5,63 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.2.0 - 2026-10-17
+
+Known issues: hashing many small files is about 14 % slower than in 2.1.1
+(the per-file progress line on screen). On screen, PASS, FAIL, NOT RUN,
+`[FAIL]` or `[WARN]` in a file name can be coloured as if it were a status;
+the words, the log and the records are not affected.
+
+### Added
+- Console colour where the console supports it: PASS green, WARN yellow,
+  FAIL red, the verdict bold; never in the log or records. `NO_COLOR` turns
+  it off.
+- A "Record written" line in the result block on screen, after the run
+  record is written back; a record that wasn't written in full makes the
+  run FAIL.
+
+### Changed
+- Lines the script writes itself keep within 79 characters, broken at
+  spaces with a hanging indent; hashes and long paths stay whole. A hash
+  that doesn't fit where a field continues starts at column 5 instead, so
+  an 80-column console doesn't split it. The help and the notices before
+  the copy continue indented too; the help lists the exit codes one per
+  line.
+- Sections open with a rule and a title named after the check they belong
+  to (Script, Copy, Metadata, Run records, Hash (SHA-256), Record written).
+- The summary ends with a result block: the verdict, each check, a pointer
+  to the section and list that explain anything not passed, and the
+  warning and failure counts. Warnings, failures and the closing sentence
+  come before it; on screen it is the last thing shown, before the seal's
+  SHA-256 and the log's location, and its counts include the warnings and
+  failures of writing the record back.
+- When the record couldn't be sealed or written back, the closing lines say
+  that it is kept in TEMP, not in the destination, and give its seal's
+  SHA-256 without asking for it to be recorded as the set's record (before,
+  they read as for a completed record).
+- The Hash check leads with the reason when nothing was verified (the
+  reference record lists no files), and points to Run records when the
+  reference can't be relied on.
+- The Hash check's counts are listed one per line.
+- The seal SHA-256 of the reference record, of each run record and of the
+  previous run is shown on its own line.
+- An aborted run ends with a result block naming the reason.
+- The run records are checked before the copy as fully as after it, on the
+  set whose history the copy continues (every run record against its seal
+  too); anything found is a header warning. One checker now does the check
+  before the copy, the warnings and the check after it.
+- Run records findings are worded the same before and after the copy; a run
+  record's sealed history is compared with "the history this run
+  continues". Warnings about the Run records check made before the copy
+  all end "will fail".
+- A warning already listed isn't listed again.
+- The summary's Script copy line reads FAIL, not FAILED, when no verified
+  copy was placed.
+
+### Fixed
+- A history row whose run cell isn't a run's UTC time is a Run records
+  failure; it was used as a directory name.
+
 ## 2.1.1 - 2026-10-16
 
 ### Added
