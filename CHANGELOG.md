@@ -5,12 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.2.1 - 2026-10-18
+
+### Changed
+- The closing lines give the log's file name, then its directory on a line
+  of its own, so an 80-column console doesn't split the path.
+
+### Fixed
+- Hashing is back to 2.1.1's speed, slightly faster: the per-file progress
+  line on screen is written directly when it fits.
+- On screen, colour marks statuses only: PASS, FAIL, NOT RUN, `[FAIL]` or
+  `[WARN]` in a file name stay plain. The summary's Reference record shows
+  a failed seal check in red, like every other status.
+
 ## 2.2.0 - 2026-10-17
 
-Known issues: hashing many small files is about 14 % slower than in 2.1.1
-(the per-file progress line on screen). On screen, PASS, FAIL, NOT RUN,
-`[FAIL]` or `[WARN]` in a file name can be coloured as if it were a status;
-the words, the log and the records are not affected.
+Known issues (fixed in 2.2.1): hashing many small files is about 14 %
+slower than in 2.1.1 (the per-file progress line on screen). On screen,
+PASS, FAIL, NOT RUN, `[FAIL]` or `[WARN]` in a file name can be coloured as
+if it were a status; the words, the log and the records are not affected.
 
 ### Added
 - Console colour where the console supports it: PASS green, WARN yellow,

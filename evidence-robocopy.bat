@@ -62,7 +62,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.2.0"
+set "TOOL_VERSION=2.2.1"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -2749,7 +2749,15 @@ call :relative_path full_path !base_var! file_relative_path || (
     endlocal & set /a "unexpected_listing_lines+=1" & exit /b 0
 )
 set /a "sequence_number=hashed_count_%~2 + 1"
-set "msg=[!sequence_number!/%~3] Hashing !item_label!: !file_relative_path!" & call :show msg
+rem The progress line, once per file, is written directly when it fits:
+rem going through :show costs about 6 ms per file (test round 11). A longer
+rem one goes through :show to be wrapped.
+set "msg=[!sequence_number!/%~3] Hashing !item_label!: !file_relative_path!"
+if "!msg:~%OUTPUT_WIDTH%!"=="" (
+    echo(!msg!
+) else (
+    call :show msg
+)
 set "file_sha256="
 call :get_sha256 full_path file_sha256
 if not defined file_sha256 set "file_sha256=UNREADABLE"
@@ -3881,11 +3889,12 @@ exit /b 0
 
 :show_closing_lines
 rem Forensic run, after the console's result block. With the record written:
-rem the seal's SHA-256 for the custody notes, and where the log is. With the
-rem record kept in staging instead (a failed seal or write-back): where it
-rem is and its seal's SHA-256, without asking for that to be recorded as the
-rem set's (owner, 2026-10-17). Otherwise nothing: the Record written row
-rem says what happened.
+rem the seal's SHA-256 for the custody notes, and the log's name, then its
+rem directory on a line of its own (a full path would wrap on an 80-column
+rem console). With the record kept in staging instead (a failed seal or
+rem write-back): where it is and its seal's SHA-256, without asking for that
+rem to be recorded as the set's. Otherwise nothing: the Record written row
+rem says what happened. (Owner, 2026-10-17, both.)
 if defined record_kept_in_staging goto show_closing_lines_kept
 if not "%result_record_written:~0,4%"=="PASS" exit /b 0
 if not defined run_seal_sha256 goto show_closing_lines_log
@@ -3895,7 +3904,8 @@ set "msg=Record this value in your chain-of-custody notes: it shows whether this
 call :show msg
 :show_closing_lines_log
 if not defined log_published exit /b 0
-set "msg=Log: %log_destination_path%" & call :show msg
+set "msg=Log: %log_file_name%" & call :show msg
+set "msg=  in %destination_run_dir%" & call :show msg
 exit /b 0
 :show_closing_lines_kept
 set "msg=Run record kept in TEMP, not in the destination (see Record written above)."
@@ -4458,6 +4468,7 @@ rem the line starts with that instead, so an 80-column console doesn't
 rem split the word back to column 1; otherwise it runs past the width.
 setlocal EnableDelayedExpansion
 set "remaining=!%~1!"
+set "line_kind=first"
 if not defined remaining goto emit_wrapped_last
 if "!remaining:~%OUTPUT_WIDTH%!"=="" goto emit_wrapped_last
 set "continuation=!%~3!"
@@ -4481,7 +4492,8 @@ if defined remaining if "!remaining:~0,1!"==" " (
     set "remaining=!remaining:~1!"
     goto emit_wrapped_trim
 )
-call :emit_line wrapped_line %~4
+call :emit_line wrapped_line %~4 !line_kind!
+set "line_kind=continuation"
 if not defined remaining (endlocal & exit /b 0)
 set "line_start=!continuation!"
 set "line_start_length=!continuation_length!"
@@ -4493,7 +4505,7 @@ set "remaining=!line_start!!remaining!"
 set /a "earliest_break=line_start_length + 1"
 goto emit_wrapped_next
 :emit_wrapped_last
-call :emit_line remaining %~4
+call :emit_line remaining %~4 !line_kind!
 endlocal & exit /b 0
 
 :first_word_fits_only_after  textVar  continuationLength  longWordStartLength
@@ -4526,15 +4538,18 @@ if "!space_probe_character!"==" " (
 set /a "space_probe+=1"
 goto find_next_space_next
 
-:emit_line  lineVar  target
+:emit_line  lineVar  target  [lineKind]
 rem The one place a finished line is written. target: console, log or both.
 rem The console copy gets colour when :init_console_colour turned it on; the
 rem log copy never does (records are plain text, sealed, compared byte for
-rem byte). Lines reach the log only once it exists (log_ready).
+rem byte). Lines reach the log only once it exists (log_ready). lineKind
+rem "continuation" (:emit_wrapped's further lines) is never coloured: a
+rem status starts a text, and a further line may hold the rest of an
+rem evidence name.
 setlocal EnableDelayedExpansion
 set "line=!%~1!"
 if "%~2"=="log" goto emit_line_to_log
-if defined line if defined console_colour call :colour_for_console line
+if defined line if defined console_colour if not "%~3"=="continuation" call :colour_for_console line
 echo(!line!
 :emit_line_to_log
 if "%~2"=="console" (endlocal & exit /b 0)
@@ -4545,14 +4560,40 @@ endlocal & exit /b 0
 rem Caller's scope, delayed expansion on (:emit_line). Colour the status
 rem words of a console line (COLOUR_* in CONFIG): the verdict bold, PASS
 rem green, WARN and NOT RUN yellow, FAIL red. The words themselves stay.
-set "%~1=!%~1:RESULT: PASS=RESULT: %coloured_verdict_pass%!"
-set "%~1=!%~1:RESULT: FAIL=RESULT: %coloured_verdict_fail%!"
-set "%~1=!%~1:RESULT: UNVERIFIED=RESULT: %coloured_verdict_unverified%!"
-set "%~1=!%~1:[FAIL]=%coloured_fail_tag%!"
-set "%~1=!%~1:[WARN]=%coloured_warn_tag%!"
-set "%~1=!%~1:: PASS=: %coloured_pass%!"
-set "%~1=!%~1:: FAIL=: %coloured_fail%!"
-set "%~1=!%~1:: NOT RUN=: %coloured_not_run%!"
+rem Only where the layout puts a status, so the same words in an evidence
+rem name ("[FAIL] x.txt", "PASSPORT.pdf") stay plain: a [FAIL] or [WARN]
+rem tag starting the line (column 1, or 3 and 5 in the Warnings and
+rem Failures lists), the verdict of the RESULT line, the status starting a
+rem result block row's value (column 29), and a status and colon starting
+rem a field's value at column 25, on the field's own line or a detail line
+rem below it (the Script field; Script copy, or the Reference record's seal
+rem result, when they fail). The colon keeps a value that only starts with
+rem the word (a host name) plain: names can't hold one.
+set "colour_line=!%~1!"
+if "!colour_line:~0,6!"=="[FAIL]" set "%~1=%coloured_fail_tag%!colour_line:~6!"
+if "!colour_line:~0,8!"=="  [FAIL]" set "%~1=  %coloured_fail_tag%!colour_line:~8!"
+if "!colour_line:~0,10!"=="    [FAIL]" set "%~1=    %coloured_fail_tag%!colour_line:~10!"
+if "!colour_line:~0,6!"=="[WARN]" set "%~1=%coloured_warn_tag%!colour_line:~6!"
+if "!colour_line:~0,8!"=="  [WARN]" set "%~1=  %coloured_warn_tag%!colour_line:~8!"
+if "!colour_line:~0,10!"=="    [WARN]" set "%~1=    %coloured_warn_tag%!colour_line:~10!"
+if "!colour_line:~0,10!"=="  RESULT: " (
+    set "%~1=!%~1:RESULT: PASS=RESULT: %coloured_verdict_pass%!"
+    set "%~1=!%~1:RESULT: FAIL=RESULT: %coloured_verdict_fail%!"
+    set "%~1=!%~1:RESULT: UNVERIFIED=RESULT: %coloured_verdict_unverified%!"
+)
+if "!colour_line:~0,6!"=="    |-" if "!colour_line:~26,2!"==": " (
+    if "!colour_line:~28,4!"=="PASS" set "%~1=!colour_line:~0,28!%coloured_pass%!colour_line:~32!"
+    if "!colour_line:~28,4!"=="FAIL" set "%~1=!colour_line:~0,28!%coloured_fail%!colour_line:~32!"
+    if "!colour_line:~28,7!"=="NOT RUN" set "%~1=!colour_line:~0,28!%coloured_not_run%!colour_line:~35!"
+)
+set "colour_field_value_line="
+if "!colour_line:~0,2!"=="  " if "!colour_line:~22,2!"==": " set "colour_field_value_line=1"
+if "!colour_line:~0,24!"=="!BLANKS:~0,24!" set "colour_field_value_line=1"
+if defined colour_field_value_line (
+    if "!colour_line:~24,5!"=="PASS:" set "%~1=!colour_line:~0,24!%coloured_pass%!colour_line:~28!"
+    if "!colour_line:~24,5!"=="FAIL:" set "%~1=!colour_line:~0,24!%coloured_fail%!colour_line:~28!"
+    if "!colour_line:~24,8!"=="NOT RUN:" set "%~1=!colour_line:~0,24!%coloured_not_run%!colour_line:~31!"
+)
 exit /b 0
 
 :write_result_block  target
