@@ -5,7 +5,89 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.3.0 - 2026-10-19
+
+Known issue (in every release so far, to be fixed in 2.3.1): a set
+directory whose path is longer than about 170 characters puts its custody
+files past 260 characters, which cmd's tools can't open; a copy from or to
+it fails (Run records FAIL, exit 1), but the failure is named as a history
+mismatch and the source is hashed anew as the reference record. The
+evidence files inside the set are not affected.
+
+### Added
+- A live display on the console while a forensic run works (Windows 10 or
+  later, not the legacy console): each check of the result block with its
+  status or a progress bar, the file being copied (with robocopy's
+  percentage within each large file) or hashed, and the last warnings and
+  failures, redrawn in place every 5 s. Console only: the log and every
+  record are written as before. `EVIDENCE_ROBOCOPY_PLAIN`, set to anything,
+  gives the previous console output instead, as `NO_COLOR` turns colour off.
+- A log kept from a run aborted before its header now records the version,
+  the Script SHA-256, the start time, host, user and the directories given.
+
+### Changed
+- The clock check goes by the time service's last synchronisation: a run
+  warns when it is older than 7 days (`CLOCK_SYNC_MAX_AGE_HOURS`) or not
+  known, and the header's "Last time sync" says how long ago it was. The
+  time service starts and stops on demand and keeps no record of a sync
+  from before it last started; that state was reported as "not
+  synchronised" even shortly after the clock had been synchronised. The
+  warning now reads "The clock's accuracy can't be confirmed (...)" with
+  the reason.
+- With the live display, robocopy's console output is discarded: its
+  per-file lines no longer scroll on the console; its log is written as in
+  a plain run. The header's Progress field says what the console showed.
+  The large-file pass runs without `/np` (its Options line shows it), so
+  its percentages can be shown live; they are left out of the log, each of
+  its file lines cut at robocopy's first progress mark.
+- The checks after the copy run in the result block's order: metadata,
+  then the run records (the custody files are hashed first; that section is
+  now titled "Run records: hashing the custody files ..."), then the SHA-256
+  hashing and compare. Before, the evidence was hashed before the run
+  records were checked.
+- A copy pass with no file in its size class is skipped, with a line in the
+  log saying so; the last pass always runs, so robocopy still creates every
+  directory. On a set of 100,000 small files the large-file pass took about
+  108 s to copy nothing.
+- Robocopy's output is written into the log in one step when it holds no
+  ERROR line (about 100 s less for a log of 100,000 lines); with ERROR
+  lines it is rewritten line by line as before. The bytes are the same.
+
+### Fixed
+- A file whose full path was about 8,170 characters or longer was left out
+  of both hash records without a word, so a run could PASS without
+  verifying it (cmd skips a FOR /F iteration whose expanded command would
+  pass 8,191 characters; in every release so far). A path of about 4,100
+  characters or more emptied both hash records (sort's record limit) and
+  the run failed with "Nothing was verified", naming no file. Now a file
+  whose full path, on either side, is over 4,000 characters
+  (`MAX_FILE_PATH_LENGTH`) is not hashed and fails the run by name (the
+  first 200 characters of its path); every listing is read numbered, so a
+  line cmd can't carry is refused by name too, and the files listed are
+  counted against the files hashed or refused. The hash records' and the
+  comparison's rows are counted after sorting, a run record's files
+  against their listing, and robocopy's output lines against those
+  written into the log: a shortfall fails the run.
+- A file certutil couldn't read once was recorded UNREADABLE for good: in a
+  first copy that is the set's reference record, and every later copy of
+  the set fails on that file. It is now hashed again after 2 s, with both
+  attempts noted in the log; a file that fails twice is UNREADABLE as before.
+- A robocopy exit code outside robocopy's own range (a stopped or failed
+  robocopy, e.g. -1073741510 after Ctrl+C) was decoded bit by bit into
+  misleading lines ("Fatal error: nothing was copied ...", "Extra files
+  ..."); it now reads "Robocopy ended abnormally (exit code n)". Such a
+  code also fails the Copy check, and makes the metadata check and a file
+  listing incomplete, whatever its bits: before, a negative code let a
+  listing count as complete, and a code without the failure bits let the
+  Copy check pass (the hash check still failed the run).
+
 ## 2.2.1 - 2026-10-18
+
+Known issue (in every release so far, fixed in 2.3.0): a file whose full
+path is about 8,170 characters or longer is left out of both hash records
+without any failure, so a run can PASS without verifying it; a path of
+about 4,100 to 8,170 characters empties both hash records and the run
+fails with "Nothing was verified".
 
 ### Changed
 - The closing lines give the log's file name, then its directory on a line

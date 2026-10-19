@@ -14,16 +14,10 @@ It is a batch file on purpose: it uses only tools built into Windows and runs
 wherever robocopy does, including workstations where PowerShell or `.ps1`
 scripts are restricted, so it can travel with the evidence too.
 
-<table>
-  <tr>
-    <td width="50%"><img src="docs/images/destination-prompt.png" alt="Console: the banner, the source directory G:\Export\EV03 and the destination directory H:\Review\EV03 typed at the prompts"><br>Source and destination, typed at the prompts</td>
-    <td width="50%"><img src="docs/images/end-summary.png" alt="Console: the result block of run 7, RESULT: PASS (exit code 0) with the Script, Copy, Metadata, Run records, Hash (SHA-256) and Record written checks each PASS, then the seal's SHA-256 for the custody notes and the log's location"><br>The result block: the verdict and each check</td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="docs/images/history-in-calc.png" alt="LibreOffice Calc: the history of a set, seven runs, each PASS, with the source directory and volume of each copy"><br>The history in a spreadsheet: one row per copy (first five of 13 columns)</td>
-    <td width="50%"><img src="docs/images/set-tree.png" alt="tree /f of a set directory: the history and the script copy, the records directory with three sealed run records, and the evidence directory Images with EV03.E01 to E03 and the acquisition log"><br>A set: the evidence, the script, the history and a sealed record of each copy</td>
-  </tr>
-</table>
+<img src="docs/images/demo.webp" alt="Console: a forensic copy of an EWF image set from W:\Processing\EV03 to a working copy on a USB drive: the source and destination typed at the prompts, the header, then the live display with each check's status, the copy's bar moving through three segments, the checks passing one by one, and the result block, RESULT: PASS (exit code 0)">
+
+A forensic copy to a USB drive, with the live display. The copy is sped up
+ten times; the prompts, the checks and the result block play at real speed.
 
 ## What it does
 
@@ -54,6 +48,11 @@ scripts are restricted, so it can travel with the evidence too.
   their SHA-256s. On every copy, every earlier run record is checked against
   its seal and against the history. See [History and run
   records](#history-and-run-records).
+
+  <img src="docs/images/history-in-calc.png" alt="LibreOffice Calc: the history of a set, seven runs, each PASS, with the source directory and volume of each copy">
+
+  *The history in a spreadsheet: one row per copy (first five of 13 columns).*
+
 - **Checks between copies.** A different script version, and a set that
   reached this drive by other means since the run that made it, are
   flagged. See [Checks between copies](#checks-between-copies).
@@ -79,11 +78,16 @@ scripts are restricted, so it can travel with the evidence too.
   characters, except hashes and long paths. A file in the evidence
   directory that the reference record doesn't list (added since) fails the
   run: it is unexplained and not verified against anything.
+
+  <img src="docs/images/end-summary.png" alt="Console: the result block of run 7, RESULT: PASS (exit code 0) with the Script, Copy, Metadata, Run records, Hash (SHA-256) and Record written checks each PASS, then the seal's SHA-256 for the custody notes and the log's location">
+
+  *The result block: the verdict and each check.*
+
 - **Warnings up front.** Before copying, everything to be wary of is listed
   in one **Warnings** section at the top of the log header, and repeated in
   the summary: the machine may sleep or hibernate, or its power settings
-  can't be read; the clock isn't synchronised with a time source, or its
-  status can't be read; the destination is FAT32/FAT; a copy pass doesn't write unbuffered; a drive root holds fragments
+  can't be read; the clock's last synchronisation is older than 7 days or
+  isn't known, or its status can't be read; the destination is FAT32/FAT; a copy pass doesn't write unbuffered; a drive root holds fragments
   recovered by file-system repairs (`FOUND.nnn`, `LOST.DIR`; copied as
   contents); the source has no history, so the copy isn't checked against
   an earlier record; run records the Run records check will fail; a newer
@@ -91,6 +95,14 @@ scripts are restricted, so it can travel with the evidence too.
   means; the console couldn't be switched to UTF-8. Links in the source
   that weren't copied are found after the copy, so they are listed with the
   summary's warnings.
+- **Live display.** While a forensic run works, the console shows one
+  block, redrawn in place: each check of the result block with its status
+  or a progress bar, the file being copied (with robocopy's percentage
+  within each large file) or hashed, and the last warnings and failures.
+  Console only: the log and the records are written as before. Windows 10
+  or later, not the legacy console; `EVIDENCE_ROBOCOPY_PLAIN=1` gives the
+  plain output instead (robocopy's per-file lines, a line per hashed file),
+  e.g. when the output is captured.
 - **What is preserved.** Data, attributes and timestamps of files and
   subdirectories (`/copy:DAT /dcopy:DAT`), so anything hidden stays hidden;
   empty directories (`/e`). Junctions and symbolic links are not followed (`/xj`); each one not copied is listed as a warning. Exact byte sizes
@@ -111,8 +123,11 @@ scripts are restricted, so it can travel with the evidence too.
   paths they are copied as contents.
 - **Copying:** two evidence passes, both unbuffered (`/j`): files of 100 MiB
   or more single-threaded, smaller files with half the logical processors
-  (1–128); then the custody files in a pass of their own. A failed file is
-  retried once after 2 s, so real failures surface quickly.
+  (1–128); then the custody files in a pass of their own. A pass with no
+  file in its size class is skipped (the last pass always runs, so every
+  directory is created). A failed file is retried once after 2 s, so real
+  failures surface quickly; a file certutil can't read is hashed again
+  once after 2 s before it is recorded as UNREADABLE.
 - **Records are UTF-8** with CRLF line endings, and every CSV cell is
   quoted.
 
@@ -124,6 +139,10 @@ files**: the script, `evidence-robocopy-history.csv` and
 hold the files Explorer and macOS leave when browsing (`.DS_Store`, `._*`,
 `.apdisk`, `desktop.ini`, `Thumbs.db`, `.directory`); they are ignored, not
 copied or hashed. Inside the evidence directory they are evidence.
+
+<img src="docs/images/set-tree.png" alt="tree /f of a set directory: the history and the script copy, the records directory with three sealed run records, and the evidence directory Images with EV03.E01 to E03 and the acquisition log">
+
+*A set: the evidence, the script, the history and a sealed record of each copy.*
 
 **Source: which set is copied?**
 
@@ -326,6 +345,9 @@ without the script.
 - Administrator rights are optional; they enable backup mode and, on some
   systems, reading the file system of system volumes and the time-service
   status.
+- The live display and the console colours need a console that takes VT
+  sequences: Windows 10 or later, not the legacy console. Elsewhere the
+  output is plain.
 
 ## Usage
 
@@ -336,6 +358,13 @@ evidence-robocopy.bat /?              help
 ```
 
 Run as administrator for backup mode. Any other argument stops the run.
+`EVIDENCE_ROBOCOPY_PLAIN=1` in the environment gives the plain console output
+instead of the live display; `NO_COLOR=1` turns colour off. Neither changes
+the log or the records.
+
+<img src="docs/images/destination-prompt.png" alt="Console: the banner, the source directory G:\Export\EV03 and the destination directory H:\Review\EV03 typed at the prompts">
+
+*Source and destination, typed at the prompts.*
 
 ## Example
 
@@ -350,16 +379,17 @@ Warnings (read before relying on this copy)
   Findings made after the copy (such as links not copied) are in the summary.
 
 Environment
-  Script              : evidence-robocopy 2.2.1
+  Script              : evidence-robocopy 2.3.0
   Script path         : C:\Tools\evidence-robocopy.bat
-  Script SHA-256      : d88f9bc4dcdb36d7e6c7111be134454dce5de438739dd0e9362162dfcb264f61
+  Script SHA-256      : 9befc6ffffb467ec215dca8a229cea529606c57a06a5884d486d1acba352da77
   Mode                : forensic (default): log, SHA-256 verification and run
                          records
-  Started (UTC)       : 2026-10-18T09:56:26Z (source: robocopy)
+  Started (UTC)       : 2026-10-19T23:28:15Z (source: robocopy)
   Local UTC offset    : +01:00 (robocopy's Started/Ended and ERROR times are
                          local; its file times are UTC)
   Time source         : time.windows.com,0x9
-  Last time sync      : 18/10/2026 10:42:33 (local time, as w32tm reports it)
+  Last time sync      : 20/10/2026 00:27:38 (local time, as w32tm reports it),
+                         38 s ago
   Host                : WORKSTATION-01
   User                : workstation-01\analyst (SID
                          S-1-5-21-1111111111-2222222222-3333333333-1001)
@@ -385,12 +415,12 @@ Source
                          set directory
   Volume              : Volume in drive G is TRANSFER; serial 1A2B-3C4D; exFAT
   Skipped at root     : n/a (not a drive root)
-  Reference record    : evidence-robocopy-records\20261018T095602Z\evidence-robocopy_20261018T095602Z_hashes_source.csv
+  Reference record    : evidence-robocopy-records\20261019T232749Z\evidence-robocopy_20261019T232749Z_hashes_source.csv
                          (row 1 of the history)
   History             : 2 earlier run(s); this is run 3
-  Previous run        : 20261018T095611Z (PASS, host WORKSTATION-01)
+  Previous run        : 20261019T232759Z (PASS, host WORKSTATION-01)
                         seal SHA-256:
-    b1d5254aa42636f24b55c6cef369eb2c4878e41b0921f106ae61a13d4cb82be0
+    824d451507e22ac37504e0a09a330a134c5a07f370241642c9f06c1ba6c9d452
 
 Destination
   Set directory       : H:\Processing\EV03\
@@ -400,44 +430,47 @@ Destination
                          directory
   Was                 : new set (empty, or only an empty evidence directory)
   Volume              : Volume in drive H is PROCESSING; serial 5E6F-7A8B; NTFS
-  Run record          : H:\Processing\EV03\evidence-robocopy-records\20261018T095626Z\
-  Log                 : H:\Processing\EV03\evidence-robocopy-records\20261018T095626Z\evidence-robocopy_20261018T095626Z.log
-  Log during run      : C:\Users\analyst\AppData\Local\Temp\evidence-robocopy_20261018T095626Z_546_staging\records\evidence-robocopy_20261018T095626Z.log
+  Run record          : H:\Processing\EV03\evidence-robocopy-records\20261019T232815Z\
+  Log                 : H:\Processing\EV03\evidence-robocopy-records\20261019T232815Z\evidence-robocopy_20261019T232815Z.log
+  Log during run      : C:\Users\analyst\AppData\Local\Temp\evidence-robocopy_20261019T232815Z_16781_staging\records\evidence-robocopy_20261019T232815Z.log
 ===============================================================================
 
 -------------------------------------------------------------------------------
 Script: checked against the previous run
-  Script              : PASS: same version (2.2.1) and SHA-256 as the previous
+  Script              : PASS: same version (2.3.0) and SHA-256 as the previous
                          run's script
 
 [...]
 
 -------------------------------------------------------------------------------
 Run records: against the history and their seals
-Run record 20261018T095602Z: 5 file(s) match its seal, 0 problem(s).
+Run record 20261019T232749Z: 5 file(s) match its seal, 0 problem(s).
   Seal SHA-256:
-    fa099437012952b6a666ac2a759b9ced8c36f9e1433e06fc038601ca1ad02b57
-Run record 20261018T095611Z: 4 file(s) match its seal, 0 problem(s).
+    a3e812f17acbe056f1361a99fb09fc5b4874c8ce73fd64012efdec51af81ea14
+Run record 20261019T232759Z: 4 file(s) match its seal, 0 problem(s).
   Seal SHA-256:
-    b1d5254aa42636f24b55c6cef369eb2c4878e41b0921f106ae61a13d4cb82be0
+    824d451507e22ac37504e0a09a330a134c5a07f370241642c9f06c1ba6c9d452
+
+-------------------------------------------------------------------------------
+Hash (SHA-256): hashing the destination
 
 -------------------------------------------------------------------------------
 Hash (SHA-256): destination vs reference record
-  evidence-robocopy_20261018T095602Z_hashes_source.csv
+  evidence-robocopy_20261019T232749Z_hashes_source.csv
 
 -------------------------------------------------------------------------------
 Summary
-  Finished (UTC)      : 2026-10-18T09:56:42Z
+  Finished (UTC)      : 2026-10-19T23:28:31Z
   Script copy         : placed in the destination set directory as
                          evidence-robocopy.bat; its SHA-256 matches the Script
                          SHA-256 above
-  Reference record    : evidence-robocopy_20261018T095602Z_hashes_source.csv
+  Reference record    : evidence-robocopy_20261019T232749Z_hashes_source.csv
                         matches its seal
-                         evidence-robocopy_20261018T095602Z.sha256
+                         evidence-robocopy_20261019T232749Z.sha256
                         seal SHA-256:
-    fa099437012952b6a666ac2a759b9ced8c36f9e1433e06fc038601ca1ad02b57
+    a3e812f17acbe056f1361a99fb09fc5b4874c8ce73fd64012efdec51af81ea14
   History             : run 3 (2 earlier run(s) in the history)
-  Log                 : H:\Processing\EV03\evidence-robocopy-records\20261018T095626Z\evidence-robocopy_20261018T095626Z.log
+  Log                 : H:\Processing\EV03\evidence-robocopy-records\20261019T232815Z\evidence-robocopy_20261019T232815Z.log
 
   Warnings (did not fail the run)
     none
@@ -451,7 +484,7 @@ The copy completed, every file in the reference record is in the destination
 
 ===============================================================================
   RESULT: PASS (exit code 0)
-    |-Script              : PASS: same version (2.2.1) and SHA-256 as the
+    |-Script              : PASS: same version (2.3.0) and SHA-256 as the
     |                        previous run's script
     |-Copy                : PASS: robocopy exit codes combined: 1
     |-Metadata            : PASS: size and last-modified time match for every
@@ -520,6 +553,16 @@ The copy completed, every file in the reference record is in the destination
   and only size and last-modified time are compared.
 - Hash files that only backup mode can read. Robocopy copies them, but
   they are reported as unreadable (FAIL).
+- Hash a file whose full path, on the source or on the destination, is
+  longer than 4,000 characters: robocopy copies it, but cmd can't carry
+  such a path, so the run fails and names the file by the first 200
+  characters of its path. No mainstream system makes paths this long
+  (Linux stops at 4,096 bytes, macOS at 1,024).
+- Read its own custody files past 260 characters: a set directory whose
+  path is longer than about 170 characters puts its run records and
+  history beyond what cmd's tools open, and a copy from or to it fails
+  (Run records FAIL), though the failure is named as a history mismatch.
+  The evidence files inside the set are not affected. To be fixed in 2.3.1.
 - Flush file-system metadata or a drive's own write cache: file contents
   are written unbuffered, but only ejecting or dismounting the drive
   flushes the rest.

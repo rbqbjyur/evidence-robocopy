@@ -14,6 +14,8 @@ rem                                      plain copy utility: ETA progress, no
 rem                                      log or records, optional verification
 rem          evidence-robocopy.bat /?    show help
 rem          Run as administrator for backup mode (/b).
+rem          EVIDENCE_ROBOCOPY_PLAIN=1   plain console output instead of the
+rem                                      live display; NO_COLOR=1 no colour
 rem Exit:    0 PASS, 1 FAIL, 2 UNVERIFIED (see EXIT_CODE_* in CONFIG)
 rem Changes: see CHANGELOG.md. Licence: 0BSD, see LICENSE.
 rem
@@ -62,7 +64,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.2.1"
+set "TOOL_VERSION=2.3.0"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -70,6 +72,30 @@ rem blip, AV holding a file), while a real problem fails within seconds per
 rem file instead of retrying for hours and looking like progress.
 set "RETRY_COUNT=1"
 set "RETRY_WAIT_SECONDS=2"
+
+rem certutil can fail to read a file once (seen once in about 180,000 hashes,
+rem with real-time antivirus scanning on; workshop, 2026-10-18): a file it
+rem can't read is hashed again after this many seconds before it is recorded
+rem UNREADABLE, and the retry is noted in the log. A file that fails twice is
+rem UNREADABLE (:get_sha256).
+set "HASH_RETRY_WAIT_SECONDS=2"
+
+rem The longest full path (drive letter to file name, as the source or the
+rem destination lists it) of a file this script hashes and compares. A
+rem longer one is refused by name: robocopy copies it, the run fails. cmd
+rem sets the ceiling (round 12.7): it skips a FOR /F iteration whose
+rem expanded command would pass 8,191 characters without a word (a path of
+rem 8,200 characters was left out of both hash records and the run PASSed),
+rem a percent-expanded line that long ends the script, and sort writes
+rem nothing for a record of 4,096 characters or more (its default). 4,000
+rem keeps every line a path goes on well inside those limits, and no
+rem mainstream system makes such paths (Linux stops at 4,096 bytes, macOS at
+rem 1,024).
+set "MAX_FILE_PATH_LENGTH=4000"
+rem How much of a refused path its failure line shows: the whole can't
+rem always be read (above), and the output wrapper spends about 10 ms per
+rem character of an unbreakable word.
+set "PATH_EXCERPT_LENGTH=200"
 
 rem Files of at least this many bytes go to the large-file pass.
 set "LARGE_FILE_BYTES=104857600"
@@ -116,19 +142,34 @@ rem   PASS_<id>_LABEL    text shown in the console and log
 rem   PASS_<id>_FILTER   robocopy file-size filter
 rem   PASS_<id>_THREADS  /mt thread count, or "auto" (see THREAD_DIVISOR)
 rem   PASS_<id>_FLAGS    extra robocopy flags for this pass only
+rem   PASS_<id>_PROGRESS the live display's copy bar: by bytes (each file's
+rem                      size from the listing made before the pass, in MB;
+rem                      for a pass of few, large files) or by files
+rem   PASS_<id>_PERCENTAGES  yes: while the live display is on, the pass runs
+rem                      without /np, so robocopy's percentage within each
+rem                      file is shown live; those percentages are left out
+rem                      of the log (:save_robocopy_unicode_output), which
+rem                      then reads as with /np. no: /np as always.
 rem Every pass uses /j (unbuffered I/O): file contents go straight to the drive
 rem rather than through the Windows cache, so verification reads them back
 rem from the drive. A pass without /j is named in a warning
-rem (:check_write_mode).
+rem (:check_write_mode). Before the passes, each pass's files are listed
+rem (:count_copy_pass_files); a pass with no file in its class is skipped,
+rem except the last pass, which always runs so that robocopy creates the
+rem directories (/e) whatever the passes hold.
 set "COPY_PASSES=large small"
 set "PASS_large_LABEL=Large files (%LARGE_FILE_MIB% MiB and over)"
 set "PASS_large_FILTER=/min:%LARGE_FILE_BYTES%"
 set "PASS_large_THREADS=1"
 set "PASS_large_FLAGS=/j"
+set "PASS_large_PROGRESS=bytes"
+set "PASS_large_PERCENTAGES=yes"
 set "PASS_small_LABEL=Small files (under %LARGE_FILE_MIB% MiB)"
 set "PASS_small_FILTER=/max:%SMALL_FILE_MAX_BYTES%"
 set "PASS_small_THREADS=auto"
 set "PASS_small_FLAGS=/j"
+set "PASS_small_PROGRESS=files"
+set "PASS_small_PERCENTAGES=no"
 
 rem Robocopy flags used by every copy pass (COPY_FLAGS), and by the file
 rem listing that drives verification (LIST_FLAGS: list only, full paths, no
@@ -140,6 +181,9 @@ rem physically inside the source is copied, and junction loops (e.g.
 rem "Application Data" in a user profile) can't recurse forever.
 set "COPY_FLAGS=/e /xj /v /x /ts /fp /bytes /dcopy:DAT /copy:DAT"
 set "LIST_FLAGS=/l /e /xj /njh /njs /ndl /nc /ns /fp /r:0 /w:0"
+rem The listing made before each copy pass (:count_copy_pass_files): as
+rem LIST_FLAGS, with each file's exact size.
+set "COPY_COUNT_FLAGS=/l /e /xj /njh /njs /ndl /nc /fp /bytes /r:0 /w:0"
 
 rem Post-copy metadata check: robocopy in list-only mode, source against
 rem destination, lists only files it would copy, i.e. whose size or
@@ -168,6 +212,11 @@ set "ROBOCOPY_EXIT_1_SEVERITY=INFO"
 set "ROBOCOPY_EXIT_1_TEXT=Files were copied."
 rem Bits whose severity is FAIL, as a mask for the verdict (16 + 8 + 4).
 set "ROBOCOPY_FAIL_MASK=28"
+rem Robocopy's own exit codes use the five bits above (0 to 31). Anything
+rem else (negative, or higher) means robocopy was stopped or failed: after
+rem Ctrl+C it is -1073741510 (0xC000013A). Its bits then mean nothing, and
+rem the copy or listing it ran fails (:is_robocopy_exit_code_in_range).
+set "ROBOCOPY_EXIT_CODE_HIGHEST=31"
 
 rem The evidence directory in the destination is a new directory with the
 rem source's name; its contents are the evidence. Robocopy copies the source
@@ -215,6 +264,12 @@ rem with robocopy (Vista and later); wmic is deprecated and absent by default
 rem from Windows 11 24H2.
 set "UTC_METHODS=robocopy wmic"
 set "ELEVATION_CHECKS=fsutil net"
+
+rem The clock check (:read_clock_status): a run warns when the time service's
+rem last synchronisation is older than this, or isn't known. A PC clock
+rem typically drifts 1-2 s a day; Windows re-syncs a standalone PC every few
+rem hours while it is online (owner, 2026-10-19: 7 days).
+set "CLOCK_SYNC_MAX_AGE_HOURS=168"
 
 rem Power settings that can stop a long copy, read with "powercfg /q" (no admin
 rem needed). One row per setting, "subgroup:setting" aliases. The earliest
@@ -266,6 +321,61 @@ set "COLOUR_WARN=33"
 set "COLOUR_FAIL=31"
 set "COLOUR_BOLD=1"
 
+rem Live display on the console (:init_dashboard and the :dashboard_*
+rem helpers, at the end of the file): one block of DASHBOARD_LINE_COUNT
+rem lines, redrawn in place while a forensic run works, on a console that
+rem takes VT sequences. Console only: nothing of it reaches the log or any
+rem record, and it reads the run's counters without changing them. The
+rem environment variable EVIDENCE_ROBOCOPY_PLAIN, set to anything, asks for
+rem the plain output instead (output that is captured, or a console without
+rem VT sequences), as NO_COLOR asks for no colour.
+rem   DASHBOARD_REDRAW_CENTISECONDS  in the script's own loops (hashing, the
+rem                                  compare, the run records): at most one
+rem                                  redraw per this; 5 s is the shortest
+rem                                  interval that cost no more than a
+rem                                  longer one (workshop, 2026-10-18)
+rem   DASHBOARD_TICK_EVERY_ITEMS     the loops read the clock every this many
+rem                                  items (:dashboard_tick)
+rem   DASHBOARD_POLL_SECONDS         how often the display helper reads the
+rem                                  copy's progress from robocopy's log
+rem   DASHBOARD_HELPER_WAIT_SECONDS  longest wait for the helper to see the
+rem                                  copy start, or to end
+rem   DASHBOARD_BYTES_TABLE_MAX_FILES  a bytes pass with more files than this
+rem                                  is shown by files (its per-file table
+rem                                  would be too large for the environment)
+rem   DASHBOARD_BAR_WIDTH            columns inside a bar's [ ]; BAR_FULL and
+rem                                  BAR_EMPTY are that many # and .
+rem   DASHBOARD_LIST_LINES           the last warnings and failures shown
+rem   DASHBOARD_LINE_COUNT           lines in the block (the redraw goes up
+rem                                  that many): a rule, the title, the six
+rem                                  stage rows, two detail lines under Copy
+rem                                  and one under Hash, a blank line, the
+rem                                  two lists with their counts, a rule
+rem   DASHBOARD_STAGES               the result block's checks, in its order;
+rem                                  DASHBOARD_STAGE_<stage>_LABEL its label
+set "DASHBOARD_REDRAW_CENTISECONDS=500"
+set "DASHBOARD_TICK_EVERY_ITEMS=25"
+set "DASHBOARD_POLL_SECONDS=5"
+set "DASHBOARD_HELPER_WAIT_SECONDS=10"
+set "DASHBOARD_BYTES_TABLE_MAX_FILES=1000"
+set "DASHBOARD_BAR_WIDTH=36"
+set "DASHBOARD_BAR_FULL=####################################"
+set "DASHBOARD_BAR_EMPTY=...................................."
+set "DASHBOARD_LIST_LINES=3"
+set "DASHBOARD_LINE_COUNT=21"
+set "DASHBOARD_STAGES=script copy metadata run_records hash record_written"
+set "DASHBOARD_STAGE_script_LABEL=Script"
+set "DASHBOARD_STAGE_copy_LABEL=Copy"
+set "DASHBOARD_STAGE_metadata_LABEL=Metadata"
+set "DASHBOARD_STAGE_run_records_LABEL=Run records"
+set "DASHBOARD_STAGE_hash_LABEL=Hash (SHA-256)"
+set "DASHBOARD_STAGE_record_written_LABEL=Record written"
+rem   DASHBOARD_STAGE_<stage>_DETAILS  the variables of the detail lines shown
+rem                                  under a stage's row (empty: none); they
+rem                                  go when the stage has its result
+set "DASHBOARD_STAGE_copy_DETAILS=dashboard_copy_detail dashboard_copy_error_text"
+set "DASHBOARD_STAGE_hash_DETAILS=dashboard_hash_detail"
+
 rem =============================== MAIN ======================================
 
 if "%~1"=="/?" goto :show_help
@@ -273,9 +383,18 @@ set "script_path=%~f0"
 set "script_file_name=%~nx0"
 set "script_dir=%~dp0"
 
+rem The display helper: this script started again by :dashboard_copy_begin,
+rem in the same console and with the run's variables, to paint the live
+rem display while robocopy copies (:dashboard_helper_main). It is told apart
+rem by a variable set for the moment it starts, holding this run's own
+rem temporary path, which nothing else can hold.
+if defined evidence_robocopy_display_helper if "%evidence_robocopy_display_helper%"=="%temp_path_prefix%" goto :dashboard_helper_main
+
 call :init_state
+call :init_console_vt
 call :init_console_colour
 call :parse_args "%~1" "%~2" || goto :abort
+call :init_dashboard
 call :switch_console_to_utf8
 call :check_script_path || goto :abort
 call :read_carriage_return
@@ -298,13 +417,25 @@ call :choose_script_copy
 call :precheck_run_records
 call :write_header
 call :log_pre_copy_findings
-for %%P in (%COPY_PASSES%) do call :run_copy_pass %%P
+call :dashboard_start
+for %%P in (%COPY_PASSES%) do call :count_copy_pass_files %%P
+call :dashboard_copy_begin
+rem The copy passes, with the display's lock file held open on handle 9 for
+rem their whole duration: the display helper ends when it is released
+rem (:dashboard_helper_main). Without the live display the file is only
+rem made, and deleted with the other working files.
+(for %%P in (%COPY_PASSES%) do call :run_copy_pass %%P) 9>"%temp_dashboard_lock%"
+call :dashboard_copy_end
 call :find_skipped_links
 call :copy_custody_files
+call :work_out_copy_status
+call :dashboard_stage_result copy result_copy
 call :restore_destination_attributes
 call :verify_copy
 call :stage_script_copy
-call :report_result
+call :work_out_result
+call :dashboard_finish
+call :write_summary
 call :write_history
 call :write_seal
 call :publish_records
@@ -328,11 +459,13 @@ call :init_plain_run || goto :abort
 call :hash_this_script
 call :check_environment
 call :write_header
+for %%P in (%COPY_PASSES%) do call :count_copy_pass_files %%P
 for %%P in (%COPY_PASSES%) do call :run_copy_pass %%P
 call :find_skipped_links
 call :restore_destination_attributes
 if "%verification_enabled%"=="1" call :verify_plain_copy
-call :report_result
+call :work_out_result
+call :write_summary
 call :cleanup_temp
 call :restore_console_code_page
 pause
@@ -375,6 +508,11 @@ echo.
 echo Records are UTF-8 with CRLF line endings. Files are written unbuffered
 echo   (robocopy /j), so verification reads them back from the drive.
 echo Run as administrator to use backup mode (/b).
+echo A forensic run shows its progress in a live display on the console
+echo   (Windows 10 or later, not the legacy console): each check's status or
+echo   bar, the file in hand, the last warnings and failures. Set
+echo   EVIDENCE_ROBOCOPY_PLAIN=1 for the plain output instead (robocopy's
+echo   lines, a line per hashed file), e.g. when the output is captured.
 echo.
 echo Exit codes:
 echo   %EXIT_CODE_PASS% PASS
@@ -391,6 +529,12 @@ rem   unexpected_listing_lines   listing lines that weren't a path in the
 rem                              directory
 rem   hash_check_incomplete      1 if a listing, certutil or the reference
 rem                              record was unavailable
+rem   path_too_long_<side>_count  listed files of the source / destination
+rem                              not hashed: their path is over
+rem                              MAX_FILE_PATH_LENGTH, or cmd couldn't carry
+rem                              their listing line (:hash_listed_files). Per
+rem                              side: one file over the limit on both sides
+rem                              is refused twice (round 12.8)
 rem   metadata_differ_count      files the metadata check listed
 rem   metadata_check_incomplete  1 if the metadata check itself failed
 rem   metadata_check_ran         defined once the metadata check has run
@@ -411,13 +555,28 @@ rem   run_record_count           run records checked
 rem   run_record_file_match_count  files in them that match their seal
 rem   run_record_problem_count   run record problems (see :check_run_records)
 rem   utc_clock_failed           1 if no UTC_METHODS worked (see :get_utc_now)
+rem   compare_lines_done         compare lines paired so far (the live
+rem                              display's compare bar)
+rem   copy_pass_last             the last pass in COPY_PASSES (never skipped)
+rem   copy_log_incomplete        1 if a line of robocopy's output couldn't be
+rem                              written into the log
+rem                              (:report_dropped_robocopy_lines)
+rem   robocopy_output_lines_written, _total  the lines the last
+rem                              :save_robocopy_unicode_output wrote, of
+rem                              those robocopy's output held
+rem   header_written             defined once the log header is complete
 for %%V in (copy_exit_codes hashed_count_source hashed_count_destination hashed_count_custody unexpected_listing_lines hash_check_incomplete) do set "%%V=0"
 for %%V in (metadata_differ_count metadata_check_incomplete reference_row_count match_count differ_count missing_count) do set "%%V=0"
 for %%V in (unreadable_count invalid_row_count added_file_count reference_seal_failed utc_clock_failed) do set "%%V=0"
 for %%V in (run_record_count run_record_file_match_count run_record_problem_count history_row_count) do set "%%V=0"
+for %%V in (path_too_long_source_count path_too_long_destination_count copy_log_incomplete robocopy_output_lines_written robocopy_output_lines_total) do set "%%V=0"
 set "run_records_checked="
 set "metadata_check_ran="
 set "metadata_time_precision=exact"
+set "compare_lines_done=0"
+set "copy_pass_last="
+for %%P in (%COPY_PASSES%) do set "copy_pass_last=%%P"
+set "header_written="
 set "log_ready="
 set "exit_code=%EXIT_CODE_FAIL%"
 set "result_script_copy=not attempted"
@@ -446,15 +605,14 @@ set "record_kept_in_staging="
 set "run_seal_sha256="
 exit /b 0
 
-:init_console_colour
-rem Colour on the console only where it takes ANSI sequences: Windows 10 or
-rem later (by version number), not the legacy console (HKCU\Console ForceV2
-rem = 0), and not when NO_COLOR is set (the common way to ask for none).
-rem Sets console_colour and the coloured status words :colour_for_console
-rem puts in. The escape character is made here, at run time, so the file
-rem itself stays plain ASCII.
-set "console_colour="
-if defined NO_COLOR exit /b 0
+:init_console_vt
+rem Does the console take VT sequences (colour, the live display)? Windows
+rem 10 or later (by version number) and not the legacy console (HKCU\Console
+rem ForceV2 = 0). Sets console_vt and escape_character; the escape
+rem character is made here, at run time, so the file itself stays plain
+rem ASCII.
+set "console_vt="
+set "escape_character="
 rem Registry values are read as :describe_windows reads them (the line that
 rem names the value, then its data).
 set "windows_major_version=0"
@@ -463,10 +621,20 @@ if %windows_major_version% lss 10 exit /b 0
 set "legacy_console="
 for /f "tokens=2,*" %%A in ('reg query "HKCU\Console" /v ForceV2 2^>nul ^<nul ^| find /i "ForceV2"') do if /i "%%B"=="0x0" set "legacy_console=1"
 if defined legacy_console exit /b 0
-set "escape_character="
 for /f %%E in ('echo prompt $E^| cmd /d 2^>nul') do set "escape_character=%%E"
 if not defined escape_character exit /b 0
-if not "%escape_character:~1%"=="" exit /b 0
+if not "%escape_character:~1%"=="" (set "escape_character=" & exit /b 0)
+set "console_vt=1"
+exit /b 0
+
+:init_console_colour
+rem Colour on the console only where it takes VT sequences (console_vt,
+rem :init_console_vt) and not when NO_COLOR is set (the common way to ask
+rem for none). Sets console_colour and the coloured status words
+rem :colour_for_console puts in.
+set "console_colour="
+if defined NO_COLOR exit /b 0
+if not defined console_vt exit /b 0
 set "colour_end=%escape_character%[0m"
 set "coloured_pass=%escape_character%[%COLOUR_PASS%mPASS%colour_end%"
 set "coloured_fail=%escape_character%[%COLOUR_FAIL%mFAIL%colour_end%"
@@ -584,9 +752,35 @@ exit /b %errorlevel%
 
 :use_log_mode
 rem Keep a log file. /np /tee: no progress figures, output to console and log.
+rem With the live display (dashboard_mode live, :init_dashboard) robocopy's
+rem console output goes to nul: robocopy_console_redirection holds that
+rem redirection, put on every robocopy line as
+rem %robocopy_console_redirection%: the percent form, because a redirection
+rem is parsed after percent expansion and before delayed expansion; empty,
+rem it is nothing. /tee stays, so robocopy writes its log as in a plain run
+rem (without /tee it wrote " Retrying..." where a plain run's log didn't:
+rem round 12.2). A pass marked PASS_<id>_PERCENTAGES=yes then runs without
+rem /np (:run_copy_pass): robocopy's percentage within each of its files is
+rem shown live and left out of the log (:save_robocopy_unicode_output).
 set "log_enabled=1"
 set "robocopy_progress_flags=/np /tee"
+set "robocopy_console_redirection="
 set "header_progress=log file (/np /tee)"
+if not "%dashboard_mode%"=="live" exit /b 0
+set "robocopy_console_redirection=>nul"
+set "header_progress=log file (/np /tee, the console copy discarded); a live display on the console, not in the log"
+call :describe_percentage_passes
+if defined percentage_pass_labels set "header_progress=%header_progress%; %percentage_pass_labels% copied without /np: the percentage within each file shown live, left out of the log"
+exit /b 0
+
+:describe_percentage_passes
+rem The labels of the passes marked PASS_<id>_PERCENTAGES=yes, comma
+rem separated, into percentage_pass_labels (empty if none).
+setlocal EnableDelayedExpansion
+set "labels="
+for %%P in (%COPY_PASSES%) do if /i "!PASS_%%P_PERCENTAGES!"=="yes" set "labels=!labels!, !PASS_%%P_LABEL!"
+if defined labels set "labels=!labels:~2!"
+endlocal & set "percentage_pass_labels=%labels%"
 exit /b 0
 
 :confirm_nonforensic
@@ -609,6 +803,7 @@ exit /b 0
 rem Show ETA and percentage (/eta) and keep no log file: not a custody record.
 set "log_enabled=0"
 set "robocopy_progress_flags=/eta"
+set "robocopy_console_redirection="
 set "header_progress=ETA and percentage, no log file (/eta): not a custody record"
 exit /b 0
 
@@ -1185,6 +1380,8 @@ exit /b 0
 rem Working files in TEMP, all deleted by :cleanup_temp.
 set "temp_file_list=%temp_path_prefix%_list.tmp"
 set "temp_metadata_list=%temp_path_prefix%_metadata.tmp"
+set "temp_listing_numbered=%temp_path_prefix%_listing_numbered.tmp"
+set "temp_listing_line=%temp_path_prefix%_listing_line.tmp"
 set "temp_robocopy_unicode_output=%temp_path_prefix%_robocopy_unicode.tmp"
 set "temp_certutil_output=%temp_path_prefix%_certutil.tmp"
 set "temp_hash_rows_source=%temp_path_prefix%_source.tmp"
@@ -1207,6 +1404,17 @@ set "temp_partial_warned=%temp_path_prefix%_partial_warned.tmp"
 set "temp_predating_records=%temp_path_prefix%_predating_records.tmp"
 set "temp_sealed_history_source=%temp_path_prefix%_sealed_history_source.tmp"
 set "temp_sealed_history_destination=%temp_path_prefix%_sealed_history_destination.tmp"
+set "temp_count=%temp_path_prefix%_count.tmp"
+set "temp_dashboard_pass=%temp_path_prefix%_dashboard_pass.tmp"
+set "temp_dashboard_lock=%temp_path_prefix%_dashboard.lock"
+set "temp_dashboard_helper_done=%temp_path_prefix%_dashboard_helper_done.tmp"
+set "temp_dashboard_lists=%temp_path_prefix%_dashboard_lists.tmp"
+set "temp_dashboard_count=%temp_path_prefix%_dashboard_count.tmp"
+set "temp_dashboard_list_tail=%temp_path_prefix%_dashboard_list_tail.tmp"
+set "temp_dashboard_copy_tail=%temp_path_prefix%_dashboard_copy_tail.tmp"
+set "temp_dashboard_started_lines=%temp_path_prefix%_dashboard_started_lines.tmp"
+set "temp_dashboard_error_lines=%temp_path_prefix%_dashboard_error_lines.tmp"
+set "temp_copy_pass_listing=%temp_path_prefix%_copy_pass_listing.tmp"
 exit /b 0
 
 :hash_this_script
@@ -1844,6 +2052,31 @@ call :log_field "Verify" header_verify
 call :log_field "Writes" header_writes
 if "%run_mode%"=="forensic" (call :write_header_sets) else call :write_header_plain_directories
 set "msg================================================================================" & call :show_and_log msg
+set "header_written=1"
+exit /b 0
+
+:write_abort_header
+rem A forensic run aborted after its log was started but before its header
+rem (:abort): write what is known at that point, to the log only, so the
+rem kept log says what ran, where and when. The console keeps its one
+rem result block.
+set "abort_header_script=%TOOL_NAME% %TOOL_VERSION%"
+set "abort_header_started=%start_utc_iso% (source: %start_utc_source%)"
+call :describe_user abort_header_user
+call :describe_host abort_header_host
+set "msg=Environment (the run was aborted before its header was complete)"
+call :emit_free_text msg log
+call :log_field "Script" abort_header_script log
+call :log_field "Script path" script_path log
+if defined script_sha256 call :log_field "Script SHA-256" script_sha256 log
+call :log_field "Started (UTC)" abort_header_started log
+call :log_field "Host" abort_header_host log
+call :log_field "User" abort_header_user log
+if defined source_path call :log_field "Source" source_path log
+if defined source_set_path call :log_field "Source set" source_set_path log
+if defined destination_path call :log_field "Destination" destination_path log
+if defined destination_set_path call :log_field "Destination set" destination_set_path log
+set "msg=" & call :emit_free_text msg log
 exit /b 0
 
 :write_header_sets
@@ -2138,16 +2371,24 @@ if "!listed_warning!"=="[WARN] !warning_text!" (endlocal & exit /b 0)
 endlocal & exit /b 1
 
 :read_clock_status
-rem Set header_time_source and header_last_sync from "w32tm /query /status",
-rem and warn if the clock isn't synchronised. w32tm prints its lines in a
-rem fixed order (1 leap indicator, ... 7 last successful sync time, 8
-rem source), so lines are picked by position and work in any display
-rem language. "Not synchronised": leap indicator 3, or a local or
-rem free-running clock as the source.
+rem Set header_time_source and header_last_sync from "w32tm /query /status
+rem /verbose", and warn unless the time service synchronised the clock no
+rem longer than CLOCK_SYNC_MAX_AGE_HOURS ago. w32tm prints its lines in a
+rem fixed order (1 leap indicator, ... 6 reference id, 7 last successful
+rem sync time, 8 source; the verbose part ends with the time since the last
+rem good sync, in seconds), so lines are picked by position and work in any
+rem display language. The time service keeps no record of a sync from
+rem before it last started (it starts and stops on demand): until its first
+rem sync it reports leap indicator 3 and reference id 0x00000000, and its
+rem "time since" then counts from some other moment (owner's machine,
+rem 2026-10-19), so the age is only read once it has synchronised. Such a
+rem state is reported as what it is: no record of a sync, so the clock's
+rem accuracy can't be confirmed (round 12.3: "not synchronised" a while
+rem after the owner had synced the clock).
 set "header_time_source=unknown"
 set "header_last_sync=unknown"
 set "clock_unsynced_reason="
-w32tm /query /status >"%temp_clock_status%" 2>&1
+w32tm /query /status /verbose >"%temp_clock_status%" 2>&1
 if errorlevel 1 (
     set "header_time_source=unavailable (time service off, or w32tm needs administrator)"
     set "msg=The clock's synchronisation could not be checked (w32tm failed): times in this record rely on this machine's clock."
@@ -2155,21 +2396,30 @@ if errorlevel 1 (
     exit /b 0
 )
 set "clock_line_number=0"
+set "clock_leap_indicator="
+set "clock_reference_id="
+set "clock_last_sync_text=unknown"
+set "clock_seconds_since_sync="
 for /f "usebackq delims=" %%L in ("%temp_clock_status%") do (
     set "clock_line=%%L"
     call :read_clock_line
 )
+call :work_out_clock_sync_age
+rem Kept from earlier versions as an extra catch (English output only): a
+rem local or free-running clock named as the source.
 if not defined clock_unsynced_reason findstr /i /c:"Local CMOS Clock" /c:"Free-running System Clock" "%temp_clock_status%" >nul 2>&1 && set "clock_unsynced_reason=w32tm reports a local clock as its source"
 if defined clock_unsynced_reason (
-    set "msg=The clock is not synchronised with a time source (%clock_unsynced_reason%): times in this record rely on this machine's own clock."
+    set "msg=The clock's accuracy can't be confirmed (%clock_unsynced_reason%): times in this record rely on this machine's own clock."
     call :add_warning msg
 )
 exit /b 0
 
 :read_clock_line
 rem Caller's scope (:read_clock_status): one line of w32tm output in
-rem clock_line, numbered by clock_line_number. Keeps the value after
-rem "label: ", without trailing spaces.
+rem clock_line, numbered by clock_line_number (FOR /F skips the empty line
+rem in the middle, so the numbers are of the lines with text). Keeps the
+rem value after "label: ", without trailing spaces; the last line's value
+rem is the time since the last good sync.
 set /a "clock_line_number+=1"
 set "clock_line_value=%clock_line:*: =%"
 :read_clock_line_trim
@@ -2177,9 +2427,72 @@ if "%clock_line_value:~-1%"==" " (
     set "clock_line_value=%clock_line_value:~0,-1%"
     goto read_clock_line_trim
 )
-if %clock_line_number% equ 1 if "%clock_line_value:~0,1%"=="3" set "clock_unsynced_reason=w32tm reports leap indicator 3, not synchronised"
-if %clock_line_number% equ 7 set "header_last_sync=%clock_line_value% (local time, as w32tm reports it)"
+if %clock_line_number% equ 1 set "clock_leap_indicator=%clock_line_value:~0,1%"
+if %clock_line_number% equ 6 set "clock_reference_id=%clock_line_value:~0,10%"
+if %clock_line_number% equ 7 set "clock_last_sync_text=%clock_line_value%"
 if %clock_line_number% equ 8 set "header_time_source=%clock_line_value%"
+if %clock_line_number% gtr 9 set "clock_seconds_since_sync=%clock_line_value%"
+exit /b 0
+
+:work_out_clock_sync_age
+rem Caller's scope (:read_clock_status): from the values :read_clock_line
+rem kept, header_last_sync and clock_unsynced_reason (empty when the last
+rem sync is known and recent enough). The time since the last good sync
+rem ("7.8546526s": digits, a decimal part, "s") is read as whole seconds;
+rem a last line of any other form, or more than nine digits, and the age is
+rem not known (never taken as recent).
+if "%clock_reference_id%"=="0x00000000" (
+    set "header_last_sync=none since the time service started (w32tm: %clock_last_sync_text%)"
+    set "clock_unsynced_reason=the time service has no record of a synchronisation since it started"
+    exit /b 0
+)
+rem 0x4C4F434C is "LOCL": the machine's own clock as the reference.
+if "%clock_reference_id%"=="0x4C4F434C" (
+    set "header_last_sync=%clock_last_sync_text% (local time, as w32tm reports it)"
+    set "clock_unsynced_reason=w32tm reports the local clock as its reference"
+    exit /b 0
+)
+if "%clock_leap_indicator%"=="3" (
+    set "header_last_sync=%clock_last_sync_text% (local time, as w32tm reports it)"
+    set "clock_unsynced_reason=w32tm reports leap indicator 3, not synchronised"
+    exit /b 0
+)
+set "clock_sync_age_seconds="
+if defined clock_seconds_since_sync if "%clock_seconds_since_sync:~-1%"=="s" for /f "delims=.,s" %%S in ("%clock_seconds_since_sync%") do set "clock_sync_age_seconds=%%S"
+if defined clock_sync_age_seconds for /f "delims=0123456789" %%X in ("%clock_sync_age_seconds%") do set "clock_sync_age_seconds="
+if defined clock_sync_age_seconds if not "%clock_sync_age_seconds:~9%"=="" set "clock_sync_age_seconds="
+if not defined clock_sync_age_seconds (
+    set "header_last_sync=%clock_last_sync_text% (local time, as w32tm reports it); the time since can't be read"
+    set "clock_unsynced_reason=the time since the last synchronisation can't be read"
+    exit /b 0
+)
+call :describe_duration clock_sync_age_seconds clock_sync_age_text
+set "header_last_sync=%clock_last_sync_text% (local time, as w32tm reports it), %clock_sync_age_text% ago"
+set /a "clock_sync_max_age_seconds=CLOCK_SYNC_MAX_AGE_HOURS * 3600"
+if %clock_sync_age_seconds% gtr %clock_sync_max_age_seconds% set "clock_unsynced_reason=the last synchronisation was %clock_sync_age_text% ago, more than %CLOCK_SYNC_MAX_AGE_HOURS% hours"
+exit /b 0
+
+:describe_duration  secondsVar  outVar
+rem A count of seconds as words for a header or warning: "n s" under a
+rem minute, "n min" under two hours, "n h" under two days, else "n days".
+setlocal EnableDelayedExpansion
+set /a "seconds=!%~1!"
+set "unit=s"
+set /a "amount=seconds"
+if !seconds! geq 60 (
+    set "unit=min"
+    set /a "amount=seconds / 60"
+)
+if !seconds! geq 7200 (
+    set "unit=h"
+    set /a "amount=seconds / 3600"
+)
+if !seconds! geq 172800 (
+    set "unit=days"
+    set /a "amount=seconds / 86400"
+)
+set "text=!amount! !unit!"
+endlocal & set "%~2=%text%"
 exit /b 0
 
 :check_power
@@ -2383,25 +2696,119 @@ endlocal & exit /b 0
 
 rem -- Copy -------------------------------------------------------------------
 
-:run_copy_pass  passId
-rem One robocopy pass as defined by the PASS_<passId>_* row in CONFIG.
+:count_copy_pass_files  passId
+rem Before the copy passes (MAIN), one pass: a list-only robocopy with the
+rem pass's filter and the drive-root exclusions, no job header, so the files
+rem the pass will copy are known: their count (the lines naming the source
+rem directory, one per file) into copy_pass_<pass>_total, or "unknown" when
+rem the listing failed (robocopy exit 8 or more; the pass then runs whatever
+rem it holds). The count lets :run_copy_pass skip a pass with nothing in its
+rem class (a pass over 100,000 small files that copies none of them costs
+rem about a millisecond per file: workshop, 2026-10-18) and gives the live
+rem display its total. With the live display, for a pass whose
+rem PASS_<id>_PROGRESS is bytes, each file's size in MB (its last six digits
+rem dropped: set /a is 32-bit) and path are kept in listing order, which is
+rem the order robocopy /mt:1 copies them in, as copy_pass_<pass>_file_<n>_name,
+rem _name_length and _cumulative_mb, and copy_pass_<pass>_progress says
+rem bytes; a pass of
+rem more than DASHBOARD_BYTES_TABLE_MAX_FILES files is shown by files. The
+rem listing is read with delayed expansion off, so "!" in a path survives.
+rem Caller's scope.
 setlocal EnableDelayedExpansion
-set "label=!PASS_%~1_LABEL!"
-set "threads=!PASS_%~1_THREADS!"
-if /i "!threads!"=="auto" call :auto_thread_count threads
 set "excluded_dirs="
 set "excluded_files="
 call :add_housekeeping_exclusions source
 call :add_housekeeping_exclusions destination
 call :build_exclusion_args
+robocopy "!source_path! " "!temp_path_prefix!_nonexistent" *.* !COPY_COUNT_FLAGS! !PASS_%~1_FILTER! !backup_flag! !exclusion_args! /unilog:"!temp_robocopy_unicode_output!" >nul 2>&1
+set "list_exit_code=!errorlevel!"
+endlocal & set "count_copy_pass_files_exit_code=%list_exit_code%"
+set "copy_pass_%~1_total=unknown"
+set "copy_pass_%~1_progress=files"
+if %count_copy_pass_files_exit_code% geq 8 goto count_copy_pass_files_done
+call :is_robocopy_exit_code_in_range count_copy_pass_files_exit_code || goto count_copy_pass_files_done
+find /c /i "%source_with_backslash%" <"%temp_robocopy_unicode_output%" >"%temp_count%" 2>nul
+for /f "usebackq" %%N in ("%temp_count%") do set "copy_pass_%~1_total=%%N"
+if not "%dashboard_mode%"=="live" goto count_copy_pass_files_done
+call :copy_variable PASS_%~1_PROGRESS count_copy_pass_files_progress
+if /i not "%count_copy_pass_files_progress%"=="bytes" goto count_copy_pass_files_done
+call :copy_variable copy_pass_%~1_total count_copy_pass_files_total
+if "%count_copy_pass_files_total%"=="unknown" goto count_copy_pass_files_done
+if %count_copy_pass_files_total% gtr %DASHBOARD_BYTES_TABLE_MAX_FILES% goto count_copy_pass_files_done
+set "copy_pass_%~1_progress=bytes"
+set "count_copy_pass_files_index=0"
+set "count_copy_pass_files_cumulative_mb=0"
+type "%temp_robocopy_unicode_output%" >"%temp_copy_pass_listing%" 2>nul
+for /f "usebackq tokens=1*" %%S in ("%temp_copy_pass_listing%") do if not "%%T"=="" (
+    set "count_copy_pass_files_size=%%S"
+    set "count_copy_pass_files_path=%%T"
+    call :keep_copy_pass_listed_file %~1
+)
+rem A line cmd couldn't carry (a path over about 8,000 characters: section
+rem 6 of the conventions) leaves the table short: the pass is then shown by
+rem files.
+if not "%count_copy_pass_files_index%"=="%count_copy_pass_files_total%" set "copy_pass_%~1_progress=files"
+:count_copy_pass_files_done
+del "%temp_robocopy_unicode_output%" >nul 2>&1
+del "%temp_copy_pass_listing%" >nul 2>&1
+exit /b 0
+
+:keep_copy_pass_listed_file  passId
+rem Caller's scope (:count_copy_pass_files, delayed expansion off): one
+rem listed file, in count_copy_pass_files_size and _path, as the next entry
+rem of the pass's table.
+set /a "count_copy_pass_files_index+=1"
+set "count_copy_pass_files_mb=%count_copy_pass_files_size:~0,-6%"
+if not defined count_copy_pass_files_mb set "count_copy_pass_files_mb=0"
+set /a "count_copy_pass_files_cumulative_mb+=count_copy_pass_files_mb"
+call :strlen count_copy_pass_files_path count_copy_pass_files_path_length
+for %%N in (%count_copy_pass_files_index%) do set "copy_pass_%~1_file_%%N_name=%count_copy_pass_files_path%"
+for %%N in (%count_copy_pass_files_index%) do set "copy_pass_%~1_file_%%N_name_length=%count_copy_pass_files_path_length%"
+for %%N in (%count_copy_pass_files_index%) do set "copy_pass_%~1_file_%%N_cumulative_mb=%count_copy_pass_files_cumulative_mb%"
+exit /b 0
+
+:run_copy_pass  passId
+rem One robocopy pass as defined by the PASS_<passId>_* row in CONFIG. A pass
+rem whose listing (:count_copy_pass_files) found no file in its class is
+rem skipped, unless it is the last pass: that one always runs, so that
+rem robocopy creates the directories (/e) whatever the passes hold. With the
+rem live display, the pass's state goes to temp_dashboard_pass for the
+rem display helper, and a pass marked PASS_<id>_PERCENTAGES=yes runs without
+rem /np (its percentages are left out of the log).
+setlocal EnableDelayedExpansion
+set "label=!PASS_%~1_LABEL!"
+set "threads=!PASS_%~1_THREADS!"
+if /i "!threads!"=="auto" call :auto_thread_count threads
 set "heading=Copy: !label!, threads: !threads!" & call :write_section_heading heading both
+if "!copy_pass_%~1_total!"=="0" if not "%~1"=="!copy_pass_last!" (
+    set "msg=No files in this pass (none of this size in the source): skipped."
+    call :show_and_log msg
+    endlocal & exit /b 0
+)
+set "excluded_dirs="
+set "excluded_files="
+call :add_housekeeping_exclusions source
+call :add_housekeeping_exclusions destination
+call :build_exclusion_args
+set "pass_progress_flags=!robocopy_progress_flags!"
+set "pass_percentages=no"
+if defined dashboard_active if /i "!PASS_%~1_PERCENTAGES!"=="yes" (
+    set "pass_progress_flags=!robocopy_progress_flags:/np=!"
+    set "pass_percentages=yes"
+)
+rem The pass's state for the display helper. The block form puts cmd's own
+rem message for a failed redirection (the helper reading the file at that
+rem moment) under the 2>nul too: a message would move the block down.
+if defined dashboard_active (> "!temp_dashboard_pass!" echo %~1 running) 2>nul
 set "log_option="
 if "!log_enabled!"=="1" set log_option=/unilog:"!temp_robocopy_unicode_output!"
-robocopy "!source_path! " "!destination_path! " *.* !COPY_FLAGS! !PASS_%~1_FILTER! !PASS_%~1_FLAGS! /mt:!threads! /r:!RETRY_COUNT! /w:!RETRY_WAIT_SECONDS! !robocopy_progress_flags! !backup_flag! !exclusion_args! !log_option!
+robocopy "!source_path! " "!destination_path! " *.* !COPY_FLAGS! !PASS_%~1_FILTER! !PASS_%~1_FLAGS! /mt:!threads! /r:!RETRY_COUNT! /w:!RETRY_WAIT_SECONDS! !pass_progress_flags! !backup_flag! !exclusion_args! !log_option! %robocopy_console_redirection%
 set "pass_exit_code=!errorlevel!"
-if "!log_enabled!"=="1" call :save_robocopy_unicode_output log_staged_path append
+if defined dashboard_active (> "!temp_dashboard_pass!" echo %~1 copied) 2>nul
+if "!log_enabled!"=="1" call :save_robocopy_unicode_output log_staged_path append !pass_percentages! pass_exit_code
+call :report_dropped_robocopy_lines
 call :report_robocopy_exit_code pass_exit_code
-endlocal & set /a "copy_exit_codes|=%pass_exit_code%" & exit /b 0
+endlocal & set /a "copy_exit_codes|=%pass_exit_code%" & set "copy_log_incomplete=%copy_log_incomplete%" & exit /b 0
 
 :copy_custody_files
 rem Forensic run: copy the source set's custody files in a pass of their
@@ -2414,6 +2821,7 @@ rem (a first copy) has none. Same copy flags as the evidence passes,
 rem unbuffered.
 setlocal EnableDelayedExpansion
 set "heading=Copy: custody records (not evidence)" & call :write_section_heading heading both
+set "msg=running: custody records (not evidence)" & call :dashboard_stage copy msg
 if not defined source_set_path (
     set "msg=No custody files to copy: raw evidence (a first copy)."
     call :show_and_log msg
@@ -2428,24 +2836,27 @@ set "custody_found="
 set "source_records_directory=!source_set_with_backslash!!RECORDS_DIR_NAME!"
 call :is_directory source_records_directory && (
     set "custody_found=1"
-    robocopy "!source_set_with_backslash!!RECORDS_DIR_NAME! " "!destination_set_with_backslash!!RECORDS_DIR_NAME! " *.* !COPY_FLAGS! /xf !ignored_arguments! /j /mt:1 /r:!RETRY_COUNT! /w:!RETRY_WAIT_SECONDS! !robocopy_progress_flags! !backup_flag! !log_option!
+    robocopy "!source_set_with_backslash!!RECORDS_DIR_NAME! " "!destination_set_with_backslash!!RECORDS_DIR_NAME! " *.* !COPY_FLAGS! /xf !ignored_arguments! /j /mt:1 /r:!RETRY_COUNT! /w:!RETRY_WAIT_SECONDS! !robocopy_progress_flags! !backup_flag! !log_option! %robocopy_console_redirection%
     set "pass_exit_code=!errorlevel!"
-    if "!log_enabled!"=="1" call :save_robocopy_unicode_output log_staged_path append
+    if "!log_enabled!"=="1" call :save_robocopy_unicode_output log_staged_path append no pass_exit_code
+    call :report_dropped_robocopy_lines
     call :report_robocopy_exit_code pass_exit_code custody
     set /a "custody_exit_codes|=pass_exit_code"
 )
 if exist "!source_set_with_backslash!!SCRIPT_FILE_PREFIX!*!SCRIPT_FILE_EXT!" (
     set "custody_found=1"
-    robocopy "!source_set_path! " "!destination_set_path! " "!SCRIPT_FILE_PREFIX!*!SCRIPT_FILE_EXT!" /xf "!script_file_name!" !COPY_FLAGS! /lev:1 /j /mt:1 /r:!RETRY_COUNT! /w:!RETRY_WAIT_SECONDS! !robocopy_progress_flags! !backup_flag! !log_option!
+    robocopy "!source_set_path! " "!destination_set_path! " "!SCRIPT_FILE_PREFIX!*!SCRIPT_FILE_EXT!" /xf "!script_file_name!" !COPY_FLAGS! /lev:1 /j /mt:1 /r:!RETRY_COUNT! /w:!RETRY_WAIT_SECONDS! !robocopy_progress_flags! !backup_flag! !log_option! %robocopy_console_redirection%
     set "pass_exit_code=!errorlevel!"
-    if "!log_enabled!"=="1" call :save_robocopy_unicode_output log_staged_path append
+    if "!log_enabled!"=="1" call :save_robocopy_unicode_output log_staged_path append no pass_exit_code
+    call :report_dropped_robocopy_lines
     call :report_robocopy_exit_code pass_exit_code custody
     set /a "custody_exit_codes|=pass_exit_code"
 )
 if "!script_copy_route!"=="source" (
-    robocopy "!source_set_path! " "!destination_set_path! " "!script_file_name!" !COPY_FLAGS! /is /it /lev:1 /j /mt:1 /r:!RETRY_COUNT! /w:!RETRY_WAIT_SECONDS! !robocopy_progress_flags! !backup_flag! !log_option!
+    robocopy "!source_set_path! " "!destination_set_path! " "!script_file_name!" !COPY_FLAGS! /is /it /lev:1 /j /mt:1 /r:!RETRY_COUNT! /w:!RETRY_WAIT_SECONDS! !robocopy_progress_flags! !backup_flag! !log_option! %robocopy_console_redirection%
     set "pass_exit_code=!errorlevel!"
-    if "!log_enabled!"=="1" call :save_robocopy_unicode_output log_staged_path append
+    if "!log_enabled!"=="1" call :save_robocopy_unicode_output log_staged_path append no pass_exit_code
+    call :report_dropped_robocopy_lines
     call :report_robocopy_exit_code pass_exit_code custody
     set /a "custody_exit_codes|=pass_exit_code"
 )
@@ -2453,7 +2864,7 @@ if not defined custody_found (
     set "msg=No run records or script copies in the source set."
     call :show_and_log msg
 )
-endlocal & set /a "copy_exit_codes|=%custody_exit_codes%" & exit /b 0
+endlocal & set "copy_log_incomplete=%copy_log_incomplete%" & set /a "copy_exit_codes|=%custody_exit_codes%" & exit /b 0
 
 :ignored_names_as_robocopy_arguments  outVar
 rem IGNORED_CUSTODY_FILES as robocopy /xf arguments: each item quoted.
@@ -2515,12 +2926,15 @@ endlocal & exit /b 0
 rem -- Verification -----------------------------------------------------------
 
 :verify_copy
-rem Forensic run. Check the copy: first the metadata (size and last-modified
-rem time), then the SHA-256 of every evidence file against the reference
-rem record, then the run records against the history and their seals. The
-rem reference record is row 1's source hash record or, if the source has no
-rem history, this run's own record of the source, made now. So the source is
-rem hashed once per set, and every later copy is checked back to it.
+rem Forensic run. Check the copy, in the result block's order (owner,
+rem 2026-10-18): first the metadata (size and last-modified time); then the
+rem run records against the history and their seals, after hashing the
+rem custody files; then the SHA-256 of every evidence file against the
+rem reference record. The reference record is row 1's source hash record or,
+rem if the source has no history, this run's own record of the source, made
+rem now. So the source is hashed once per set, and every later copy is
+rem checked back to it. The run records come before the compare: the compare
+rem relies on the reference record having passed its seal.
 call :check_metadata
 where /q certutil.exe || (
     set "msg=[FAIL] certutil.exe not found: verification could not run."
@@ -2529,20 +2943,11 @@ where /q certutil.exe || (
     set "hash_check_incomplete=1"
     exit /b 1
 )
-if not defined reference_run (
-    set "heading=Hash (SHA-256): hashing the source, which becomes the reference record (none in the source's history)"
-    call :write_section_heading heading both
-    call :hash_directory source || set "hash_check_incomplete=1"
-    call :write_hash_csv source
-)
-set "heading=Hash (SHA-256): hashing the destination"
+set "heading=Run records: hashing the custody files in the destination set (not evidence)"
 call :write_section_heading heading both
-call :hash_directory destination || set "hash_check_incomplete=1"
-call :write_hash_csv destination
-set "heading=Hash (SHA-256): hashing the custody files in the destination set (not evidence)"
-call :write_section_heading heading both
+call :dashboard_stage_bar run_records hashed_count_custody custody_files_count
 call :hash_custody_files
-call :write_hash_csv custody
+call :write_hash_csv custody || set /a "run_record_problem_count+=1"
 rem The reference record: row 1's, read from its copy in the destination;
 rem otherwise this run's own record of the source.
 set "reference_name=%record_file_stem%_hashes_source.csv"
@@ -2551,7 +2956,24 @@ set "reference_seal_result_text=made by this run; sealed at the end of it"
 if defined reference_run set "reference_name=%RECORD_FILE_PREFIX%%reference_run%_hashes_source.csv"
 if defined reference_run set "reference_csv_path=%destination_set_with_backslash%%RECORDS_DIR_NAME%\%reference_run%\%RECORD_FILE_PREFIX%%reference_run%_hashes_source.csv"
 if defined reference_run set "reference_seal_result_text="
+call :dashboard_stage_bar run_records run_record_count history_row_count
 call :check_run_records
+call :work_out_run_records_status
+call :dashboard_stage run_records result_run_records
+if not defined reference_run (
+    set "heading=Hash (SHA-256): hashing the source, which becomes the reference record (none in the source's history)"
+    call :write_section_heading heading both
+    set "dashboard_hash_detail=hashing the source, which becomes the reference record"
+    call :dashboard_stage_bar hash hashed_count_source files_to_hash_count
+    call :hash_directory source || set "hash_check_incomplete=1"
+    call :write_hash_csv source || set "hash_check_incomplete=1"
+)
+set "heading=Hash (SHA-256): hashing the destination"
+call :write_section_heading heading both
+set "dashboard_hash_detail=hashing the destination"
+call :dashboard_stage_bar hash hashed_count_destination files_to_hash_count
+call :hash_directory destination || set "hash_check_incomplete=1"
+call :write_hash_csv destination || set "hash_check_incomplete=1"
 if not exist "%reference_csv_path%" (
     set "msg=[FAIL] The reference record %reference_name% was not found after the copy."
     call :show_and_log msg
@@ -2559,6 +2981,9 @@ if not exist "%reference_csv_path%" (
     set "hash_check_incomplete=1"
     exit /b 1
 )
+set "compare_lines_done=0"
+set "dashboard_hash_detail=comparing the destination with the reference record"
+call :dashboard_stage_bar hash compare_lines_done compare_line_count
 call :compare_with_reference
 exit /b 0
 
@@ -2576,10 +3001,10 @@ where /q certutil.exe || (
 )
 set "heading=Hash (SHA-256): hashing the source" & call :write_section_heading heading console
 call :hash_directory source || set "hash_check_incomplete=1"
-call :write_hash_csv source
+call :write_hash_csv source || set "hash_check_incomplete=1"
 set "heading=Hash (SHA-256): hashing the destination" & call :write_section_heading heading console
 call :hash_directory destination || set "hash_check_incomplete=1"
-call :write_hash_csv destination
+call :write_hash_csv destination || set "hash_check_incomplete=1"
 set "reference_csv_path=%staged_hash_csv_source%"
 call :compare_with_reference
 exit /b 0
@@ -2600,15 +3025,14 @@ for /f "eol=/ delims=" %%F in ('dir /b /a-d "%destination_set_with_backslash%" 2
     set "custody_file_name=%%F"
     call :list_top_level_custody_file
 )
-set "custody_files_count=0"
-for /f "usebackq tokens=*" %%L in ("%temp_custody_list%") do set /a "custody_files_count+=1"
+rem Hashed as the evidence is (:hash_listed_files); a file refused for its
+rem path's length, or a listing not read in full, is a Run records problem.
+set "listing_refusal_label=Not hashed (custody record)"
+call :hash_listed_files temp_custody_list custody custody_files_count || set /a "run_record_problem_count+=1"
+set /a "run_record_problem_count+=listing_refused_count"
 if %custody_files_count% equ 0 (
     set "msg=No custody files in the destination set yet."
     call :show_and_log msg
-)
-for /f "usebackq tokens=*" %%L in ("%temp_custody_list%") do (
-    set "listed_line=%%L"
-    call :hash_listed_file listed_line custody %custody_files_count%
 )
 exit /b 0
 
@@ -2655,59 +3079,156 @@ if not defined fft_flag if "!source_path:~0,2!"=="\\" set "fft_flag=/fft"
 if not defined fft_flag if "!destination_path:~0,2!"=="\\" set "fft_flag=/fft"
 set "heading=Metadata: size and last-modified time, compared !time_precision!"
 call :write_section_heading heading both
+set "msg=running: robocopy list-only, source against destination" & call :dashboard_stage metadata msg
 set "excluded_dirs="
 set "excluded_files="
 call :add_housekeeping_exclusions source
 call :add_housekeeping_exclusions destination
 call :build_exclusion_args
-robocopy "!source_path! " "!destination_path! " *.* !METADATA_FLAGS! !fft_flag! !backup_flag! !exclusion_args! /unilog:"!temp_robocopy_unicode_output!"
+robocopy "!source_path! " "!destination_path! " *.* !METADATA_FLAGS! !fft_flag! !backup_flag! !exclusion_args! /unilog:"!temp_robocopy_unicode_output!" %robocopy_console_redirection%
 set "check_exit_code=!errorlevel!"
 call :save_robocopy_unicode_output temp_metadata_list new
 set "incomplete=0"
-if !check_exit_code! geq 8 (
+set "listing_failed="
+if !check_exit_code! geq 8 set "listing_failed=1"
+call :is_robocopy_exit_code_in_range check_exit_code || set "listing_failed=1"
+if defined listing_failed (
     set "msg=[FAIL] The metadata check could not compare every file (robocopy exit code !check_exit_code!)."
     call :show_and_log msg
     call :remember_problem msg
     set "incomplete=1"
 )
-endlocal & set "metadata_check_incomplete=%incomplete%" & set "metadata_time_precision=%time_precision%" & set "metadata_check_ran=1"
-for /f "usebackq tokens=*" %%L in ("%temp_metadata_list%") do (
-    set "listed_line=%%L"
+if not "!robocopy_output_lines_written!"=="!robocopy_output_lines_total!" (
+    set "msg=[FAIL] The metadata check could not compare every file: only !robocopy_output_lines_written! of the !robocopy_output_lines_total! lines of robocopy's listing could be read (cmd can't carry a line over 8000 characters)."
+    call :show_and_log msg
+    call :remember_problem msg
+    set "incomplete=1"
+)
+rem The Metadata row's text, set above for the live display, is carried out
+rem too: the differences are listed after the endlocal, and the row read
+rem "waiting" while they were (round 12.3). Without the display it is
+rem undefined and stays so.
+endlocal & set "metadata_check_incomplete=%incomplete%" & set "metadata_time_precision=%time_precision%" & set "metadata_check_ran=1" & set "dashboard_metadata_text=%dashboard_metadata_text%"
+rem The files listed, read as :hash_listed_files reads a listing: numbered,
+rem so a line cmd couldn't carry is seen and refused by name, each line
+rem trimmed by a FOR /F of its own, and the lines counted against the files
+rem reported or refused. A refused file counts as a difference: robocopy
+rem listed it.
+set "listing_refusal_label=METADATA differs (size or last-modified time), or not copied"
+call :number_listing temp_metadata_list
+set "metadata_listed_count=0"
+for /f "usebackq tokens=*" %%L in ("%temp_metadata_list%") do set /a "metadata_listed_count+=1"
+set "metadata_differ_before=%metadata_differ_count%"
+set "metadata_unexpected_before=%unexpected_listing_lines%"
+for /f "usebackq tokens=1* delims=:" %%A in ("%temp_listing_numbered%") do (
+    set "listed_line_number=%%A"
+    set "listed_line="
+    for /f "tokens=*" %%L in ("%%B") do set "listed_line=%%L"
     call :report_metadata_difference listed_line
 )
+call :check_listing_tail
+set /a "metadata_differ_count+=listing_refused_count"
+set /a "metadata_listed_accounted=metadata_differ_count - metadata_differ_before + unexpected_listing_lines - metadata_unexpected_before"
+if %metadata_listed_accounted% neq %metadata_listed_count% (
+    call :report_unaccounted_listing_lines metadata_listed_accounted metadata_listed_count "files the metadata check listed"
+    set "metadata_check_incomplete=1"
+)
+rem For the live display: the block's PASS text depends on the file count,
+rem which the hashing gives later, so a PASS shows what is known now.
+call :work_out_metadata_status
+set "msg=%result_metadata%"
+if "%metadata_status%"=="PASS" set "msg=PASS: no size or last-modified time differences listed"
+call :dashboard_stage metadata msg
 exit /b 0
 
 :report_metadata_difference  lineVar
-rem One file listed by the metadata check: it differs from its source.
+rem One file listed by the metadata check: it differs from its source. The
+rem numbered listing's bookkeeping, in the caller's scope (:check_metadata's
+rem loop, as :hash_listed_file's): IN listed_line_number, this line's
+rem number, and listing_last_line_number, the last line's; the lines between
+rem them were skipped by cmd (a path too long to carry) and are refused by
+rem name (:refuse_skipped_listing_lines). An empty line (robocopy's) only
+rem moves the bookkeeping on. A path over MAX_FILE_PATH_LENGTH is refused by
+rem name too (:report_too_long_path) and counted in listing_refused_count.
+rem With the live display, the tick redraws it now and then, so a long list
+rem of differences shows as a growing Failures count (round 12.2: 3,376
+rem lines took about 4 minutes with nothing changing on the screen).
 setlocal EnableDelayedExpansion
+set /a "listing_gap=listed_line_number - listing_last_line_number - 1"
+if !listing_gap! gtr 0 call :refuse_skipped_listing_lines
 set "full_path=!%~1!"
+if not defined full_path goto report_metadata_difference_skipped
+if not "!full_path:~%MAX_FILE_PATH_LENGTH%,1!"=="" (
+    call :report_too_long_path full_path
+    set /a "listing_refused_count+=1"
+    goto report_metadata_difference_skipped
+)
+if defined dashboard_active (
+    set /a "dashboard_tick_count+=1"
+    if !dashboard_tick_count! geq %DASHBOARD_TICK_EVERY_ITEMS% call :dashboard_tick
+)
 call :relative_path full_path source_with_backslash file_relative_path || (
     set "msg=[FAIL] Unexpected line in the metadata check: !full_path!"
     call :show_and_log msg
     call :remember_problem msg
-    endlocal & set /a "unexpected_listing_lines+=1" & exit /b 0
+    endlocal & set /a "unexpected_listing_lines+=1" & set "dashboard_tick_count=%dashboard_tick_count%" & set "dashboard_last_redraw=%dashboard_last_redraw%" & set "listing_last_line_number=%listed_line_number%" & set "listing_refused_count=%listing_refused_count%" & exit /b 0
 )
 set "msg=[FAIL] METADATA differs (size or last-modified time), or not copied: !file_relative_path!"
 call :show_and_log msg
 call :remember_problem msg
-endlocal & set /a "metadata_differ_count+=1" & exit /b 0
+endlocal & set /a "metadata_differ_count+=1" & set "dashboard_tick_count=%dashboard_tick_count%" & set "dashboard_last_redraw=%dashboard_last_redraw%" & set "listing_last_line_number=%listed_line_number%" & set "listing_refused_count=%listing_refused_count%" & exit /b 0
+:report_metadata_difference_skipped
+endlocal & set "listing_last_line_number=%listed_line_number%" & set "listing_refused_count=%listing_refused_count%" & exit /b 0
 
 :hash_directory  side
 rem List every evidence file in the side's directory (with robocopy) and hash
-rem each one into the side's rows. Exit 1 if the listing was incomplete.
+rem each one into the side's rows (:hash_listed_files). Exit 1 if the
+rem listing was incomplete or couldn't be read in full. Files refused for
+rem their path's length count against the Hash check
+rem (path_too_long_<side>_count).
 set "hash_directory_listing_failed="
 call :list_files %~1 temp_file_list || set "hash_directory_listing_failed=1"
-rem Total for the progress counter: the listing read the same way as the
-rem hashing loop below (FOR /F skips robocopy's blank lines, which a line
-rem count would include).
-set "files_to_hash_count=0"
-for /f "usebackq tokens=*" %%L in ("%temp_file_list%") do set /a "files_to_hash_count+=1"
-for /f "usebackq tokens=*" %%L in ("%temp_file_list%") do (
-    set "listed_line=%%L"
-    call :hash_listed_file listed_line %~1 %files_to_hash_count%
-)
+set "listing_refusal_label=Not hashed (%~1)"
+call :hash_listed_files temp_file_list %~1 files_to_hash_count || set "hash_directory_listing_failed=1"
+set /a "path_too_long_%~1_count+=listing_refused_count"
 if defined hash_directory_listing_failed exit /b 1
 exit /b 0
+
+:hash_listed_files  listingVar  side  totalVar
+rem Caller's scope (delayed expansion off). Hash every file a listing names
+rem (one full path per line, as robocopy writes it) into the side's rows
+rem (:hash_listed_file); totalVar gets the count of files listed first (the
+rem progress counter and the live display's total). cmd skips a FOR /F
+rem iteration whose expanded command would pass 8,191 characters without a
+rem word (round 12.7: a file whose path was 8,200 characters long was left
+rem out of both hash records, and the run PASSed), so the listing is read
+rem numbered (:number_listing): a line cmd couldn't carry shows as a gap in
+rem the numbers and is refused by name (:hash_listed_file,
+rem :check_listing_tail), as is a path over MAX_FILE_PATH_LENGTH. Each line
+rem is trimmed of the tabs and spaces robocopy puts before the path by a
+rem FOR /F of its own (tokens=*), the number having taken the first token.
+rem Last, every file listed must have been hashed, reported or refused
+rem (:report_unaccounted_listing_lines); exit 1 if not.
+call :copy_variable %~1 hash_listing_path
+set "%~3=0"
+for /f "usebackq tokens=*" %%L in ("%hash_listing_path%") do set /a "%~3+=1"
+call :number_listing %~1
+call :copy_variable hashed_count_%~2 hash_listing_hashed_before
+set "hash_listing_unexpected_before=%unexpected_listing_lines%"
+for /f "usebackq tokens=1* delims=:" %%A in ("%temp_listing_numbered%") do (
+    set "listed_line_number=%%A"
+    set "listed_line="
+    for /f "tokens=*" %%L in ("%%B") do set "listed_line=%%L"
+    call :hash_listed_file listed_line %~2 %~3
+)
+call :check_listing_tail
+call :copy_variable %~3 hash_listing_total
+set /a "hash_listing_accounted=hashed_count_%~2 - hash_listing_hashed_before + unexpected_listing_lines - hash_listing_unexpected_before + listing_refused_count"
+if %hash_listing_accounted% equ %hash_listing_total% exit /b 0
+set "hash_listing_what=files listed in the %~2"
+if "%~2"=="custody" set "hash_listing_what=custody files listed"
+call :report_unaccounted_listing_lines hash_listing_accounted hash_listing_total "%hash_listing_what%"
+exit /b 1
 
 :list_files  side  outFileVar
 rem Write every file in the side's directory to the out file as a full path,
@@ -2719,41 +3240,71 @@ set "excluded_dirs="
 set "excluded_files="
 call :add_housekeeping_exclusions %~1
 call :build_exclusion_args
-robocopy "!%~1_with_backslash! " "!temp_path_prefix!_nonexistent" *.* !LIST_FLAGS! !backup_flag! !exclusion_args! /unilog:"!temp_robocopy_unicode_output!"
+robocopy "!%~1_with_backslash! " "!temp_path_prefix!_nonexistent" *.* !LIST_FLAGS! !backup_flag! !exclusion_args! /unilog:"!temp_robocopy_unicode_output!" %robocopy_console_redirection%
 set "list_exit_code=!errorlevel!"
 call :save_robocopy_unicode_output %~2 new
-if !list_exit_code! geq 8 (
+set "listing_failed="
+if !list_exit_code! geq 8 set "listing_failed=1"
+call :is_robocopy_exit_code_in_range list_exit_code || set "listing_failed=1"
+if defined listing_failed (
     set "msg=[FAIL] Could not list every file under !%~1_with_backslash! (robocopy exit code !list_exit_code!)."
+    call :show_and_log msg
+    call :remember_problem msg
+    endlocal & exit /b 1
+)
+if not "!robocopy_output_lines_written!"=="!robocopy_output_lines_total!" (
+    set "msg=[FAIL] Could not list every file under !%~1_with_backslash!: only !robocopy_output_lines_written! of the !robocopy_output_lines_total! lines of robocopy's listing could be read (cmd can't carry a line over 8000 characters)."
     call :show_and_log msg
     call :remember_problem msg
     endlocal & exit /b 1
 )
 endlocal & exit /b 0
 
-:hash_listed_file  lineVar  side  total
+:hash_listed_file  lineVar  side  totalVar
 rem Hash one listed file and record it as a "relative path","SHA-256" row for
 rem the side's CSV. side: source, destination, or custody (custody files in
 rem the destination set). For the destination also as a compare line
-rem "relative path*SHA-256*DST" for :compare_with_reference. total is only for
-rem the progress counter.
+rem "relative path*SHA-256*DST" for :compare_with_reference. totalVar names
+rem the count of files listed, for the progress counter. The numbered
+rem listing's bookkeeping, in the caller's scope (:hash_listed_files): IN
+rem listed_line_number, this line's number, and listing_last_line_number,
+rem the last line's; the lines between them were skipped by cmd (a path too
+rem long to carry) and are refused by name (:refuse_skipped_listing_lines).
+rem An empty line (robocopy's) only moves the bookkeeping on. A path over
+rem MAX_FILE_PATH_LENGTH is refused by name too (:report_too_long_path) and
+rem counted in listing_refused_count: no row, no compare line.
 setlocal EnableDelayedExpansion
+set /a "listing_gap=listed_line_number - listing_last_line_number - 1"
+if !listing_gap! gtr 0 call :refuse_skipped_listing_lines
+set "full_path=!%~1!"
+if not defined full_path goto hash_listed_file_skipped
+if not "!full_path:~%MAX_FILE_PATH_LENGTH%,1!"=="" (
+    call :report_too_long_path full_path
+    set /a "listing_refused_count+=1"
+    goto hash_listed_file_skipped
+)
 set "base_var=%~2_with_backslash"
 if "%~2"=="custody" set "base_var=destination_set_with_backslash"
 set "item_label=%~2"
 if "%~2"=="custody" set "item_label=custody record"
-set "full_path=!%~1!"
 call :relative_path full_path !base_var! file_relative_path || (
     set "msg=[FAIL] Unexpected line while listing the %~2: !full_path!"
     call :show_and_log msg
     call :remember_problem msg
-    endlocal & set /a "unexpected_listing_lines+=1" & exit /b 0
+    endlocal & set /a "unexpected_listing_lines+=1" & set "listing_last_line_number=%listed_line_number%" & set "listing_refused_count=%listing_refused_count%" & exit /b 0
 )
 set /a "sequence_number=hashed_count_%~2 + 1"
-rem The progress line, once per file, is written directly when it fits:
-rem going through :show costs about 6 ms per file (test round 11). A longer
-rem one goes through :show to be wrapped.
-set "msg=[!sequence_number!/%~3] Hashing !item_label!: !file_relative_path!"
-if "!msg:~%OUTPUT_WIDTH%!"=="" (
+rem The progress line, once per file: with the live display it is the Hash
+rem detail line, shown at the next redraw (the two lines of the tick are
+rem all the loop carries per file: cmd parses a function's lines on every
+rem call); otherwise it is written directly when it fits (going through
+rem :show costs about 6 ms per file: test round 11), and a longer one goes
+rem through :show to be wrapped.
+set "msg=[!sequence_number!/!%~3!] Hashing !item_label!: !file_relative_path!"
+if defined dashboard_active (
+    set /a "dashboard_tick_count+=1"
+    if !dashboard_tick_count! geq %DASHBOARD_TICK_EVERY_ITEMS% call :dashboard_tick msg
+) else if "!msg:~%OUTPUT_WIDTH%!"=="" (
     echo(!msg!
 ) else (
     call :show msg
@@ -2763,17 +3314,35 @@ call :get_sha256 full_path file_sha256
 if not defined file_sha256 set "file_sha256=UNREADABLE"
 >>"!temp_hash_rows_%~2!" echo("!file_relative_path!","!file_sha256!"
 if "%~2"=="destination" >>"!temp_compare_lines!" echo(!file_relative_path!*!file_sha256!*DST
-endlocal & set /a "hashed_count_%~2+=1" & exit /b 0
+endlocal & set /a "hashed_count_%~2+=1" & set "dashboard_tick_count=%dashboard_tick_count%" & set "dashboard_last_redraw=%dashboard_last_redraw%" & set "listing_last_line_number=%listed_line_number%" & set "listing_refused_count=%listing_refused_count%" & exit /b 0
+:hash_listed_file_skipped
+endlocal & set "listing_last_line_number=%listed_line_number%" & set "listing_refused_count=%listing_refused_count%" & exit /b 0
 
 :write_hash_csv  side
 rem Write the side's CSV (in the staging directory; side: source, destination or
 rem custody): header plus rows sorted by
 rem relative path, so it doesn't depend on the order in which a file system
-rem lists files.
+rem lists files. The rows are counted before and after the sort: sort
+rem writes nothing at all when a record passes its limit (4,096 characters
+rem by default; round 12.6: both hash records empty, the run failing
+rem "Nothing was verified"), and a record short of its rows must fail by
+rem name (exit 1).
 setlocal EnableDelayedExpansion
 >"!staged_hash_csv_%~1!" echo "File","SHA-256"
-if exist "!temp_hash_rows_%~1!" sort "!temp_hash_rows_%~1!" >>"!staged_hash_csv_%~1!"
-endlocal & exit /b 0
+set "rows_to_sort=0"
+set "rows_sorted=0"
+if exist "!temp_hash_rows_%~1!" (
+    sort "!temp_hash_rows_%~1!" >>"!staged_hash_csv_%~1!"
+    find /c /v "" <"!temp_hash_rows_%~1!" >"!temp_count!" 2>nul
+    for /f "usebackq" %%N in ("!temp_count!") do set "rows_to_sort=%%N"
+    find /c /v "" <"!staged_hash_csv_%~1!" >"!temp_count!" 2>nul
+    for /f "usebackq" %%N in ("!temp_count!") do set /a "rows_sorted=%%N - 1"
+)
+if !rows_sorted! equ !rows_to_sort! (endlocal & exit /b 0)
+set "msg=[FAIL] The %~1 hash record holds !rows_sorted! of its !rows_to_sort! rows: sorting them failed, so the record can't be relied on."
+call :show_and_log msg
+call :remember_problem msg
+endlocal & exit /b 1
 
 :get_sha256  pathVar  outVar
 rem Set outVar to the file's SHA-256 (64 hex characters). Clear it if certutil
@@ -2785,10 +3354,14 @@ rem certutil runs here, not inside a FOR /F command: FOR /F runs its
 rem command in a child cmd, which would expand %NAME% in a file name (e.g.
 rem "x %OS% y.txt" -> "x Windows_NT y.txt") and hash another file (test
 rem runner round 6). Its output goes to temp_certutil_output and is read
-rem from there.
+rem from there. A file certutil couldn't read is tried once more after
+rem HASH_RETRY_WAIT_SECONDS, and both attempts are noted in the log: one
+rem failed read in about 180,000 was seen (workshop, 2026-10-18), and a
+rem first copy records UNREADABLE in the set's reference record for good.
 setlocal EnableDelayedExpansion
 set "file_path=!%~1!"
 set "sha256="
+set "attempts_left=1"
 del "!temp_certutil_output!" >nul 2>&1
 rem certutil gets the extended-length form (\\?\, \\?\UNC\ for shares): Windows
 rem then takes the name as it is, instead of normalising it (a trailing dot or
@@ -2802,6 +3375,7 @@ set "path_after_start=!file_path:~2!"
 if not "!path_after_start!"=="!path_after_start:\\=!" set "hash_path=!file_path!"
 if not "!file_path!"=="!file_path:\.\=!" set "hash_path=!file_path!"
 if not "!file_path!"=="!file_path:\..\=!" set "hash_path=!file_path!"
+:get_sha256_attempt
 certutil -hashfile "!hash_path!" SHA256 >"!temp_certutil_output!" 2>nul
 if exist "!temp_certutil_output!" for /f "usebackq skip=1 delims=" %%H in ("!temp_certutil_output!") do if not defined sha256 set "sha256=%%H"
 del "!temp_certutil_output!" >nul 2>&1
@@ -2809,12 +3383,46 @@ if defined sha256 set "sha256=!sha256: =!"
 if defined sha256 if not "!sha256:~64!"=="" set "sha256="
 if defined sha256 if "!sha256:~63,1!"=="" set "sha256="
 if defined sha256 for /f "delims=0123456789abcdefABCDEF" %%X in ("!sha256!") do set "sha256="
-if not defined sha256 if "!file_path:?=!"=="!file_path!" (
-    set "size="
-    for %%A in ("!file_path!") do set "size=%%~zA"
-    if "!size!"=="0" set "sha256=!EMPTY_SHA256!"
+if defined sha256 goto get_sha256_done
+set "size=unknown"
+if "!file_path:?=!"=="!file_path!" for %%A in ("!file_path!") do set "size=%%~zA"
+if "!size!"=="0" set "sha256=!EMPTY_SHA256!"
+if defined sha256 goto get_sha256_done
+if !attempts_left! equ 0 (
+    set "msg=[INFO] certutil could not read !file_path! at the second attempt either: recorded as UNREADABLE."
+    call :show_and_log msg
+    goto get_sha256_done
 )
+set /a "attempts_left-=1, retry_wait_pings=HASH_RETRY_WAIT_SECONDS + 1"
+set "msg=[INFO] certutil could not read !file_path! at the first attempt; trying again in !HASH_RETRY_WAIT_SECONDS! s."
+call :show_and_log msg
+ping -n !retry_wait_pings! 127.0.0.1 >nul
+goto get_sha256_attempt
+:get_sha256_done
 endlocal & set "%~2=%sha256%"
+exit /b 0
+
+rem :relative_path sits here, just below the per-file loop that calls it for
+rem every file (:hash_listed_file), and :strlen below the compare loop
+rem (:pair_compare_line calls it for every line; :relative_path then scans
+rem a little further): cmd finds a label by scanning forward from the
+rem caller and wrapping at the end of the file, about 5 ms for 2,000 lines
+rem (workshop, 2026-10-18; round 12.2: :strlen here, above the compare,
+rem cost the compare 20 ms per file). Pure moves; the code is unchanged.
+
+:relative_path  fullVar  baseVar  outVar
+rem Set outVar to fullVar without the baseVar prefix; exit 1 if fullVar does
+rem not start with it. Caller's scope; the caller must have delayed expansion
+rem on.
+call :strlen %~2 relative_path_base_length
+set "relative_path_prefix="
+set "%~3="
+for %%N in (!relative_path_base_length!) do (
+    set "relative_path_prefix=!%~1:~0,%%N!"
+    set "%~3=!%~1:~%%N!"
+)
+if /i not "!relative_path_prefix!"=="!%~2!" exit /b 1
+if not defined %~3 exit /b 1
 exit /b 0
 
 :compare_with_reference
@@ -2836,8 +3444,13 @@ for /f "usebackq skip=1 delims=" %%L in ("%reference_csv_path%") do (
 )
 if not exist "%temp_compare_lines%" type nul >"%temp_compare_lines%"
 sort /L C /O "%temp_compare_lines_sorted%" "%temp_compare_lines%"
+rem sort writes nothing for a record over its limit (:write_hash_csv): the
+rem sorted lines are counted against the unsorted ones.
+set "compare_lines_to_sort=0"
+for /f %%N in ('find /c /v "" ^< "%temp_compare_lines%"') do set "compare_lines_to_sort=%%N"
 set "compare_line_count=0"
 for /f %%N in ('find /c /v "" ^< "%temp_compare_lines_sorted%"') do set "compare_line_count=%%N"
+if %compare_line_count% neq %compare_lines_to_sort% call :report_compare_lines_lost compare_line_count compare_lines_to_sort
 set "msg=Pairing %compare_line_count% entries (%compare_reference_label% and destination) ..."
 call :show msg
 set "previous_path="
@@ -2845,6 +3458,7 @@ set "previous_hash="
 set "previous_tag="
 for /f "usebackq eol=* delims=" %%L in ("%temp_compare_lines_sorted%") do (
     set "compare_line=%%L"
+    set /a "compare_lines_done+=1"
     call :pair_compare_line compare_line
 )
 call :settle_last_compare_line
@@ -2882,6 +3496,10 @@ rem Whatever was settled adds 1 to its counter (outcome_counter, a name from
 rem :init_state).
 setlocal EnableDelayedExpansion
 set "line=!%~1!"
+if defined dashboard_active (
+    set /a "dashboard_tick_count+=1"
+    if !dashboard_tick_count! geq %DASHBOARD_TICK_EVERY_ITEMS% call :dashboard_tick
+)
 set "tag=!line:~-3!"
 set "path_and_hash=!line:~0,-4!"
 rem The hash is everything after the first "*" (paths can't contain "*").
@@ -2915,7 +3533,7 @@ if defined previous_path if "!previous_path!"=="!file_path!" (
     set "keep_hash="
     set "keep_tag="
 ) else if defined previous_path call :settle_unpaired_line previous_path previous_tag
-endlocal & set "previous_path=%keep_path%" & set "previous_hash=%keep_hash%" & set "previous_tag=%keep_tag%" & set "outcome_counter=%outcome_counter%"
+endlocal & set "previous_path=%keep_path%" & set "previous_hash=%keep_hash%" & set "previous_tag=%keep_tag%" & set "outcome_counter=%outcome_counter%" & set "dashboard_tick_count=%dashboard_tick_count%" & set "dashboard_last_redraw=%dashboard_last_redraw%"
 if defined outcome_counter set /a "%outcome_counter%+=1"
 exit /b 0
 
@@ -2950,6 +3568,18 @@ if "!run_mode!"=="nonforensic" set "msg=[WARN] Not in the source (already in the
 call :show_and_log msg
 call :remember_problem msg
 set "outcome_counter=added_file_count"
+exit /b 0
+
+:strlen  textVar  outVar
+rem Length of a variable's value.
+setlocal EnableDelayedExpansion
+set "text=!%~1!#"
+set "length=0"
+for %%P in (4096 2048 1024 512 256 128 64 32 16 8 4 2 1) do if not "!text:~%%P,1!"=="" (
+    set /a "length+=%%P"
+    set "text=!text:~%%P!"
+)
+endlocal & set "%~2=%length%"
 exit /b 0
 
 :is_sha256  hashVar
@@ -2992,6 +3622,132 @@ if defined history_base_missing (
 set "run_records_history=%history_base_path%"
 if defined history_base_missing set "run_records_history="
 call :check_history_against_records fail run_records_history run_records_root
+exit /b 0
+
+rem -- Listings read line by line ---------------------------------------------
+rem cmd skips a FOR /F iteration whose expanded command would pass 8,191
+rem characters without a word (round 12.7: a file whose full path was 8,200
+rem characters long was left out of both hash records, and the run PASSed).
+rem So every listing of paths (the evidence and custody files to hash, the
+rem metadata check's differences) is read numbered: findstr /n, with the
+rem file named, reads a line of any length, and a line cmd couldn't carry
+rem shows as a gap in the numbers. The loop reading it keeps
+rem listing_last_line_number (the last line handled) and
+rem listing_refused_count (the lines refused by name) in the caller's
+rem scope; its per-line helper refuses the gap before it, and a path over
+rem MAX_FILE_PATH_LENGTH; :check_listing_tail refuses lines after the last
+rem one handled. :hash_listed_files is the model.
+
+:number_listing  listingVar
+rem Caller's scope, delayed expansion off. Number the listing's lines into
+rem temp_listing_numbered ("n:line") and count them into listing_line_count
+rem (every line, empty ones too), and start the loop's bookkeeping.
+call :copy_variable %~1 number_listing_path
+type nul >"%temp_listing_numbered%"
+if exist "%number_listing_path%" findstr /n "^" "%number_listing_path%" >"%temp_listing_numbered%" 2>nul
+set "listing_line_count=0"
+find /c /v "" <"%temp_listing_numbered%" >"%temp_count%" 2>nul
+for /f "usebackq" %%N in ("%temp_count%") do set "listing_line_count=%%N"
+set "listing_last_line_number=0"
+set "listing_refused_count=0"
+exit /b 0
+
+:refuse_skipped_listing_lines
+rem Caller's scope, delayed expansion on (:hash_listed_file,
+rem :report_metadata_difference): the listing_gap lines between the last
+rem line handled (listing_last_line_number) and this one
+rem (listed_line_number) were skipped by cmd, each a path too long to
+rem carry: refuse them by name and count them.
+set /a "listing_gap_first=listing_last_line_number + 1, listing_gap_last=listed_line_number - 1"
+call :report_unreadable_listing_lines listing_gap_first listing_gap_last
+set /a "listing_refused_count+=listing_gap"
+exit /b 0
+
+:check_listing_tail
+rem Caller's scope, after a loop over the numbered listing: the lines after
+rem the last one handled were skipped by cmd, each a path too long to
+rem carry: refuse them by name and count them.
+if %listing_last_line_number% geq %listing_line_count% exit /b 0
+set /a "listing_tail_first=listing_last_line_number + 1, listing_tail_count=listing_line_count - listing_last_line_number"
+call :report_unreadable_listing_lines listing_tail_first listing_line_count
+set /a "listing_refused_count+=listing_tail_count"
+exit /b 0
+
+:report_unreadable_listing_lines  firstVar  lastVar
+rem Lines firstVar to lastVar of the numbered listing couldn't be carried by
+rem cmd (over 8,000 characters each): one failure per line, under the
+rem caller's listing_refusal_label, naming the path by its first
+rem PATH_EXCERPT_LENGTH characters (:read_listing_line_start).
+setlocal EnableDelayedExpansion
+for /l %%N in (!%~1!,1,!%~2!) do (
+    call :read_listing_line_start %%N listing_line_start
+    set "msg=[FAIL] !listing_refusal_label!: path too long, over 8000 characters (the limit is !MAX_FILE_PATH_LENGTH!; the first !PATH_EXCERPT_LENGTH! shown): !listing_line_start:~0,%PATH_EXCERPT_LENGTH%!..."
+    call :show_and_log msg
+    call :remember_problem msg
+)
+endlocal & exit /b 0
+
+:read_listing_line_start  lineNumber  outVar
+rem The start of line lineNumber of the numbered listing (as much as SET /P
+rem reads, about 1,000 characters), without its number and robocopy's
+rem leading tabs and spaces, into outVar; empty if it can't be read. The
+rem line is picked out by its number with findstr (the file named: any
+rem length) into a file of its own and read from there, so the line itself
+rem never goes on a command line, which is what it is too long for.
+rem Delayed expansion off throughout, so a "!" in the path survives the
+rem FOR values and the hand-back.
+setlocal DisableDelayedExpansion
+set "line_start="
+findstr /b /l /c:"%~1:" "%temp_listing_numbered%" >"%temp_listing_line%" 2>nul
+set /p "line_start=" <"%temp_listing_line%"
+if defined line_start for /f "tokens=1* delims=:" %%A in ("%line_start%") do set "line_start=%%B"
+if defined line_start for /f "tokens=*" %%T in ("%line_start%") do set "line_start=%%T"
+endlocal & set "%~2=%line_start%"
+exit /b 0
+
+:report_too_long_path  pathVar
+rem One failure for a listed file whose path is over MAX_FILE_PATH_LENGTH,
+rem under the caller's listing_refusal_label, with the path's length and
+rem its first PATH_EXCERPT_LENGTH characters.
+setlocal EnableDelayedExpansion
+set "too_long_path=!%~1!"
+call :strlen too_long_path too_long_path_length
+set "msg=[FAIL] !listing_refusal_label!: path too long, !too_long_path_length! characters (the limit is !MAX_FILE_PATH_LENGTH!; the first !PATH_EXCERPT_LENGTH! shown): !too_long_path:~0,%PATH_EXCERPT_LENGTH%!..."
+call :show_and_log msg
+call :remember_problem msg
+endlocal & exit /b 0
+
+:report_unaccounted_listing_lines  accountedVar  totalVar  whatText
+rem Not every file a listing holds was handled by the loop that read it
+rem (hashed or reported, or refused by name): the listing can't be relied
+rem on. whatText names the files ("files listed in the source").
+setlocal EnableDelayedExpansion
+set "msg=[FAIL] Only !%~1! of the !%~2! %~3 were accounted for (handled, or refused by name): the listing could not be read in full."
+call :show_and_log msg
+call :remember_problem msg
+endlocal & exit /b 0
+
+:report_compare_lines_lost  sortedVar  totalVar
+rem The compare lines came short out of sorting (:compare_with_reference):
+rem the Hash check is incomplete.
+setlocal EnableDelayedExpansion
+set "msg=[FAIL] Only !%~1! of the !%~2! compare lines came through sorting: the comparison can't be relied on."
+call :show_and_log msg
+call :remember_problem msg
+endlocal & set "hash_check_incomplete=1"
+exit /b 0
+
+:report_dropped_robocopy_lines
+rem After :save_robocopy_unicode_output wrote robocopy's output into the
+rem log: lines it couldn't carry (over 8,000 characters: cmd skips them
+rem without a word) are missing from the log, which fails the Copy check
+rem (copy_log_incomplete, carried out of the pass's scope by the caller).
+if "%robocopy_output_lines_written%"=="%robocopy_output_lines_total%" exit /b 0
+setlocal EnableDelayedExpansion
+set "msg=[FAIL] Only !robocopy_output_lines_written! of the !robocopy_output_lines_total! lines of robocopy's output could be written into this log (cmd can't carry a line over 8000 characters): the output above is incomplete."
+call :show_and_log msg
+call :remember_problem msg
+endlocal & set "copy_log_incomplete=1"
 exit /b 0
 
 :check_history_against_records  mode  historyVar  recordsRootVar
@@ -3272,6 +4028,7 @@ if "!history_check_mode!"=="fail" (
     call :show_and_log msg
     set "msg=  Seal SHA-256: !seal_sha256!"
     call :show_and_log msg
+    call :dashboard_tick
 )
 :check_run_record_done
 if not "!history_check_mode!"=="fail" (endlocal & exit /b 0)
@@ -3284,7 +4041,7 @@ if "!run!"=="!reference_run!" (
     set "reference_hash_text=seal SHA-256: !seal_sha256!"
     if !problems! gtr 0 set "reference_failed=1"
 )
-endlocal & set /a "run_record_count+=1, run_record_file_match_count+=%matches%, run_record_problem_count+=%problems%, reference_seal_failed|=%reference_failed%" & if not "%reference_text%"=="" set "reference_seal_result_text=%reference_text%" & set "reference_seal_sha256_text=%reference_hash_text%"
+endlocal & set /a "run_record_count+=1, run_record_file_match_count+=%matches%, run_record_problem_count+=%problems%, reference_seal_failed|=%reference_failed%" & set "dashboard_last_redraw=%dashboard_last_redraw%" & if not "%reference_text%"=="" set "reference_seal_result_text=%reference_text%" & set "reference_seal_sha256_text=%reference_hash_text%"
 exit /b 0
 
 :check_run_record_files  runVar  runDirVar  sealPathVar
@@ -3298,11 +4055,30 @@ rem caller's problems count.
 setlocal DisableDelayedExpansion
 call :copy_variable %~2 record_files_dir
 set "problems=0"
+rem The directory's files are counted first: cmd skips a FOR /F iteration
+rem whose expanded command would pass 8,191 characters without a word, so a
+rem file with such a path would go unchecked (round 12.7's class of defect).
+set "files_in_directory=0"
+dir /b /s /a-d "%record_files_dir%\" 2>nul | find /c /v "" >"%temp_count%"
+for /f "usebackq" %%N in ("%temp_count%") do set "files_in_directory=%%N"
+set "files_checked=0"
 for /f "eol=/ delims=" %%F in ('dir /b /s /a-d "%record_files_dir%\" 2^>nul') do (
+    set /a "files_checked+=1"
     set "directory_file_path=%%F"
     call :check_file_listed_in_seal %~1 %~2 %~3 directory_file_path
 )
+if not "%files_checked%"=="%files_in_directory%" call :report_run_record_files_unread %~1 files_checked files_in_directory
 endlocal & set /a "problems+=%problems%"
+exit /b 0
+
+:report_run_record_files_unread  runVar  checkedVar  totalVar
+rem Caller's scope (:check_run_record_files): not every file in the run
+rem record's directory was read from its listing, so not every one was
+rem checked against the seal. A finding, counted with the problems.
+setlocal EnableDelayedExpansion
+set "finding=Run record !%~1!: only !%~2! of the !%~3! files in its directory could be read from the listing (cmd can't carry a path over 8000 characters), so not every file was checked against its seal."
+call :history_finding finding
+endlocal & set /a "problems+=1"
 exit /b 0
 
 :check_seal_lines  runVar  runDirVar  sealPathVar
@@ -3414,17 +4190,13 @@ endlocal & exit /b 0
 
 rem -- Result -----------------------------------------------------------------
 
-:report_result
-rem Work out the overall result from each check, write the summary and set
-rem exit_code. The summary states what the result covers, so it can't be
+:work_out_result
+rem Work out the overall result from each check and set exit_code; the
+rem summary (:write_summary) states what the result covers, so it can't be
 rem misread later.
 call :get_utc_now
 set "end_utc_iso=%utc_iso%"
-set /a "copy_failed_bits=copy_exit_codes & ROBOCOPY_FAIL_MASK"
-set "copy_status=PASS"
-if %copy_failed_bits% neq 0 set "copy_status=FAIL"
-set "result_copy=%copy_status%: robocopy exit codes combined: %copy_exit_codes%"
-if "%copy_status%"=="FAIL" set "result_copy=%result_copy% (see Copy above, and Failures)"
+call :work_out_copy_status
 set "metadata_status=NOT RUN"
 set "hash_status=NOT RUN"
 set "run_records_status=NOT RUN"
@@ -3454,14 +4226,34 @@ if "%verdict%"=="FAIL" set "exit_code=%EXIT_CODE_FAIL%"
 if "%verdict%"=="UNVERIFIED" set "exit_code=%EXIT_CODE_UNVERIFIED%"
 set "result_overall=%verdict% (exit code %exit_code%)"
 set "result_history=run %this_run_number% (%history_row_count% earlier run(s) in the history)"
+exit /b 0
+
+:work_out_copy_status
+rem copy_status (PASS or FAIL) and the Copy row's text from the robocopy
+rem exit codes of every pass; also called when the copy finishes, for the
+rem live display.
+set /a "copy_failed_bits=copy_exit_codes & ROBOCOPY_FAIL_MASK"
+set "copy_status=PASS"
+if %copy_failed_bits% neq 0 set "copy_status=FAIL"
+rem The codes are combined by OR, so one pass's abnormal code (negative, or
+rem above robocopy's range) stays out of range in the combination.
+call :is_robocopy_exit_code_in_range copy_exit_codes || set "copy_status=FAIL"
+if %copy_log_incomplete% neq 0 set "copy_status=FAIL"
+set "result_copy=%copy_status%: robocopy exit codes combined: %copy_exit_codes%"
+if %copy_log_incomplete% neq 0 set "result_copy=%result_copy%, but its output in the log is incomplete"
+if "%copy_status%"=="FAIL" set "result_copy=%result_copy% (see Copy above, and Failures)"
+exit /b 0
+
+:write_summary
 rem The summary (shared rule: scannable output): its fields, the warnings,
 rem the failures, the sentence saying what the result covers, and last the
 rem result block. The checks in the block are in the order they ran (owner,
-rem 2026-10-16: the Script check before the copy; the copy; then metadata,
-rem the run records, and last the SHA-256 compare, which relies on the
-rem reference record having passed its seal). In a forensic run the block
-rem goes into the log here, sealed with it; the console gets it last, after
-rem the record's write-back (:write_result_block console in MAIN).
+rem 2026-10-16 and 2026-10-18: the Script check before the copy; the copy;
+rem then metadata, the run records, and last the SHA-256 hashing and
+rem compare, which relies on the reference record having passed its seal).
+rem In a forensic run the block goes into the log here, sealed with it; the
+rem console gets it last, after the record's write-back (:write_result_block
+rem console in MAIN).
 set "heading=Summary" & call :write_section_heading heading both
 call :log_field "Finished (UTC)" end_utc_iso
 if "%run_mode%"=="forensic" call :log_result_records
@@ -3528,7 +4320,8 @@ rem 2026-10-16).
 set /a "accounted_row_count=match_count + differ_count + missing_count + invalid_row_count + unreadable_count"
 set "unaccounted_rows=0"
 if %hash_check_incomplete% equ 0 if %accounted_row_count% neq %reference_row_count% call :report_unaccounted_rows
-set /a "hash_problem_count=differ_count + missing_count + invalid_row_count + unreadable_count + unexpected_listing_lines + hash_check_incomplete + reference_seal_failed + unaccounted_rows"
+call :describe_paths_too_long
+set /a "hash_problem_count=differ_count + missing_count + invalid_row_count + unreadable_count + unexpected_listing_lines + hash_check_incomplete + reference_seal_failed + unaccounted_rows + path_too_long_count"
 if "%run_mode%"=="forensic" set /a "hash_problem_count+=added_file_count"
 set "hash_status=PASS"
 if %hash_problem_count% neq 0 set "hash_status=FAIL"
@@ -3546,9 +4339,16 @@ if "%run_mode%"=="forensic" call :add_hash_detail "%invalid_row_count% invalid i
 if "%run_mode%"=="forensic" call :add_hash_detail "added since: %added_file_count% file(s)"
 if %hash_check_incomplete% neq 0 call :add_hash_detail "INCOMPLETE (see Failures)"
 if %unexpected_listing_lines% neq 0 call :add_hash_detail "%unexpected_listing_lines% unexpected listing line(s)"
+if %path_too_long_count% neq 0 call :add_hash_detail "paths too long: %path_too_long_text%"
 rem Files added since the reference fail a forensic run even when every file
 rem in the record matches: say so first.
 if "%run_mode%"=="forensic" if %added_file_count% gtr 0 set "result_hash=%hash_status%: %added_file_count% file(s) in the destination aren't in the reference record (added since); %match_count% of %reference_row_count% %reference_label% match the destination"
+rem A file not hashed for its path's length fails the run whatever the rest
+rem matched: say so first (MAX_FILE_PATH_LENGTH; the file is named in the
+rem Hash section and Failures). The refusals are given per side, never as
+rem a count of files: one file over the limit on both sides of a first copy
+rem is refused twice (round 12.8).
+if %path_too_long_count% gtr 0 set "result_hash=%hash_status%: not hashed, path too long: %path_too_long_text%; %match_count% of %reference_row_count% %reference_label% match the destination"
 rem A reference whose run record fails its checks can't be relied on, even
 rem if every file matches it: say so first, so the status can't be misread.
 if %reference_seal_failed% neq 0 set "result_hash=%hash_status%: the reference record's run record failed its checks, so the reference can't be relied on; %match_count% of %reference_row_count% %reference_label% match it"
@@ -3564,6 +4364,15 @@ if %reference_seal_failed% neq 0 set "hash_pointer=see Run records above, and Fa
 if %reference_seal_failed% neq 0 if %comparison_problem_count% neq 0 set "hash_pointer=see Run records and Hash (SHA-256) above, and Failures"
 if "%hash_status%"=="FAIL" set "result_hash=%result_hash% (%hash_pointer%)"
 if %hash_check_incomplete% equ 0 if %reference_row_count% equ 0 call :report_nothing_to_verify
+call :work_out_metadata_status
+if not "%run_mode%"=="forensic" exit /b 0
+call :work_out_run_records_status
+exit /b 0
+
+:work_out_metadata_status
+rem metadata_status (PASS or FAIL) and the Metadata row's text from the
+rem metadata check's counters; also called when that check finishes, for
+rem the live display.
 set "metadata_status=FAIL"
 set "result_metadata=NOT RUN"
 if defined metadata_check_ran set "metadata_status=PASS"
@@ -3573,15 +4382,32 @@ if %metadata_differ_count% neq 0 set "metadata_status=FAIL"
 if %metadata_differ_count% neq 0 set "result_metadata=FAIL: %metadata_differ_count% file(s) differ in size or last-modified time, or were not copied (see Metadata above, and Failures)"
 if %metadata_check_incomplete% neq 0 set "metadata_status=FAIL"
 if %metadata_check_incomplete% neq 0 set "result_metadata=FAIL: the comparison was incomplete (see Metadata above, and Failures)"
-if not "%run_mode%"=="forensic" exit /b 0
-rem Run records: NONE if the set has no earlier runs (a first copy); FAIL if
-rem there are some but the check didn't run, or found any problem.
+exit /b 0
+
+:work_out_run_records_status
+rem run_records_status (PASS, FAIL or NONE) and the Run records row's text:
+rem NONE if the set has no earlier runs (a first copy); FAIL if there are
+rem some but the check didn't run, or found any problem. Also called when
+rem that check finishes, for the live display.
 set "run_records_status=NONE"
 set "result_run_records=NONE: no earlier runs found in the source"
 if %history_row_count% gtr 0 if not defined run_records_checked set "run_records_status=FAIL" & set "result_run_records=FAIL: not checked (verification stopped before the run records check; see Failures)"
 if defined run_records_checked set "run_records_status=PASS" & set "result_run_records=PASS: %run_record_count% run record(s) match their seals and the history (%run_record_file_match_count% sealed file(s))"
 if defined run_records_checked if %run_record_count% equ 0 if %run_record_problem_count% equ 0 set "run_records_status=NONE" & set "result_run_records=NONE: no earlier runs found in the source"
 if %run_record_problem_count% neq 0 set "run_records_status=FAIL" & set "result_run_records=FAIL: %run_record_problem_count% problem(s) in the run records (see Run records above, and Failures)"
+exit /b 0
+
+:describe_paths_too_long
+rem Caller's scope (:work_out_result): path_too_long_count, the refusals for
+rem a path's length on both sides together, and path_too_long_text, the
+rem refusals by side ("1 in the source, 1 in the destination"; a side with
+rem none is left out; "none" if neither has any).
+set /a "path_too_long_count=path_too_long_source_count + path_too_long_destination_count"
+set "path_too_long_text="
+if %path_too_long_source_count% gtr 0 set "path_too_long_text=%path_too_long_source_count% in the source"
+if %path_too_long_destination_count% gtr 0 if defined path_too_long_text set "path_too_long_text=%path_too_long_text%, "
+if %path_too_long_destination_count% gtr 0 set "path_too_long_text=%path_too_long_text%%path_too_long_destination_count% in the destination"
+if not defined path_too_long_text set "path_too_long_text=none"
 exit /b 0
 
 :report_unaccounted_rows
@@ -4021,7 +4847,7 @@ if %thread_count% gtr %THREAD_MAX% set "thread_count=%THREAD_MAX%"
 endlocal & set "%~1=%thread_count%"
 exit /b 0
 
-:save_robocopy_unicode_output  outFileVar  mode
+:save_robocopy_unicode_output  outFileVar  mode  [percentages]  [exitCodeVar]
 rem Robocopy writes its own console and /log output in the system's OEM code
 rem page, whatever the console's (test 18: "u-umlaut" came out as one OEM
 rem byte inside the UTF-8 log, and a listing read under code page 65001
@@ -4034,20 +4860,72 @@ rem trailing CR removed and the records keep CRLF line endings (test runner
 rem round 2, P1: otherwise byte-identical to TYPE's output, including empty
 rem lines, tabs, leading ";" or ":", and ! % ^ &). Delayed expansion is on
 rem per line only, so "!" in the text survives. mode: new (replace the out
-rem file) or append.
+rem file) or append. percentages yes: the pass ran without /np, so each
+rem of its file lines ends with robocopy's progress fragments (CR, a
+rem percentage in three columns, "%", two spaces, repeated as the copy
+rem went): every line is cut at its first CR, which no line of robocopy's
+rem holds before its end otherwise, so the line reads as with /np, the
+rem file's path intact. FOR /F can't take a CR as a delimiter (its options
+rem take neither delayed expansion nor a FOR variable: round 12.2 cut every
+rem line at the letters of "!carriage_return!"), so each CR is first turned
+rem into "|", which no Windows path holds, and FOR /F cuts at the first
+rem "|". The line goes into FOR /F behind a "#", taken off again after, so
+rem a line that starts with a CR, or with FOR /F's end-of-line character
+rem ";", is still cut and kept rather than skipped. The text before the
+rem cut is assigned after ENDLOCAL, with delayed expansion off again, so a
+rem "!" in the path survives, and the scope is reopened for the echo. The
+rem output is
+rem rewritten line by line only when it holds an ERROR line ("(0x", the
+rem error code robocopy writes with every ERROR line, in any language) or
+rem percentages: otherwise TYPE's output is appended as it is, the same
+rem bytes without a FOR /F per line (about a millisecond each: 100 s for
+rem 100,000 lines; workshop, 2026-10-18). exitCodeVar (a copy pass's exit
+rem code): outside robocopy's own range (stopped, e.g. by Ctrl+C) the log
+rem is rewritten too, so its last line, cut where robocopy stopped, gets a
+rem line end, and the next line of the log starts on a line of its own
+rem (round 12.4: "Robocopy exit code: ..." ran onto the last file's name).
+rem The rewrite counts the lines it writes against the lines robocopy's
+rem output holds (robocopy_output_lines_written, _total, for the caller):
+rem cmd skips a FOR /F iteration whose expanded command would pass 8,191
+rem characters without a word, so a line that long (a path over about
+rem 8,100 characters) would be missing from the log or the listing.
 setlocal DisableDelayedExpansion
 call :copy_variable %~1 robocopy_output_file
+set "lines_written=0"
+set "lines_total=0"
 if not "%~2"=="append" type nul >"%robocopy_output_file%" 2>nul
+set "robocopy_output_rewrite="
+if "%~3"=="yes" set "robocopy_output_rewrite=1"
+if not "%~4"=="" call :is_robocopy_exit_code_in_range %~4 || set "robocopy_output_rewrite=1"
+set "robocopy_output_error_lines="
+find /c "(0x" <"%temp_robocopy_unicode_output%" >"%temp_count%" 2>nul
+for /f "usebackq" %%N in ("%temp_count%") do set "robocopy_output_error_lines=%%N"
+if not "%robocopy_output_error_lines%"=="0" set "robocopy_output_rewrite=1"
+if not defined robocopy_output_rewrite (
+    type "%temp_robocopy_unicode_output%" >>"%robocopy_output_file%" 2>nul
+    goto save_robocopy_unicode_output_done
+)
+type "%temp_robocopy_unicode_output%" 2>nul | find /c /v "" >"%temp_count%"
+for /f "usebackq" %%N in ("%temp_count%") do set "lines_total=%%N"
 (for /f "delims=" %%L in ('type "%temp_robocopy_unicode_output%" 2^>nul ^| findstr /n "^"') do (
+    set /a "lines_written+=1"
     set "robocopy_output_line=%%L"
     setlocal EnableDelayedExpansion
     set "robocopy_output_line=!robocopy_output_line:*:=!"
     if defined robocopy_output_line if "!robocopy_output_line:~-1!"=="!carriage_return!" set "robocopy_output_line=!robocopy_output_line:~0,-1!"
+    if "%~3"=="yes" if defined robocopy_output_line for %%R in ("!carriage_return!") do set "robocopy_output_line=!robocopy_output_line:%%~R=|!"
+    if "%~3"=="yes" for /f "delims=|" %%A in ("#!robocopy_output_line!") do (
+        endlocal
+        set "robocopy_output_line=%%A"
+        setlocal EnableDelayedExpansion
+        set "robocopy_output_line=!robocopy_output_line:~1!"
+    )
     echo(!robocopy_output_line!
     endlocal
 )) >>"%robocopy_output_file%"
+:save_robocopy_unicode_output_done
 del "%temp_robocopy_unicode_output%" >nul 2>&1
-endlocal & exit /b 0
+endlocal & set "robocopy_output_lines_written=%lines_written%" & set "robocopy_output_lines_total=%lines_total%" & exit /b 0
 
 :check_script_path
 rem The script's own path goes on child command lines too (e.g.
@@ -4077,6 +4955,12 @@ setlocal EnableDelayedExpansion
 set /a "robocopy_exit_code=!%~1!"
 set "extras_explained_after=!custody_extras_explained!"
 set "msg=Robocopy exit code: !robocopy_exit_code!" & call :show_and_log msg
+call :is_robocopy_exit_code_in_range robocopy_exit_code || (
+    set "msg=  [FAIL] Robocopy ended abnormally (exit code !robocopy_exit_code!): it was stopped or failed, so its exit code says nothing about what it copied, and its log above may be incomplete."
+    call :show_and_log msg
+    call :remember_problem msg
+    endlocal & exit /b 0
+)
 if !robocopy_exit_code! equ 0 (
     set "msg=  [INFO] No files were copied in this pass."
     call :show_and_log msg
@@ -4098,6 +4982,15 @@ for %%B in (%ROBOCOPY_EXIT_BITS%) do (
     )
 )
 if "%~2"=="custody" (endlocal & set "custody_extras_explained=%extras_explained_after%" & exit /b 0)
+endlocal & exit /b 0
+
+:is_robocopy_exit_code_in_range  exitCodeVar
+rem Exit 0 if the exit code is one of robocopy's own (0 to
+rem ROBOCOPY_EXIT_CODE_HIGHEST), 1 if robocopy was stopped or failed.
+setlocal EnableDelayedExpansion
+set /a "code=!%~1!"
+if !code! lss 0 (endlocal & exit /b 1)
+if !code! gtr %ROBOCOPY_EXIT_CODE_HIGHEST% (endlocal & exit /b 1)
 endlocal & exit /b 0
 
 rem -- Input ------------------------------------------------------------------
@@ -4396,18 +5289,21 @@ rem exists, append it to the log; free text within OUTPUT_WIDTH.
 call :emit_free_text %~1 both
 exit /b 0
 
-:log_field  label  valueVar
+:log_field  label  valueVar  [target]
 rem Show and log "  label     : value" (labels 20 wide, the value from
 rem column 25); a long value continues from column 26 (:emit_wrapped), a
 rem word that can't fit there (a SHA-256) from column 5. The value never
 rem leaves the label's line: the Script check reads the
-rem "  Script SHA-256      : " line of a sealed log (contract).
+rem "  Script SHA-256      : " line of a sealed log (contract). target:
+rem console, log or both (the default).
 setlocal EnableDelayedExpansion
 set "padded_label=%~1                      "
 set "field_line=  !padded_label:~0,20!: !%~2!"
 set "field_continuation=!BLANKS:~0,25!"
 set "field_long_word_start=!BLANKS:~0,4!"
-call :emit_wrapped field_line 24 field_continuation both field_long_word_start
+set "field_target=%~3"
+if not defined field_target set "field_target=both"
+call :emit_wrapped field_line 24 field_continuation !field_target! field_long_word_start
 endlocal & exit /b 0
 
 :log_field_continued  valueVar
@@ -4545,10 +5441,13 @@ rem log copy never does (records are plain text, sealed, compared byte for
 rem byte). Lines reach the log only once it exists (log_ready). lineKind
 rem "continuation" (:emit_wrapped's further lines) is never coloured: a
 rem status starts a text, and a further line may hold the rest of an
-rem evidence name.
+rem evidence name. While the live display is active, the console copy is
+rem left out (the block shows the run's progress; [WARN] and [FAIL] lines
+rem reach it through the summary's lists): the log copy is written as always.
 setlocal EnableDelayedExpansion
 set "line=!%~1!"
 if "%~2"=="log" goto emit_line_to_log
+if defined dashboard_active goto emit_line_to_log
 if defined line if defined console_colour if not "%~3"=="continuation" call :colour_for_console line
 echo(!line!
 :emit_line_to_log
@@ -4707,21 +5606,6 @@ if %item_count% equ 0 (
 )
 endlocal & exit /b 0
 
-:relative_path  fullVar  baseVar  outVar
-rem Set outVar to fullVar without the baseVar prefix; exit 1 if fullVar does
-rem not start with it. Caller's scope; the caller must have delayed expansion
-rem on.
-call :strlen %~2 relative_path_base_length
-set "relative_path_prefix="
-set "%~3="
-for %%N in (!relative_path_base_length!) do (
-    set "relative_path_prefix=!%~1:~0,%%N!"
-    set "%~3=!%~1:~%%N!"
-)
-if /i not "!relative_path_prefix!"=="!%~2!" exit /b 1
-if not defined %~3 exit /b 1
-exit /b 0
-
 :is_directory  pathVar
 rem Exit 0 if the path (with or without a trailing backslash) is an existing
 rem directory. Every directory test goes through here: IF EXIST "<path>\"
@@ -4766,22 +5650,10 @@ if not defined each_item_current set "each_item_rest="
 if defined each_item_current call :%~2 "%each_item_current%"
 goto each_item_loop
 
-:strlen  textVar  outVar
-rem Length of a variable's value.
-setlocal EnableDelayedExpansion
-set "text=!%~1!#"
-set "length=0"
-for %%P in (4096 2048 1024 512 256 128 64 32 16 8 4 2 1) do if not "!text:~%%P,1!"=="" (
-    set /a "length+=%%P"
-    set "text=!text:~%%P!"
-)
-endlocal & set "%~2=%length%"
-exit /b 0
-
 :cleanup_temp
 rem Delete this run's temporary files; a failed delete never stops the run.
 setlocal EnableDelayedExpansion
-for %%T in (temp_file_list temp_metadata_list temp_robocopy_unicode_output temp_certutil_output temp_hash_rows_source temp_hash_rows_destination temp_hash_rows_custody temp_custody_list temp_compare_lines temp_compare_lines_sorted temp_summary_warnings temp_summary_failures temp_warnings temp_clock_status temp_housekeeping_source temp_housekeeping_destination temp_history_runs temp_history_lines temp_history_filled temp_outside_history temp_partial_warned temp_predating_records temp_sealed_history_source temp_sealed_history_destination plain_hash_csv_source plain_hash_csv_destination) do (
+for %%T in (temp_file_list temp_metadata_list temp_listing_numbered temp_listing_line temp_robocopy_unicode_output temp_certutil_output temp_hash_rows_source temp_hash_rows_destination temp_hash_rows_custody temp_custody_list temp_compare_lines temp_compare_lines_sorted temp_summary_warnings temp_summary_failures temp_warnings temp_clock_status temp_housekeeping_source temp_housekeeping_destination temp_history_runs temp_history_lines temp_history_filled temp_outside_history temp_partial_warned temp_predating_records temp_sealed_history_source temp_sealed_history_destination temp_count temp_dashboard_pass temp_dashboard_lock temp_dashboard_helper_done temp_dashboard_lists temp_dashboard_count temp_dashboard_list_tail temp_dashboard_copy_tail temp_dashboard_started_lines temp_dashboard_error_lines temp_copy_pass_listing plain_hash_csv_source plain_hash_csv_destination) do (
     if defined %%T if exist "!%%T!" del /f /q "!%%T!" >nul 2>&1
 )
 rem The staging directories go only if empty: if they still hold records,
@@ -4797,7 +5669,11 @@ endlocal & exit /b 0
 rem Stop before anything is copied. No run record is written: an aborted run
 rem leaves nothing in the destination. Its log, if one was started, stays in
 rem TEMP and its path is shown. The reason is shown once, in a result block
-rem (shared rule: scannable output), in the log too if there is one.
+rem (shared rule: scannable output), in the log too if there is one; a log
+rem stopped before its header gets the fields known so far
+rem (:write_abort_header).
+call :dashboard_stop
+if defined log_ready if not defined header_written call :write_abort_header
 set "abort_target=console"
 if defined log_ready set "abort_target=both"
 set "block_line=" & call :emit_line block_line %abort_target%
@@ -4813,3 +5689,723 @@ call :cleanup_temp
 call :restore_console_code_page
 pause
 exit /b %EXIT_CODE_FAIL%
+
+rem -- Live display (the dashboard) -------------------------------------------
+rem Console only, forensic runs. From :dashboard_start (after the header) to
+rem :dashboard_finish (before the summary) the console shows one block of
+rem DASHBOARD_LINE_COUNT lines, redrawn in place: the result block's checks
+rem with a status or a bar, the item in hand, and the last warnings and
+rem failures (the summary lists them all). While it is active, lines the run
+rem writes to the console go to the log alone (:emit_line). The display
+rem reads the run's counters and never changes a check, a record or the exit
+rem code; a value it can't read shows as starting or unknown, never as done.
+rem Mode (dashboard_mode): live where the console takes VT sequences
+rem (:init_console_vt) and EVIDENCE_ROBOCOPY_PLAIN isn't set, off otherwise
+rem (the plain output). The section sits at the end of the file on purpose:
+rem cmd finds a label by scanning forward from the caller and wrapping, so
+rem helpers placed above the per-file loops would slow every call those
+rem loops make (workshop, 2026-10-18); the loops call only :dashboard_tick,
+rem every DASHBOARD_TICK_EVERY_ITEMS items.
+
+:init_dashboard
+rem Decide the mode and give every display variable its starting value.
+set "dashboard_mode=off"
+set "dashboard_active="
+set "dashboard_block_drawn="
+set "dashboard_last_redraw=0"
+set "dashboard_tick_count=0"
+set "dashboard_copy_detail="
+set "dashboard_copy_error_text="
+set "dashboard_hash_detail="
+for %%S in (%DASHBOARD_STAGES%) do set "dashboard_%%S_text=waiting"
+for %%S in (%DASHBOARD_STAGES%) do set "dashboard_%%S_bar="
+if not "%run_mode%"=="forensic" exit /b 0
+if defined EVIDENCE_ROBOCOPY_PLAIN exit /b 0
+if not defined console_vt exit /b 0
+set "dashboard_mode=live"
+exit /b 0
+
+:dashboard_start
+rem Put the block on the console (after the header): the Script check's
+rem result, the run records as checked before the copy, every other stage
+rem waiting.
+if not "%dashboard_mode%"=="live" exit /b 0
+set "dashboard_active=1"
+set "dashboard_script_text=%result_script%"
+if %history_row_count% gtr 0 set "dashboard_run_records_text=checked before the copy (findings: the header); after it: waiting"
+rem The blank line a section opens with (shared rule), outside the redrawn
+rem block.
+echo(
+call :dashboard_redraw
+exit /b 0
+
+:dashboard_stage  stage  textVar
+rem Show a stage with a plain status (the variable's text: fixed words and
+rem counts, never a path) and redraw.
+if not defined dashboard_active exit /b 0
+call :copy_variable %~2 dashboard_%~1_text
+set "dashboard_%~1_bar="
+call :dashboard_redraw
+exit /b 0
+
+:dashboard_stage_result  stage  textVar
+rem Show a stage's result (the result block's text for it) and redraw; its
+rem detail lines go (round 12.4: the copy's last progress stayed under
+rem "Copy : PASS" to the end).
+if not defined dashboard_active exit /b 0
+call :dashboard_clear_details %~1
+call :dashboard_stage %~1 %~2
+exit /b 0
+
+:dashboard_clear_details  stage
+rem Clear the variables of a stage's detail lines (DASHBOARD_STAGE_<stage>_
+rem DETAILS); the redraw shows them empty.
+setlocal EnableDelayedExpansion
+set "details=!DASHBOARD_STAGE_%~1_DETAILS!"
+endlocal & set "dashboard_clear_details_names=%details%"
+if defined dashboard_clear_details_names for %%D in (%dashboard_clear_details_names%) do set "%%D="
+exit /b 0
+
+:dashboard_stage_bar  stage  doneVar  totalVar
+rem Show a stage as a bar: done of total, read from the named counters at
+rem every redraw (a total not known yet shows as starting), with the time
+rem since now.
+if not defined dashboard_active exit /b 0
+set "dashboard_%~1_bar=1"
+set "dashboard_%~1_done_var=%~2"
+set "dashboard_%~1_total_var=%~3"
+call :dashboard_read_clock dashboard_%~1_started
+call :dashboard_redraw
+exit /b 0
+
+:dashboard_finish
+rem After every check (:work_out_result): each stage shows its result block
+rem text, once more, then the display stops and the summary follows below.
+if not defined dashboard_active exit /b 0
+for %%S in (%DASHBOARD_STAGES%) do set "dashboard_%%S_bar="
+set "dashboard_script_text=%result_script%"
+set "dashboard_copy_text=%result_copy%"
+set "dashboard_metadata_text=%result_metadata%"
+set "dashboard_run_records_text=%result_run_records%"
+set "dashboard_hash_text=%result_hash%"
+set "dashboard_record_written_text=after the summary, below"
+for %%S in (%DASHBOARD_STAGES%) do call :dashboard_clear_details %%S
+call :dashboard_redraw
+set "dashboard_active="
+exit /b 0
+
+:dashboard_stop
+rem Stop the display where the run stops early (:abort): the block stays
+rem as last drawn and the output continues below it.
+if not defined dashboard_active exit /b 0
+set "dashboard_active="
+exit /b 0
+
+:dashboard_tick  [detailVar]
+rem Every DASHBOARD_TICK_EVERY_ITEMS items of a loop (:hash_listed_file,
+rem :pair_compare_line; once per record in :check_run_record): read the
+rem clock and redraw when DASHBOARD_REDRAW_CENTISECONDS have passed since the
+rem last redraw, with detailVar's text (the item in hand) as the Hash
+rem detail. The loops keep two lines per item (a count and this call): cmd
+rem parses a function's lines on every call, so a clock read inline would
+rem cost 2-4 ms per item (workshop, 2026-10-18). Sets dashboard_tick_count
+rem and dashboard_last_redraw in the caller, whichever its delayed
+rem expansion state.
+if not defined dashboard_active exit /b 0
+setlocal EnableDelayedExpansion
+set "dashboard_since=0"
+set "dashboard_clock=!time: =0!"
+for /f "tokens=1-4 delims=:.," %%A in ("!dashboard_clock!") do set /a "dashboard_since=((1%%A %% 100) * 60 + (1%%B %% 100)) * 6000 + (1%%C %% 100) * 100 + (1%%D %% 100) - dashboard_last_redraw" 2>nul
+if !dashboard_since! lss 0 set /a "dashboard_since+=8640000"
+if !dashboard_since! geq %DASHBOARD_REDRAW_CENTISECONDS% (
+    if not "%~1"=="" set "dashboard_hash_detail=!%~1!"
+    call :dashboard_redraw
+)
+endlocal & set "dashboard_tick_count=0" & set "dashboard_last_redraw=%dashboard_last_redraw%"
+exit /b 0
+
+:dashboard_read_clock  outVar
+rem Centiseconds since midnight from %time%, for elapsed times and the
+rem redraw interval (display only). The locale's separators may be any of
+rem ":", "." and ","; a leading space becomes 0; each field is read as
+rem 1<field> mod 100 so a leading 0 isn't read as octal. 0 when it can't be
+rem parsed.
+setlocal EnableDelayedExpansion
+set "clock=!time: =0!"
+set "centiseconds="
+for /f "tokens=1-4 delims=:.," %%A in ("!clock!") do set /a "centiseconds=((1%%A %% 100) * 60 + (1%%B %% 100)) * 6000 + (1%%C %% 100) * 100 + (1%%D %% 100)" 2>nul
+if not defined centiseconds set "centiseconds=0"
+endlocal & set "%~1=%centiseconds%"
+exit /b 0
+
+:dashboard_bar_text  doneVar  totalVar  startedVar  outVar
+rem "[####....]  nn %  h:mm:ss" from done of total and the time since the
+rem started centiseconds, taken against the redraw's own clock reading
+rem (dashboard_redraw_clock; a day's wrap allowed for); "starting" while
+rem the total isn't known yet. Counts only: delayed expansion is on.
+setlocal EnableDelayedExpansion
+set "done=0"
+set "total=0"
+if defined %~1 set /a "done=!%~1!" 2>nul
+if defined %~2 set /a "total=!%~2!" 2>nul
+set "elapsed_text=unknown"
+if defined %~3 (
+    set /a "elapsed=(dashboard_redraw_clock - !%~3!) / 100"
+    if !elapsed! lss 0 set /a "elapsed+=86400"
+    set /a "hours=elapsed / 3600, minutes=(elapsed / 60) %% 60, seconds=elapsed %% 60"
+    if !minutes! lss 10 set "minutes=0!minutes!"
+    if !seconds! lss 10 set "seconds=0!seconds!"
+    set "elapsed_text=!hours!:!minutes!:!seconds!"
+)
+if !total! leq 0 (endlocal & set "%~4=starting  %elapsed_text%" & exit /b 0)
+if !done! gtr !total! set "done=!total!"
+set /a "percent=done * 100 / total, filled=done * DASHBOARD_BAR_WIDTH / total"
+set /a "empty=DASHBOARD_BAR_WIDTH - filled"
+for %%F in (!filled!) do for %%E in (!empty!) do set "bar=[!DASHBOARD_BAR_FULL:~0,%%F!!DASHBOARD_BAR_EMPTY:~0,%%E!]"
+set "padded_percent=   !percent!"
+set "padded_percent=!padded_percent:~-3!"
+endlocal & set "%~4=%bar% %padded_percent% %%  %elapsed_text%"
+exit /b 0
+
+:dashboard_redraw
+rem Redraw the block: the cursor up DASHBOARD_LINE_COUNT lines (not the
+rem first time), then every line erased and rewritten (VT sequences, as the
+rem colour uses). Each line is cut to OUTPUT_WIDTH so the console never
+rem wraps one (a wrapped line would put the lines below out of step). A
+rem stage row has the field layout (the status at column 25) and the list
+rem lines the lists' ([WARN] at column 5): their colour is the same rule as
+rem :colour_for_console's for those shapes, written here rather than
+rem called, so a redraw doesn't pay the label search ten times. The lists'
+rem counts and last lines come from the summary's list files through a
+rem small cache (:dashboard_read_lists), with delayed expansion off, so "!"
+rem in an evidence name survives. Records the time, for the loops' ticks.
+if not defined dashboard_active exit /b 0
+setlocal DisableDelayedExpansion
+call :dashboard_read_lists
+call :dashboard_read_clock dashboard_redraw_clock
+setlocal EnableDelayedExpansion
+set "dashboard_erase=!escape_character![2K"
+if defined dashboard_block_drawn <nul set /p "=!escape_character![%DASHBOARD_LINE_COUNT%A"
+echo(!dashboard_erase!%RULE_LIGHT%
+echo(!dashboard_erase!Progress (console only: the log and the records are written as before)
+for %%S in (%DASHBOARD_STAGES%) do (
+    set "dashboard_stage_text=!dashboard_%%S_text!"
+    if defined dashboard_%%S_bar call :dashboard_bar_text !dashboard_%%S_done_var! !dashboard_%%S_total_var! dashboard_%%S_started dashboard_stage_text
+    set "dashboard_padded_label=!DASHBOARD_STAGE_%%S_LABEL!                    "
+    set "dashboard_line=  !dashboard_padded_label:~0,20!: !dashboard_stage_text!"
+    if not "!dashboard_line:~%OUTPUT_WIDTH%!"=="" set "dashboard_line=!dashboard_line:~0,%OUTPUT_WIDTH%!"
+    if defined console_colour (
+        if "!dashboard_line:~24,5!"=="PASS:" set "dashboard_line=!dashboard_line:~0,24!%coloured_pass%!dashboard_line:~28!"
+        if "!dashboard_line:~24,5!"=="FAIL:" set "dashboard_line=!dashboard_line:~0,24!%coloured_fail%!dashboard_line:~28!"
+    )
+    echo(!dashboard_erase!!dashboard_line!
+    set "dashboard_detail_lines=!DASHBOARD_STAGE_%%S_DETAILS!"
+    if defined dashboard_detail_lines for %%D in (!dashboard_detail_lines!) do (
+        set "dashboard_line=    !%%D!"
+        if not "!dashboard_line:~%OUTPUT_WIDTH%!"=="" set "dashboard_line=!dashboard_line:~0,%OUTPUT_WIDTH%!"
+        echo(!dashboard_erase!!dashboard_line!
+    )
+)
+echo(!dashboard_erase!
+for %%K in (W F) do (
+    if "%%K"=="W" set "dashboard_line=  Warnings: !dashboard_list_WC!"
+    if "%%K"=="F" set "dashboard_line=  Failures: !dashboard_list_FC!"
+    echo(!dashboard_erase!!dashboard_line!
+    for /l %%N in (1,1,%DASHBOARD_LIST_LINES%) do (
+        set "dashboard_line=    !dashboard_list_%%K%%N!"
+        if not "!dashboard_line:~%OUTPUT_WIDTH%!"=="" set "dashboard_line=!dashboard_line:~0,%OUTPUT_WIDTH%!"
+        if defined console_colour (
+            if "!dashboard_line:~4,6!"=="[WARN]" set "dashboard_line=    %coloured_warn_tag%!dashboard_line:~10!"
+            if "!dashboard_line:~4,6!"=="[FAIL]" set "dashboard_line=    %coloured_fail_tag%!dashboard_line:~10!"
+        )
+        echo(!dashboard_erase!!dashboard_line!
+    )
+)
+echo(!dashboard_erase!%RULE_LIGHT%
+endlocal
+endlocal & set "dashboard_block_drawn=1" & set "dashboard_last_redraw=%dashboard_redraw_clock%" & set "dashboard_tick_count=0"
+exit /b 0
+
+:dashboard_read_lists
+rem Caller's scope (:dashboard_redraw, delayed expansion off): the counts
+rem and the last DASHBOARD_LIST_LINES lines of the summary's warnings and
+rem failures lists, into dashboard_list_WC and _FC, _W1 to _W3 and _F1 to
+rem _F3. The list files are read (:dashboard_refresh_lists: two "find /c"
+rem and two "more +n", four process starts) only when one has changed size
+rem since the last time, which is seen in-process (%%~z); what was read is
+rem kept in temp_dashboard_lists, a nine-line file read in-process here at
+rem every redraw. (Reading the lists at every redraw cost about 300 ms, a
+rem third of the hashing time at one redraw a second: workshop, phase 3.)
+for /l %%N in (1,1,%DASHBOARD_LIST_LINES%) do set "dashboard_list_W%%N="
+for /l %%N in (1,1,%DASHBOARD_LIST_LINES%) do set "dashboard_list_F%%N="
+set "dashboard_list_WC=0"
+set "dashboard_list_FC=0"
+set "dashboard_list_S="
+set "dashboard_warnings_size=0"
+set "dashboard_failures_size=0"
+if exist "%temp_summary_warnings%" for %%A in ("%temp_summary_warnings%") do set "dashboard_warnings_size=%%~zA"
+if exist "%temp_summary_failures%" for %%A in ("%temp_summary_failures%") do set "dashboard_failures_size=%%~zA"
+set "dashboard_list_sizes=%dashboard_warnings_size% %dashboard_failures_size%"
+if exist "%temp_dashboard_lists%" for /f "usebackq tokens=1* delims=:" %%A in ("%temp_dashboard_lists%") do set "dashboard_list_%%A=%%B"
+if "%dashboard_list_S%"=="%dashboard_list_sizes%" exit /b 0
+call :dashboard_refresh_lists
+for /f "usebackq tokens=1* delims=:" %%A in ("%temp_dashboard_lists%") do set "dashboard_list_%%A=%%B"
+exit /b 0
+
+:dashboard_refresh_lists
+rem Caller's scope (:dashboard_read_lists, delayed expansion off): the list
+rem files read and the cache written, one "key:text" line each (S the
+rem sizes, WC and FC the counts, W1 to F3 the lines, empty ones too). The
+rem lines are written with delayed expansion on, so "&" or "|" in a name
+rem can't be read as a command.
+call :dashboard_count_list_lines warnings
+call :dashboard_count_list_lines failures
+call :dashboard_read_list_lines warnings
+call :dashboard_read_list_lines failures
+setlocal EnableDelayedExpansion
+(
+    echo(S:!dashboard_list_sizes!
+    echo(WC:!dashboard_warnings_count!
+    echo(FC:!dashboard_failures_count!
+    echo(W1:!dashboard_warnings_line_1!
+    echo(W2:!dashboard_warnings_line_2!
+    echo(W3:!dashboard_warnings_line_3!
+    echo(F1:!dashboard_failures_line_1!
+    echo(F2:!dashboard_failures_line_2!
+    echo(F3:!dashboard_failures_line_3!
+) >"!temp_dashboard_lists!"
+endlocal
+exit /b 0
+
+:dashboard_count_list_lines  kind
+rem Caller's scope (:dashboard_refresh_lists, delayed expansion off): the
+rem lines in the summary's warnings or failures list (temp_summary_<kind>),
+rem into dashboard_<kind>_count; 0 without the file. Counted from the file:
+rem a counter kept in a variable would be lost in the callers' setlocal
+rem scopes.
+set "dashboard_%~1_count=0"
+set "dashboard_list_path=%temp_summary_warnings%"
+if "%~1"=="failures" set "dashboard_list_path=%temp_summary_failures%"
+if not exist "%dashboard_list_path%" exit /b 0
+find /c /v "" <"%dashboard_list_path%" >"%temp_dashboard_count%" 2>nul
+for /f "usebackq" %%N in ("%temp_dashboard_count%") do set "dashboard_%~1_count=%%N"
+exit /b 0
+
+:dashboard_read_list_lines  kind
+rem Caller's scope (:dashboard_refresh_lists, delayed expansion off): the last
+rem DASHBOARD_LIST_LINES lines of the summary's warnings or failures list
+rem (temp_summary_<kind>) into dashboard_<kind>_line_1 to _3. The earlier
+rem lines are skipped with "more +n" (cheap however long the list), its
+rem output written to a file and read from there (no path on a child
+rem command line), and the rest assigned with delayed expansion off, so "!"
+rem and "%" in an evidence name come through as they are; none is ever run
+rem or expanded.
+for /l %%N in (1,1,%DASHBOARD_LIST_LINES%) do set "dashboard_%~1_line_%%N="
+set "dashboard_list_index=0"
+set "dashboard_list_path=%temp_summary_warnings%"
+if "%~1"=="failures" set "dashboard_list_path=%temp_summary_failures%"
+if not exist "%dashboard_list_path%" exit /b 0
+set /a "dashboard_list_skip=dashboard_%~1_count - DASHBOARD_LIST_LINES"
+if %dashboard_list_skip% lss 0 set "dashboard_list_skip=0"
+more +%dashboard_list_skip% "%dashboard_list_path%" >"%temp_dashboard_list_tail%" 2>nul
+for /f "usebackq delims=" %%L in ("%temp_dashboard_list_tail%") do (
+    set "dashboard_list_line=%%L"
+    call :dashboard_keep_list_line %~1
+)
+exit /b 0
+
+:dashboard_keep_list_line  kind
+rem Caller's scope (:dashboard_read_list_lines, delayed expansion off): the
+rem line read, as the next of the kind's lines (1 to DASHBOARD_LIST_LINES).
+set /a "dashboard_list_index+=1"
+for /l %%N in (1,1,%DASHBOARD_LIST_LINES%) do if "%dashboard_list_index%"=="%%N" set "dashboard_%~1_line_%%N=%dashboard_list_line%"
+exit /b 0
+
+rem -- Live copy progress: the display helper ---------------------------------
+rem While the copy passes run (robocopy, synchronous, as always: started in
+rem the background it would ignore Ctrl+C and copy on after the script was
+rem stopped), a second instance of this script, started by
+rem :dashboard_copy_begin, paints the block: it reads how far robocopy is
+rem from its own log, which is written as the copy goes, and ends when the
+rem lock file the run holds open around the passes is released. Nothing of
+rem this reaches the log or a record.
+
+:dashboard_copy_begin
+rem Forensic run with the live display, before the copy passes (MAIN):
+rem starts the display helper (:dashboard_helper_main), which inherits the
+rem run's variables as they are now, the pass listings
+rem (:count_copy_pass_files) among them; which pass runs it reads from
+rem temp_dashboard_pass, written by :run_copy_pass.
+if not defined dashboard_active exit /b 0
+set "copy_excluded_item_count=0"
+if exist "%temp_housekeeping_source%" for /f "usebackq eol=| delims=" %%L in ("%temp_housekeeping_source%") do set /a "copy_excluded_item_count+=1"
+rem Every pass's files, for the count of a pass by files
+rem (:dashboard_count_listed_files); a pass whose listing failed counts 0.
+set "copy_files_all_passes=0"
+for %%P in (%COPY_PASSES%) do call :dashboard_add_pass_total %%P
+> "%temp_dashboard_pass%" echo none
+del "%temp_dashboard_helper_done%" >nul 2>&1
+set "msg=running" & call :dashboard_stage copy msg
+rem The copy bar's start, inherited by the helper (its time read from it).
+call :dashboard_read_clock dashboard_copy_started
+set "evidence_robocopy_display_helper=%temp_path_prefix%"
+start "" /b cmd /d /v:off /c call "%script_path%"
+set "evidence_robocopy_display_helper="
+exit /b 0
+
+:dashboard_add_pass_total  passId
+rem Add a pass's file count (copy_pass_<pass>_total) to
+rem copy_files_all_passes, unless its listing failed ("unknown").
+call :copy_variable copy_pass_%~1_total dashboard_add_pass_total_value
+if "%dashboard_add_pass_total_value%"=="unknown" exit /b 0
+set /a "copy_files_all_passes+=dashboard_add_pass_total_value"
+exit /b 0
+
+:dashboard_copy_end
+rem After the copy passes (MAIN): wait for the display helper to notice the
+rem lock's release and end (its done marker: about a second;
+rem DASHBOARD_HELPER_WAIT_SECONDS at most), so the two never paint at once.
+rem The copy's detail lines were the helper's own: from here on the block
+rem shows none under the Copy row, as the helper's last reading may be
+rem seconds old and the custody pass has none (round 12.5: "File 3 of 3
+rem (87 %)" under the custody pass's row when they were taken over).
+if not defined dashboard_active exit /b 0
+set "dashboard_copy_waits=0"
+:dashboard_copy_end_wait
+if exist "%temp_dashboard_helper_done%" goto dashboard_copy_end_done
+set /a "dashboard_copy_waits+=1"
+if %dashboard_copy_waits% gtr %DASHBOARD_HELPER_WAIT_SECONDS% goto dashboard_copy_end_done
+ping -n 2 127.0.0.1 >nul
+goto dashboard_copy_end_wait
+:dashboard_copy_end_done
+del "%temp_dashboard_helper_done%" >nul 2>&1
+exit /b 0
+
+:dashboard_helper_main
+rem The display helper (MAIN: entered when evidence_robocopy_display_helper
+rem holds this run's temporary path, set by :dashboard_copy_begin for the
+rem moment it starts this second instance), in the same console, while the
+rem first instance runs robocopy. Every second it tests the lock file the
+rem first instance holds open around the copy passes: once that can be
+rem opened for writing, the passes are over (or the run died) and the
+rem helper ends, leaving its done marker. Every DASHBOARD_POLL_SECONDS it
+rem reads the pass's progress from robocopy's log and redraws the block. It
+rem writes nothing else: no log, no record, no console line of its own; it
+rem never reads input, changes the code page or pauses.
+set "dashboard_helper_waits=0"
+set "dashboard_helper_lock_seen="
+:dashboard_helper_loop
+ping -n 2 127.0.0.1 >nul
+set /a "dashboard_helper_waits+=1"
+if exist "%temp_dashboard_lock%" set "dashboard_helper_lock_seen=1"
+if not defined dashboard_helper_lock_seen if %dashboard_helper_waits% gtr %DASHBOARD_HELPER_WAIT_SECONDS% goto dashboard_helper_end
+if not defined dashboard_helper_lock_seen goto dashboard_helper_loop
+rem The lock test: a second write handle on a file the first instance holds
+rem open on handle 9 fails with a sharing violation while its copy passes
+rem run; "(call )" is a command that does nothing, so the test only opens
+rem the file. cmd reports a failed redirection outside the command's own
+rem 2>nul, so the test is wrapped in a block whose 2>nul takes the message
+rem (round 12.2: once a second on the console, moving the block down).
+((call ) 9>>"%temp_dashboard_lock%") 2>nul && goto dashboard_helper_end
+set /a "dashboard_helper_poll=dashboard_helper_waits %% DASHBOARD_POLL_SECONDS"
+if %dashboard_helper_poll% neq 0 goto dashboard_helper_loop
+call :dashboard_read_copy_progress
+call :dashboard_redraw
+goto dashboard_helper_loop
+:dashboard_helper_end
+> "%temp_dashboard_helper_done%" echo done
+exit /b 0
+
+:dashboard_read_copy_progress
+rem Caller's scope (the display helper, delayed expansion off). Which pass
+rem runs (temp_dashboard_pass: "<pass> running" or "<pass> copied") and how
+rem far it is, from robocopy's log as it is written. Files done: a pass run
+rem without /np (PASS_<id>_PERCENTAGES) by the files robocopy has started
+rem (:dashboard_count_started_files), any other pass by the lines that name
+rem the source (:dashboard_count_listed_files); never more than the pass's
+rem total. A pass without /np also gives the percentage of the file in
+rem progress (:dashboard_read_copy_percentage). ERROR lines (each holds
+rem "(0x", in any language): counted, and the last one read only when there
+rem is one. A count that can't be read leaves the display as it was. The
+rem helper's counts go to its own file (temp_dashboard_count), never to the
+rem one the first instance uses at the same time.
+set "dashboard_copy_pass_line="
+if exist "%temp_dashboard_pass%" set /p "dashboard_copy_pass_line=" <"%temp_dashboard_pass%"
+if not defined dashboard_copy_pass_line exit /b 0
+set "dashboard_copy_pass="
+set "dashboard_copy_pass_state="
+for /f "tokens=1,2" %%A in ("%dashboard_copy_pass_line%") do (
+    set "dashboard_copy_pass=%%A"
+    set "dashboard_copy_pass_state=%%B"
+)
+if not defined dashboard_copy_pass exit /b 0
+if "%dashboard_copy_pass%"=="none" exit /b 0
+call :copy_variable PASS_%dashboard_copy_pass%_LABEL dashboard_copy_pass_label
+call :copy_variable PASS_%dashboard_copy_pass%_PERCENTAGES dashboard_copy_pass_percentages
+call :copy_variable copy_pass_%dashboard_copy_pass%_progress dashboard_copy_pass_progress
+call :copy_variable copy_pass_%dashboard_copy_pass%_total dashboard_copy_total
+if "%dashboard_copy_total%"=="unknown" exit /b 0
+if "%dashboard_copy_total%"=="0" goto dashboard_read_copy_progress_none
+if "%dashboard_copy_pass_state%"=="copied" goto dashboard_read_copy_progress_copied
+if not exist "%temp_robocopy_unicode_output%" exit /b 0
+set "dashboard_copy_error_lines="
+find /c "(0x" <"%temp_robocopy_unicode_output%" >"%temp_dashboard_count%" 2>nul
+for /f "usebackq" %%N in ("%temp_dashboard_count%") do set "dashboard_copy_error_lines=%%N"
+if not defined dashboard_copy_error_lines exit /b 0
+set "dashboard_copy_files_done="
+set "dashboard_copy_files_started="
+if /i "%dashboard_copy_pass_percentages%"=="yes" (call :dashboard_count_started_files) else call :dashboard_count_listed_files
+if not defined dashboard_copy_files_done exit /b 0
+set "dashboard_copy_percent_of_file=0"
+set "dashboard_copy_tail_in_progress="
+if /i "%dashboard_copy_pass_percentages%"=="yes" call :dashboard_read_copy_percentage
+rem A pass without /np whose log's last line holds no progress has no file
+rem in progress (the last one finished, or one failed): every file started
+rem is done (round 12.4: the detail read "File 3 of 3 (0 %)" at the end).
+rem A bytes pass then finds the files done by name (:dashboard_find_files_done).
+if /i "%dashboard_copy_pass_percentages%"=="yes" if not defined dashboard_copy_tail_in_progress set "dashboard_copy_files_done=%dashboard_copy_files_started%"
+if /i "%dashboard_copy_pass_percentages%"=="yes" if "%dashboard_copy_pass_progress%"=="bytes" call :dashboard_find_files_done
+if %dashboard_copy_files_done% lss 0 set "dashboard_copy_files_done=0"
+if %dashboard_copy_files_done% gtr %dashboard_copy_total% set "dashboard_copy_files_done=%dashboard_copy_total%"
+call :dashboard_read_copy_errors
+set "dashboard_copy_bar=1"
+set "dashboard_copy_done_var=dashboard_copy_done"
+set "dashboard_copy_total_var=dashboard_copy_bar_total"
+call :dashboard_copy_detail_text
+exit /b 0
+:dashboard_read_copy_progress_none
+set "dashboard_copy_bar="
+set "dashboard_copy_text=running: %dashboard_copy_pass_label%"
+set "dashboard_copy_detail=no files in this pass"
+exit /b 0
+:dashboard_read_copy_progress_copied
+rem The pass's files are copied; the run is writing robocopy's log into the
+rem record.
+set "dashboard_copy_done=%dashboard_copy_total%"
+set "dashboard_copy_bar_total=%dashboard_copy_total%"
+set "dashboard_copy_bar=1"
+set "dashboard_copy_done_var=dashboard_copy_done"
+set "dashboard_copy_total_var=dashboard_copy_bar_total"
+set "dashboard_copy_detail=All %dashboard_copy_total% files of this pass copied; writing robocopy's log"
+exit /b 0
+
+:dashboard_count_started_files
+rem Caller's scope (:dashboard_read_copy_progress), a pass run without /np:
+rem robocopy starts each file's progress on that file's own line ("  0%  ",
+rem then a fragment per step, each ending in "%" and two spaces), so the
+rem lines holding "%  " are the files started; the last of them is in
+rem progress, the others are done. Lines of files the pass's size filter
+rem skips (/v lists them) carry no percentage, so they don't count (round
+rem 12.2: counting every line that names the source ran a file ahead).
+rem A path holding "%  " in a skipped line would count; display only.
+set "dashboard_count_started_files_value="
+find /c "%%  " <"%temp_robocopy_unicode_output%" >"%temp_dashboard_count%" 2>nul
+for /f "usebackq" %%N in ("%temp_dashboard_count%") do set "dashboard_count_started_files_value=%%N"
+if not defined dashboard_count_started_files_value exit /b 0
+set "dashboard_copy_files_started=%dashboard_count_started_files_value%"
+set /a "dashboard_copy_files_done=dashboard_count_started_files_value - 1"
+exit /b 0
+
+:dashboard_count_listed_files
+rem Caller's scope (:dashboard_read_copy_progress), a pass with /np: the
+rem lines that name the source directory are the job header's Source line,
+rem one per item excluded at the source's drive root
+rem (copy_excluded_item_count), one per file the pass copies or finds the
+rem same (written as its copy starts), one per ERROR, and one per file the
+rem pass's size filter skips (/v lists them, wherever the walk meets them).
+rem Files done = those lines, less the header's, the excluded items, the
+rem errors, the one in progress and every file of the other passes
+rem (copy_files_all_passes less this pass's total): an undercount until
+rem the walk has met them all, never ahead.
+set "dashboard_count_listed_files_value="
+find /c /i "%source_with_backslash%" <"%temp_robocopy_unicode_output%" >"%temp_dashboard_count%" 2>nul
+for /f "usebackq" %%N in ("%temp_dashboard_count%") do set "dashboard_count_listed_files_value=%%N"
+if not defined dashboard_count_listed_files_value exit /b 0
+set /a "dashboard_copy_files_done=dashboard_count_listed_files_value - 1 - copy_excluded_item_count - dashboard_copy_error_lines - 1 - (copy_files_all_passes - dashboard_copy_total)"
+exit /b 0
+
+:dashboard_read_copy_percentage
+rem Caller's scope (:dashboard_read_copy_progress, delayed expansion off):
+rem robocopy's percentage of the file in progress, from the end of the log's
+rem last line (its unterminated line, reached with "more +n", cheap however
+rem long the log, written to a file and read from there), into
+rem dashboard_copy_percent_of_file; 0 if none. The line itself is kept in
+rem dashboard_copy_tail (empty if it couldn't be read).
+set "dashboard_copy_tail="
+set "dashboard_copy_lines_total="
+find /c /v "" <"%temp_robocopy_unicode_output%" >"%temp_dashboard_count%" 2>nul
+for /f "usebackq" %%N in ("%temp_dashboard_count%") do set "dashboard_copy_lines_total=%%N"
+if not defined dashboard_copy_lines_total exit /b 0
+set /a "dashboard_copy_tail_skip=dashboard_copy_lines_total - 1"
+if %dashboard_copy_tail_skip% lss 0 exit /b 0
+more +%dashboard_copy_tail_skip% "%temp_robocopy_unicode_output%" >"%temp_dashboard_copy_tail%" 2>nul
+for /f "usebackq delims=" %%L in ("%temp_dashboard_copy_tail%") do set "dashboard_copy_tail=%%L"
+if not defined dashboard_copy_tail exit /b 0
+call :dashboard_percentage_from_tail
+exit /b 0
+
+:dashboard_percentage_from_tail
+rem Caller's scope: the percentage at the end of dashboard_copy_tail, the
+rem last of robocopy's fragments (CR, the percentage right-aligned, "%",
+rem two spaces: "<CR> 38%  ", or with a decimal, "<CR> 38.5%  "), whole
+rem percent only, into dashboard_copy_percent_of_file; 0 if the line
+rem doesn't end with one. Each CR becomes a space (through a FOR variable:
+rem the CR can't be written in the file), so the number is the last word
+rem before the "%". dashboard_copy_tail_in_progress is defined when the
+rem line ends with a fragment (a file in progress).
+setlocal EnableDelayedExpansion
+set "percent=0"
+set "in_progress="
+set "tail=!dashboard_copy_tail!"
+if not "!tail:~-3!"=="%%  " goto dashboard_percentage_from_tail_done
+set "in_progress=1"
+for %%R in ("!carriage_return!") do set "tail=!tail:%%~R= !"
+set "tail=!tail:~-12,-3!"
+for %%W in (!tail!) do set "percent=%%W"
+for /f "delims=." %%I in ("!percent!") do set "percent=%%I"
+for /f "delims=0123456789" %%X in ("!percent!") do set "percent=0"
+if !percent! gtr 100 set "percent=100"
+:dashboard_percentage_from_tail_done
+endlocal & set "dashboard_copy_percent_of_file=%percent%" & set "dashboard_copy_tail_in_progress=%in_progress%"
+exit /b 0
+
+:dashboard_find_files_done
+rem Caller's scope (:dashboard_read_copy_progress, delayed expansion off), a
+rem bytes pass run without /np: the files done, found by name in the pass's
+rem table (:dashboard_find_file_in_line). With a file in progress (the log's
+rem last line, dashboard_copy_tail, ends with a progress fragment), the
+rem files before it. With none (the last file started has finished or
+rem failed, and robocopy has moved on, e.g. to listing the files the pass's
+rem size filter skips), the files up to and including the last one
+rem started: the last line holding "%  ", read from find's output in a file
+rem (no path on a child command line). The count of files started alone
+rem falls one short for every file robocopy could not open (it gets no
+rem progress): round 12.3 named the failed file while the next one copied,
+rem round 12.5 read "File 3 of 3 (0 %)" after the last one had finished.
+rem Not found (the line is robocopy's retry notice or a summary line): the
+rem count stands.
+if not defined dashboard_copy_tail_in_progress goto dashboard_find_files_done_none_in_progress
+call :dashboard_find_file_in_line dashboard_copy_tail
+if defined dashboard_copy_file_found set /a "dashboard_copy_files_done=dashboard_copy_file_found - 1"
+exit /b 0
+:dashboard_find_files_done_none_in_progress
+set "dashboard_copy_last_started_line="
+find "%%  " <"%temp_robocopy_unicode_output%" >"%temp_dashboard_started_lines%" 2>nul
+for /f "usebackq delims=" %%L in ("%temp_dashboard_started_lines%") do set "dashboard_copy_last_started_line=%%L"
+if not defined dashboard_copy_last_started_line exit /b 0
+call :dashboard_find_file_in_line dashboard_copy_last_started_line
+if defined dashboard_copy_file_found set "dashboard_copy_files_done=%dashboard_copy_file_found%"
+exit /b 0
+
+:dashboard_find_file_in_line  lineVar
+rem Caller's scope (:dashboard_find_files_done): the index in the pass's
+rem table of the file whose path ends the named line of robocopy's log
+rem before its first CR (a file's line, "...<TAB><path>", then its progress
+rem fragments), into dashboard_copy_file_found; empty if none matches. It
+rem is looked up from the count of files started onwards: a file's place in
+rem the table is never before its place among the files started, as a file
+rem robocopy could not open never starts. The line is compared by position
+rem (lengths from :strlen), never cut by FOR /F, so a "!" in a path stays.
+setlocal EnableDelayedExpansion
+set "line=!%~1!"
+set "after_first_cr="
+for %%R in ("!carriage_return!") do set "after_first_cr=!line:*%%~R=!"
+call :strlen line line_length
+set "path_end=!line_length!"
+if not "!after_first_cr!"=="!line!" (
+    call :strlen after_first_cr after_length
+    set /a "path_end=line_length - after_length - 1"
+)
+set "found="
+set /a "index=dashboard_copy_files_started"
+if !index! lss 1 set "index=1"
+:dashboard_find_file_in_line_next
+if !index! gtr %dashboard_copy_total% goto dashboard_find_file_in_line_done
+for %%N in (!index!) do (
+    set "name=!copy_pass_%dashboard_copy_pass%_file_%%N_name!"
+    set "name_length=!copy_pass_%dashboard_copy_pass%_file_%%N_name_length!"
+)
+set /a "name_start=path_end - name_length"
+if !name_start! geq 0 for %%S in (!name_start!) do for %%L in (!name_length!) do if "!line:~%%S,%%L!"=="!name!" set "found=!index!"
+if defined found goto dashboard_find_file_in_line_done
+set /a "index+=1"
+goto dashboard_find_file_in_line_next
+:dashboard_find_file_in_line_done
+endlocal & set "dashboard_copy_file_found=%found%"
+exit /b 0
+
+:dashboard_read_copy_errors
+rem Caller's scope (:dashboard_read_copy_progress, delayed expansion off):
+rem the copy's second detail line, dashboard_copy_error_text: empty while
+rem robocopy has written no ERROR line; otherwise their count and the last
+rem one (read only then, from find's output in a file: no path on a child
+rem command line). Only the outcome counts: the Copy check's result comes
+rem from robocopy's exit code, as always.
+set "dashboard_copy_error_text="
+if "%dashboard_copy_error_lines%"=="0" exit /b 0
+set "dashboard_copy_last_error="
+find "(0x" <"%temp_robocopy_unicode_output%" >"%temp_dashboard_error_lines%" 2>nul
+for /f "usebackq delims=" %%L in ("%temp_dashboard_error_lines%") do set "dashboard_copy_last_error=%%L"
+call :dashboard_error_text
+exit /b 0
+
+:dashboard_error_text
+rem Caller's scope: dashboard_copy_error_text from the count and the last
+rem ERROR line, which starts at its "ERROR" word (robocopy's local time
+rem before it is left out; a line in another language is shown whole).
+setlocal EnableDelayedExpansion
+set "text=!dashboard_copy_last_error!"
+if defined text set "text=!text:*ERROR=ERROR!"
+endlocal & set "dashboard_copy_error_text=ERROR lines: %dashboard_copy_error_lines%; latest: %text%"
+exit /b 0
+
+:dashboard_copy_detail_text
+rem Caller's scope (:dashboard_read_copy_progress): the bar's done and total
+rem (dashboard_copy_done, dashboard_copy_bar_total) and the line under the
+rem copy's bar. A files pass: files done of the total. A bytes pass: MB
+rem done, plus the share of the file in progress that its percentage gives,
+rem of the MB in all; the line gives the file in progress, its percentage
+rem (a pass without /np), the GB done and in all, and the end of the file's
+rem path, as much as fits in the line.
+set /a "dashboard_copy_current=dashboard_copy_files_done + 1"
+if %dashboard_copy_current% gtr %dashboard_copy_total% set "dashboard_copy_current=%dashboard_copy_total%"
+rem Every file done: the last one is shown at 100 %.
+if %dashboard_copy_files_done% geq %dashboard_copy_total% set "dashboard_copy_percent_of_file=100"
+if "%dashboard_copy_pass_progress%"=="bytes" goto dashboard_copy_detail_bytes
+set "dashboard_copy_done=%dashboard_copy_files_done%"
+set "dashboard_copy_bar_total=%dashboard_copy_total%"
+set "dashboard_copy_detail=%dashboard_copy_pass_label%: %dashboard_copy_files_done% of %dashboard_copy_total% files"
+exit /b 0
+:dashboard_copy_detail_bytes
+setlocal EnableDelayedExpansion
+set "done_mb=0"
+if %dashboard_copy_files_done% gtr 0 for %%N in (%dashboard_copy_files_done%) do set "done_mb=!copy_pass_%dashboard_copy_pass%_file_%%N_cumulative_mb!"
+for %%N in (%dashboard_copy_total%) do set "total_mb=!copy_pass_%dashboard_copy_pass%_file_%%N_cumulative_mb!"
+for %%N in (%dashboard_copy_current%) do (
+    set "current_name=!copy_pass_%dashboard_copy_pass%_file_%%N_name!"
+    set "current_end_mb=!copy_pass_%dashboard_copy_pass%_file_%%N_cumulative_mb!"
+)
+set /a "bar_done=done_mb + (current_end_mb - done_mb) * dashboard_copy_percent_of_file / 100"
+call :dashboard_gb_text bar_done done_gb
+call :dashboard_gb_text total_mb total_gb
+set "percent_text="
+if /i "%dashboard_copy_pass_percentages%"=="yes" set "percent_text= (%dashboard_copy_percent_of_file% %%)"
+set "detail_start=File %dashboard_copy_current% of %dashboard_copy_total%!percent_text!, !done_gb! of !total_gb! GB: "
+call :strlen detail_start detail_start_length
+set /a "name_room=OUTPUT_WIDTH - 4 - detail_start_length"
+if !name_room! lss 8 set "name_room=8"
+set /a "name_tail_length=name_room - 3"
+for %%N in (!name_room!) do if not "!current_name:~%%N!"=="" for %%T in (!name_tail_length!) do set "current_name=...!current_name:~-%%T!"
+endlocal & set "dashboard_copy_done=%bar_done%" & set "dashboard_copy_bar_total=%total_mb%" & set "dashboard_copy_detail=%detail_start%%current_name%"
+exit /b 0
+
+:dashboard_gb_text  mbVar  outVar
+rem "n.n" GB (decimal, 1000 MB) from a count of MB, rounded to the nearest
+rem tenth (owner, 2026-10-19: 3.99 GB reads 4.0).
+setlocal
+set "tenths="
+set /a "tenths=(%~1 + 50) / 100" 2>nul
+if not defined tenths set "tenths=0"
+set /a "whole=tenths / 10, fraction=tenths %% 10"
+endlocal & set "%~2=%whole%.%fraction%"
+exit /b 0
