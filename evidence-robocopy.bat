@@ -64,7 +64,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.4.1"
+set "TOOL_VERSION=2.5.0"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -267,6 +267,11 @@ set "HASH_WEIGHT_PER_FILE_UNITS=300"
 rem The listing made before each copy pass (:count_copy_pass_files): as
 rem LIST_FLAGS, with each file's exact size.
 set "COPY_COUNT_FLAGS=/l /e /xj /njh /njs /ndl /nc /fp /bytes /r:0 /w:0"
+rem The walk of the source that finds its links after the copy
+rem (:find_skipped_links): list only, /xj so a link is listed and never
+rem followed, /v so the links /xj skips are listed too, directories listed
+rem (no /ndl), no class column (localised).
+set "LINK_LIST_FLAGS=/l /e /xj /v /njh /njs /nc /fp /bytes /r:0 /w:0"
 
 rem Post-copy metadata check: robocopy in list-only mode, source against
 rem destination, lists only files it would copy, i.e. whose size or
@@ -392,6 +397,18 @@ rem with a blank line, RULE_LIGHT and a title (:write_section_heading); the
 rem header and the result block sit between RULE_HEAVY lines. BLANKS is a
 rem run of spaces to cut indents from.
 set "OUTPUT_WIDTH=79"
+rem Loops over the parts of a value (the leading or trailing spaces of a
+rem line, the lines a text wraps into, the items of a "|"-separated CONFIG
+rem list, the names in a path, the words in a record's cell) are bounded
+rem FOR /L loops, never a goto loop: a backward goto scans the whole file
+rem for its label, about 10 ms per iteration (workshop, 2026-10-20: a
+rem 3,000-character word took 34 s to wrap). Each bound is far above any
+rem real count; past it, what is left is taken as one piece.
+set "OUTPUT_MAX_INDENT=32"
+set "OUTPUT_MAX_WRAPPED_LINES=120"
+set "CONFIG_LIST_MAX_ITEMS=64"
+set "PATH_MAX_DEPTH=256"
+set "RECORD_CELL_MAX_WORDS=64"
 rem The header's Source and Destination sections side by side on the console
 rem (owner, 2026-10-20), source left, destination right, the same field on
 rem the same row, when the console window is at least this many columns
@@ -503,7 +520,7 @@ call :init_console_colour
 call :parse_args "%~1" "%~2" || goto :abort
 call :init_dashboard
 call :switch_console_to_utf8
-call :check_script_path || goto :abort
+call :init_listing_file || goto :abort
 call :read_carriage_return
 call :show_banner
 call :check_robocopy || goto :abort
@@ -519,11 +536,16 @@ rem would only return here (workshop, 2026-10-20: both seen); in MAIN
 rem "exit /b" ends this script. Nothing in the block calls a label (it would
 rem be looked for in the new file): the code page goes back inline, the scope
 rem is closed (the new run starts in the environment this one started in,
-rem plus update_script_path: the path carried across the endlocal, read
-rem with !var! so a "!" in it survives the delayed expansion the exit code
-rem needs), a scope with delayed expansion is opened for the exit code
-rem (setlocal resets ERRORLEVEL, so it comes before the child), and this
-rem script ends with the new run's exit code.
+rem plus update_script_path, the path carried across the endlocal with
+rem delayed expansion off, so a "!" in it survives), a scope with delayed
+rem expansion is opened for the exit code (setlocal resets ERRORLEVEL, so
+rem it comes before the child), and this script ends with the new run's
+rem exit code. The child cmd is given the variable's name, not the path
+rem ("%%" in this file is one "%" on the child's command line): a child cmd
+rem expands %NAME% in its command line, so a path holding "%" would be
+rem changed; the variable's value is expanded once, by the child, as it is.
+rem No CALL: CALL would expand the path a second time (round 13: "%OS%" in
+rem it became "Windows_NT", "The system cannot find the path specified.").
 if defined update_ready (
     copy /y "%update_download_path%" "%script_path%" >nul 2>&1 || goto update_replace_failed
     del /q "%update_dir%\*" >nul 2>&1
@@ -531,40 +553,38 @@ if defined update_ready (
     if not "%original_code_page%"=="unknown" chcp %original_code_page% >nul 2>&1 <nul
     endlocal & set "update_script_path=%script_path%"
     setlocal EnableDelayedExpansion
-    cmd /d /c ""!update_script_path!""
+    cmd /d /c ""%%update_script_path%%""
     exit /b !errorlevel!
 )
 if "%run_mode%"=="nonforensic" goto :main_nonforensic
 :main_after_update
 
 rem --- Forensic run (the default): log, verification and run records -------
+rem A copy run; or, by run_kind (2.5.0), a check (/check: the set given is
+rem verified in place and the check recorded in it, nothing copied) or a
+rem relocation (/relocate: the set moved within its volume, then verified at
+rem its new place and the move recorded in it). The checks before the copy
+rem read the set where it is; a relocation moves it after them, in place of
+rem the copy (:relocate_set), and the verification reads the moved set.
 call :use_log_mode
 call :ask_source_set || goto :abort
-call :ask_destination_set || goto :abort
+if "%run_kind%"=="copy" call :ask_destination_set || goto :abort
+if "%run_kind%"=="check" call :confirm_check_in_place || goto :abort
+if "%run_kind%"=="relocate" call :ask_relocation_target || goto :abort
 call :init_run || goto :abort
 call :hash_this_script
 call :read_history || goto :abort
+if not "%run_kind%"=="copy" call :require_reference_record || goto :abort
 call :check_environment
 call :check_script_against_previous_run
 call :check_location_against_previous_run
 call :choose_script_copy
 call :precheck_run_records
+if "%run_kind%"=="relocate" call :relocate_set || goto :abort
 call :write_header
 call :log_pre_copy_findings
 call :dashboard_start
-for %%P in (%COPY_PASSES%) do call :count_copy_pass_files %%P
-call :dashboard_copy_begin
-rem The copy passes, with the display's lock file held open on handle 9 for
-rem their whole duration: the display helper ends when it is released
-rem (:dashboard_helper_main). Without the live display the file is only
-rem made, and deleted with the other working files.
-(for %%P in (%COPY_PASSES%) do call :run_copy_pass %%P) 9>"%temp_dashboard_lock%"
-call :dashboard_copy_end
-call :find_skipped_links
-call :copy_custody_files
-call :work_out_copy_status
-call :dashboard_stage_result copy result_copy
-call :restore_destination_attributes
+if "%run_kind%"=="copy" (call :copy_evidence) else call :skip_copy
 call :verify_copy
 call :stage_script_copy
 call :work_out_result
@@ -580,6 +600,32 @@ call :cleanup_temp
 call :restore_console_code_page
 pause
 exit /b %exit_code%
+
+rem --- The copy step of a forensic run, by kind ----------------------------
+:copy_evidence
+rem A copy run: the passes, with the display's lock file held open on
+rem handle 9 for their whole duration: the display helper ends when it is
+rem released (:dashboard_helper_main). Without the live display the file is
+rem only made, and deleted with the other working files. Then the links
+rem the passes left behind, the custody files, the Copy check's result and
+rem the destination directory's attributes.
+for %%P in (%COPY_PASSES%) do call :count_copy_pass_files %%P
+call :dashboard_copy_begin
+(for %%P in (%COPY_PASSES%) do call :run_copy_pass %%P) 9>"%temp_dashboard_lock%"
+call :dashboard_copy_end
+call :find_skipped_links
+call :copy_custody_files
+call :work_out_copy_status
+call :dashboard_stage_result copy result_copy
+call :restore_destination_attributes
+exit /b 0
+
+:skip_copy
+rem A check or a relocation: nothing is copied; the Copy row says so (NONE)
+rem and the verification follows on the set as it is.
+call :work_out_copy_status
+call :dashboard_stage_result copy result_copy
+exit /b 0
 
 rem --- Non-forensic run (/nonforensic): a plain copy utility ---------------
 rem No log and no records; it doesn't know about custody files or histories
@@ -635,6 +681,14 @@ echo   directory holding custody files is a rerun or update (confirmed);
 echo   otherwise it must hold nothing but an empty evidence directory. Nothing
 echo   is written into another set.
 echo.
+echo /check: verifies a set in place, without copying: the SOURCE prompt only
+echo   (a set directory, or its evidence directory); every file against the
+echo   reference record, the run records against their seals and the history;
+echo   a run record and a history row are written into the set (confirmed).
+echo /relocate: moves a set to a new location on the same volume (a rename,
+echo   nothing copied), confirmed; then verifies it there as /check does and
+echo   records the move in its run record, so later copies don't warn that it
+echo   was moved by other means.
 echo /nonforensic: a plain copy utility for non-evidence copies: copies the
 echo   source directory's contents into the destination with ETA progress, no
 echo   log and no records; optional SHA-256 verification, shown on screen only.
@@ -731,10 +785,12 @@ set "copy_pass_last="
 for %%P in (%COPY_PASSES%) do set "copy_pass_last=%%P"
 set "header_written="
 set "log_ready="
+set "log_sealed="
 set "exit_code=%EXIT_CODE_FAIL%"
 set "result_script_copy=not attempted"
 set "staging_dir="
 set "staging_dir_missing="
+set "staged_relocation_path="
 set "seal_incomplete="
 set "original_code_page="
 set "history_base_path="
@@ -803,14 +859,24 @@ set "console_colour=1"
 exit /b 0
 
 :parse_args  arg1  arg2
-rem Forensic mode unless /nonforensic is given. Anything else (an unknown
-rem option, a directory dropped on the script, a second argument) stops the run,
-rem so a typo can't silently fall back to a different mode than intended.
+rem Forensic mode unless /nonforensic is given. A forensic run's kind
+rem (run_kind, 2.5.0): copy (the default), check (/check: a set verified in
+rem place, no copy) or relocate (/relocate: a set moved within its volume,
+rem then verified in place); run_kind_switch is the option's text for
+rem messages ("/check"), empty for a copy. Anything else (an unknown
+rem option, a directory dropped on the script, a second argument) stops the
+rem run, so a typo can't silently fall back to a different mode than
+rem intended.
 set "run_mode=forensic"
+set "run_kind=copy"
+set "run_kind_switch="
 set "update_requested="
 if /i "%~1"=="/nonforensic" set "run_mode=nonforensic"
 if /i "%~1"=="/update" set "update_requested=1"
-if "%run_mode%"=="forensic" if not defined update_requested if not "%~1"=="" (
+if /i "%~1"=="/check" set "run_kind=check"
+if /i "%~1"=="/relocate" set "run_kind=relocate"
+if not "%run_kind%"=="copy" set "run_kind_switch=/%run_kind%"
+if "%run_mode%"=="forensic" if not defined update_requested if "%run_kind%"=="copy" if not "%~1"=="" (
     set "abort_reason=Unknown option. Run with /? for the options."
     exit /b 1
 )
@@ -823,6 +889,8 @@ if "%run_mode%"=="forensic" (
 ) else (
     set "header_mode=non-forensic (/nonforensic): plain copy, no log or records; not for evidence"
 )
+if "%run_kind%"=="check" set "header_mode=forensic check (/check): no copy; the set verified in place, with a run record"
+if "%run_kind%"=="relocate" set "header_mode=relocation (/relocate): the set moved within its volume, then verified in place, with a run record"
 exit /b 0
 
 :switch_console_to_utf8
@@ -1033,6 +1101,7 @@ call :is_directory update_dir || (
 )
 set "temp_certutil_output=%update_dir%\certutil.tmp"
 set "temp_custody_copy=%update_dir%\custody_copy.tmp"
+set "temp_record_match=%update_dir%\record_match.tmp"
 set "msg=Latest release: %latest_release_version% (this script is %TOOL_VERSION%). Downloading it from %UPDATE_DOWNLOAD_URL%/%latest_release_tag%/ ..."
 call :show msg
 curl.exe -s -S -L -f -o "%update_download_path%" --connect-timeout %UPDATE_CHECK_MAX_SECONDS% --max-time %UPDATE_DOWNLOAD_MAX_SECONDS% "%UPDATE_DOWNLOAD_URL%/%latest_release_tag%/%UPDATE_ASSET_NAME%" 2>nul
@@ -1207,10 +1276,254 @@ goto ask_source_set_prompt
 echo.
 :ask_source_set_prompt
 call :ask_directory source_given "SOURCE directory" 1 1 || exit /b 1
-call :identify_source_set && exit /b 0
+call :identify_source_set && call :accept_source_for_run_kind && exit /b 0
 call :show identify_problem
 call :count_rejected_answer source_set_rejected_answers "source directory" || exit /b 1
 goto ask_source_set_again
+
+:accept_source_for_run_kind
+rem Caller's scope (:ask_source_set), after the set rules accepted the
+rem answer: a check or a relocation takes a set (S1, S2 or S3), never raw
+rem evidence (nothing to verify against; a first copy makes the record); a
+rem relocation never takes the set this script runs from (cmd reads this
+rem file as it goes: moving the set would move the file being read). Sets
+rem identify_problem and exits 1 otherwise.
+if "%run_kind%"=="copy" exit /b 0
+if not defined source_set_path (
+    set "identify_problem=%run_kind_switch% takes a set (its set directory, or its evidence directory): this is raw evidence (no custody files here or in the directory above), with no record to verify against. A first copy makes one."
+    exit /b 1
+)
+if not "%run_kind%"=="relocate" exit /b 0
+call :script_is_inside_set || exit /b 0
+set "identify_problem=/relocate can't move the set this script runs from (%script_dir%): run a copy of the script from somewhere else."
+exit /b 1
+
+:script_is_inside_set
+rem Exit 0 if this script's directory is the source set directory or inside
+rem it (the paths compared by prefix, ignoring case).
+setlocal EnableDelayedExpansion
+set "script_dir_test=!script_dir!"
+call :strlen source_set_with_backslash set_length
+for %%N in (!set_length!) do if /i "!script_dir_test:~0,%%N!"=="!source_set_with_backslash!" (endlocal & exit /b 0)
+endlocal & exit /b 1
+
+:confirm_check_in_place
+rem /check, once the set is known: a check writes a run record and a
+rem history row into the set it checks (owner, 2026-10-20: an unrecorded
+rem verification has no custody value), the one thing a forensic run ever
+rem writes into the set it was given; confirmed before anything else. The
+rem set then stands in for the destination (:take_set_as_destination).
+echo.
+set "msg=This verifies the set in place: %source_set_path%" & call :show msg
+echo A run record is added and the history updated; the evidence and the
+echo   earlier records are left as they are, and nothing is copied.
+echo 1. Verify it and record the check
+echo 2. Stop
+call :ask_choice check_answer "1 2" || exit /b 1
+if "%check_answer%"=="2" (
+    set "abort_reason=Stopped at the user's choice."
+    exit /b 1
+)
+call :take_set_as_destination
+exit /b 0
+
+:take_set_as_destination
+rem Caller's scope (/check): the set at source_set_path is where this run's
+rem record goes, so the destination's names point at it and the
+rem verification, the run record and the history are written as for a copy
+rem into this set (:verify_copy and :publish_records read the destination's
+rem names). A relocation points them at the set's new location instead
+rem (:ask_relocation_target).
+set "destination_set_path=%source_set_path%"
+set "destination_set_with_backslash=%source_set_with_backslash%"
+set "destination_path=%source_path%"
+set "destination_with_backslash=%source_with_backslash%"
+set "destination_set_rule=the set itself, verified in place (%run_kind_switch%)"
+set "destination_was_empty=0"
+set "destination_state_text=this set, verified in place: nothing copied (%run_kind_switch%)"
+exit /b 0
+
+:ask_relocation_target
+rem /relocate, once the set is known: where to move it (a full path that
+rem doesn't exist yet, in a directory that does, on the set's own volume:
+rem a move within a volume is a rename, instant and done or not; across
+rem volumes it would be a copy, which is what a copy run is for),
+rem confirmed. Sets relocate_from_path / _with_backslash (the set's path
+rem now) and relocate_target_path / _with_backslash, and points the
+rem destination's names at the new location: the run record goes into the
+rem moved set (:init_run names it; the move itself comes after the checks
+rem that read the set where it is: :relocate_set).
+set "relocate_from_path=%source_set_path%"
+set "relocate_from_with_backslash=%source_set_with_backslash%"
+set "relocate_rejected_answers=0"
+:ask_relocation_target_again
+echo.
+call :ask_directory relocate_target "NEW LOCATION of the set (a full path)" 0 0 || exit /b 1
+call :check_relocation_target || (
+    call :show identify_problem
+    call :count_rejected_answer relocate_rejected_answers "new location" || exit /b 1
+    goto ask_relocation_target_again
+)
+echo.
+set "msg=This moves the set %relocate_from_path% to %relocate_target_path%. The set is then verified at its new location, and the move is recorded in it."
+call :show msg
+echo 1. Move it
+echo 2. Stop
+call :ask_choice relocate_answer "1 2" || exit /b 1
+if "%relocate_answer%"=="2" (
+    set "abort_reason=Stopped at the user's choice."
+    exit /b 1
+)
+set "destination_set_path=%relocate_target_path%"
+set "destination_set_with_backslash=%relocate_target_with_backslash%"
+set "destination_path=%relocate_target_with_backslash%%evidence_directory_name%"
+set "destination_with_backslash=%destination_path%\"
+set "destination_set_rule=the set's new location (/relocate)"
+set "destination_was_empty=0"
+set "destination_state_text=the set's new location: moved here by this run from %relocate_from_path% (/relocate)"
+exit /b 0
+
+:check_relocation_target
+rem Caller's scope (:ask_relocation_target), for relocate_target_path: it
+rem must not exist, its directory must, it must not be inside the set (nor
+rem the set inside it), and it must be on the set's volume (the volume
+rem serial of both; a network path's can't be read, so a set on one isn't
+rem moved by this script). Sets identify_problem and exits 1 otherwise;
+rem relocate_from_serial is kept for the record of the move.
+set "identify_problem="
+if exist "%relocate_target_path%" (
+    set "identify_problem=The new location already exists: give a path that doesn't exist yet (the set is moved there, under that name)."
+    exit /b 1
+)
+set "normalise_path_input=%relocate_target_path%\.."
+call :normalise_path || (
+    set "identify_problem=The new location's directory couldn't be worked out."
+    exit /b 1
+)
+set "relocate_target_parent_path=%normalise_path_result%"
+set "relocate_target_parent_with_backslash=%normalise_path_with_backslash%"
+call :is_directory relocate_target_parent_with_backslash || (
+    set "identify_problem=The new location's directory doesn't exist: %relocate_target_parent_path%"
+    exit /b 1
+)
+set "overlap_first_with_backslash=%relocate_from_with_backslash%"
+set "overlap_second_with_backslash=%relocate_target_with_backslash%"
+call :paths_overlap && (
+    set "identify_problem=The new location is inside the set, or the set would be inside it: a set can't be moved into itself."
+    exit /b 1
+)
+call :describe_volume "%relocate_from_path:~0,2%" relocate_from_volume_text relocate_from_filesystem relocate_from_serial relocate_from_volume_label_and_filesystem
+call :describe_volume "%relocate_target_path:~0,2%" relocate_target_volume_text relocate_target_filesystem relocate_target_serial relocate_target_volume_label_and_filesystem
+if "%relocate_from_serial%"=="n/a" (
+    set "identify_problem=The set is on a network path, whose volume can't be read: /relocate moves a set within one volume only."
+    exit /b 1
+)
+if "%relocate_target_serial%"=="n/a" (
+    set "identify_problem=The new location is on a network path, whose volume can't be read: /relocate moves a set within one volume only."
+    exit /b 1
+)
+if "%relocate_from_serial%"=="unknown" (
+    set "identify_problem=The set's volume serial couldn't be read, so the move can't be confirmed to stay on one volume."
+    exit /b 1
+)
+if /i not "%relocate_from_serial%"=="%relocate_target_serial%" (
+    set "identify_problem=The new location is on another volume (serial %relocate_target_serial%; the set's is %relocate_from_serial%): /relocate moves a set within one volume only. To put a set on another volume, copy it there."
+    exit /b 1
+)
+exit /b 0
+
+:require_reference_record
+rem A check or a relocation, once the history is read: the set must name a
+rem reference record (row 1 of a usable history) to verify against; without
+rem one the set's own files would be hashed as the reference and the
+rem verification would pass vacuously (unknown is not passed). A set with
+rem run records but no usable history has none either. Before a relocation
+rem moves anything: the set stays where it is.
+if defined reference_run exit /b 0
+set "abort_reason=The set has no reference record to verify against (no usable history naming its first run's hash record), so %run_kind_switch% can't verify it. A first copy of the evidence makes a reference record."
+if "%run_kind%"=="relocate" set "abort_reason=%abort_reason% The set wasn't moved."
+exit /b 1
+
+:relocate_set
+rem /relocate, after every check that reads the set at its old path: move
+rem the set, one rename within its volume (done or not), then point the run
+rem at its new path: the source names (the set is this run's source too)
+rem and the history this run continues; the destination names already name
+rem the new location. A move that fails leaves the set where it was, and
+rem the run stops with the reason; a state the move shouldn't leave (both
+rem paths present, or neither) stops it too, for the user to look at before
+rem anything else. The move is recorded in the run record
+rem (:write_relocation_record), sealed with it.
+set "msg=Moving %relocate_from_path% to %relocate_target_path% ..."
+call :show msg
+move "%relocate_from_path%" "%relocate_target_path%" >nul 2>&1
+set "relocate_move_exit_code=%errorlevel%"
+set "relocate_old_present="
+set "relocate_new_present="
+call :is_directory relocate_from_with_backslash && set "relocate_old_present=1"
+call :is_directory relocate_target_with_backslash && set "relocate_new_present=1"
+if defined relocate_old_present if not defined relocate_new_present (
+    set "abort_reason=The set couldn't be moved (move's exit code %relocate_move_exit_code%: a file in it may be open, or the new location may not be writable). Nothing was changed: the set is still at %relocate_from_path%."
+    exit /b 1
+)
+if defined relocate_old_present if defined relocate_new_present (
+    set "abort_reason=After the move both %relocate_from_path% and %relocate_target_path% exist: check both before doing anything else. Nothing of this run is recorded."
+    exit /b 1
+)
+if not defined relocate_new_present (
+    set "abort_reason=After the move neither %relocate_from_path% nor %relocate_target_path% holds the set: check the volume before doing anything else. Nothing of this run is recorded."
+    exit /b 1
+)
+set "msg=Moved. The set is verified at its new location below."
+call :show msg
+for %%V in (source_set_path source_set_with_backslash source_path source_with_backslash history_base_path history_base_set_with_backslash source_history_path) do call :repoint_relocated_path %%V
+call :write_relocation_record
+exit /b 0
+
+:repoint_relocated_path  pathVar
+rem (:relocate_set) If the variable holds the set's old path, or a path
+rem inside it, replace that part with the new location. Delayed expansion
+rem off at the hand-back, so "!" and "%" in the path survive.
+setlocal EnableDelayedExpansion
+set "value=!%~1!"
+set "value_with_backslash=!value!\"
+set "repointed="
+if /i "!value_with_backslash!"=="!relocate_from_with_backslash!" set "repointed=!relocate_target_path!"
+if /i "!value!"=="!relocate_from_with_backslash!" set "repointed=!relocate_target_with_backslash!"
+if not defined repointed call :relative_path value relocate_from_with_backslash value_rest && set "repointed=!relocate_target_with_backslash!!value_rest!"
+if not defined repointed (endlocal & exit /b 0)
+endlocal & set "%~1=%repointed%"
+exit /b 0
+
+:write_relocation_record
+rem /relocate, after the move: the record of it, a file of its own in this
+rem run's record (staged_relocation_path, sealed with the others: a later
+rem 2.x adds information as new files in the run record, contract), saying
+rem what was moved, from where to where, when, by whom and on what. The
+rem history row has the old path as the source and the new as the
+rem destination; this file says the row records a move, not a copy. Each
+rem line through :append_line_to_file (a path may hold "!" or "&").
+set "staged_relocation_path=%staged_records_dir%\%record_file_stem%_relocation.txt"
+call :describe_user relocation_user
+call :describe_host relocation_host
+type nul >"%staged_relocation_path%"
+set "relocation_line=Relocation: the set was moved within its volume, not copied (/relocate)."
+call :append_line_to_file relocation_line staged_relocation_path
+set "relocation_line=  Moved by      : %TOOL_NAME% %TOOL_VERSION%"
+call :append_line_to_file relocation_line staged_relocation_path
+set "relocation_line=  From          : %relocate_from_path%"
+call :append_line_to_file relocation_line staged_relocation_path
+set "relocation_line=  To            : %relocate_target_path%"
+call :append_line_to_file relocation_line staged_relocation_path
+set "relocation_line=  When (UTC)    : %start_utc_iso%"
+call :append_line_to_file relocation_line staged_relocation_path
+set "relocation_line=  By            : %relocation_user%"
+call :append_line_to_file relocation_line staged_relocation_path
+set "relocation_line=  On            : %relocation_host%"
+call :append_line_to_file relocation_line staged_relocation_path
+set "relocation_line=  Volume serial : %relocate_from_serial%"
+call :append_line_to_file relocation_line staged_relocation_path
+exit /b 0
 
 :find_default_source_set
 rem S1: offer the script's own directory for Enter when it is a set directory
@@ -1263,12 +1576,6 @@ set "inspect_directory_with_backslash=%source_set_with_backslash%"
 call :inspect_set_directory
 call :check_set_directory_contents source || exit /b 1
 set "evidence_directory_name=%inspect_evidence_name%"
-rem The evidence directory's name is found, not typed, so the prompt's check
-rem for "%" doesn't cover it (review, 2026-10-16): same rule, same reason.
-call :path_has_percent evidence_directory_name && (
-    set "identify_problem=The set's evidence directory name contains %%, which can't be handled safely yet: rename it or choose another set."
-    exit /b 1
-)
 set "source_path=%source_set_with_backslash%%evidence_directory_name%"
 set "source_with_backslash=%source_path%\"
 call :name_directory_for_copy source_set_path set_directory_name
@@ -1507,7 +1814,8 @@ set "inspect_unexpected_count=0"
 set "inspect_unexpected_name="
 set "inspect_directory_is_drive_root="
 call :is_drive_root inspect_directory_with_backslash && set "inspect_directory_is_drive_root=1"
-for /f "eol=/ delims=" %%E in ('dir /b /a "%inspect_directory_with_backslash%" 2^>nul') do (
+call :list_directory "/b /a" inspect_directory_with_backslash temp_directory_listing
+for /f "usebackq eol=/ delims=" %%E in ("%temp_directory_listing%") do (
     set "inspect_entry_name=%%E"
     call :inspect_set_directory_entry
 )
@@ -1545,26 +1853,42 @@ endlocal & exit /b 0
 
 :name_matches_list  nameVar  listVar
 rem Exit 0 if the name matches an item of the "|"-separated list: an exact
-rem name, or a prefix ending in "*" (case-insensitive).
+rem name, or a prefix ending in "*" (case-insensitive). The items are CONFIG
+rem values (safe in FOR values with delayed expansion on); the name is read
+rem with !var! only. A FOR /L over the items, never a goto (section 6 of
+rem the conventions); a prefix's length is measured here rather than by
+rem :strlen, which sits far below this per-item helper.
 setlocal EnableDelayedExpansion
 set "name=!%~1!"
 set "remaining=!%~2!"
-:name_matches_list_next
-if not defined remaining (endlocal & exit /b 1)
-set "pattern="
-for /f "tokens=1* delims=|" %%A in ("!remaining!") do (
-    set "pattern=%%A"
-    set "remaining=%%B"
+set "matched="
+for /l %%I in (1,1,%CONFIG_LIST_MAX_ITEMS%) do if not defined matched if defined remaining (
+    set "pattern="
+    for /f "tokens=1* delims=|" %%A in ("!remaining!") do (
+        set "pattern=%%A"
+        set "remaining=%%B"
+    )
+    if defined pattern call :name_matches_pattern
 )
-if not defined pattern (endlocal & exit /b 1)
+if defined matched (endlocal & exit /b 0)
+endlocal & exit /b 1
+
+:name_matches_pattern
+rem Caller's scope (:name_matches_list, delayed expansion on): set matched
+rem if the name matches the pattern (an exact name, or a prefix before "*").
 if not "!pattern:~-1!"=="*" (
-    if /i "!name!"=="!pattern!" (endlocal & exit /b 0)
-    goto name_matches_list_next
+    if /i "!name!"=="!pattern!" set "matched=1"
+    exit /b 0
 )
 set "prefix=!pattern:~0,-1!"
-call :strlen prefix prefix_length
-for %%N in (!prefix_length!) do if /i "!name:~0,%%N!"=="!prefix!" (endlocal & exit /b 0)
-goto name_matches_list_next
+set "prefix_measure=!prefix!#"
+set "prefix_length=0"
+for %%P in (256 128 64 32 16 8 4 2 1) do if not "!prefix_measure:~%%P,1!"=="" (
+    set /a "prefix_length+=%%P"
+    set "prefix_measure=!prefix_measure:~%%P!"
+)
+for %%N in (!prefix_length!) do if /i "!name:~0,%%N!"=="!prefix!" set "matched=1"
+exit /b 0
 
 :name_directory_for_copy  pathVar  outVar
 rem The name a copied directory takes: its own name, or for a drive root its
@@ -1593,9 +1917,6 @@ for /f "tokens=1* delims=:" %%A in ('fsutil fsinfo volumeinfo %volume_drive% 2^>
     set "label=%%B"
 )
 if defined label set "label=%label:~1%"
-rem A label containing "%" would make a path the prompts refuse (see
-rem :path_has_percent): use the serial instead.
-if defined label call :path_has_percent label && set "label="
 if defined label (endlocal & set "%~2=%label%" & exit /b 0)
 set "serial=unknown"
 for /f "skip=1 tokens=*" %%L in ('vol %volume_drive% 2^>nul') do for %%T in (%%L) do set "serial=%%T"
@@ -1641,7 +1962,8 @@ rem other than, at a drive root, the items of DRIVE_ROOT_HOUSEKEEPING_DIRS and
 rem _FILES.
 call :is_directory destination_with_backslash || exit /b 1
 set "destination_entry_count=0"
-for /f "eol=/ delims=" %%E in ('dir /b /a "%destination_with_backslash%" 2^>nul') do set /a "destination_entry_count+=1"
+call :list_directory "/b /a" destination_with_backslash temp_directory_listing
+for /f "usebackq eol=/ delims=" %%E in ("%temp_directory_listing%") do set /a "destination_entry_count+=1"
 call :find_drive_root_housekeeping destination no
 if %destination_entry_count% gtr %housekeeping_item_count% exit /b 0
 exit /b 1
@@ -1700,11 +2022,7 @@ set "staged_history_path=%staged_records_dir%\%record_file_stem%_history.csv"
 set "staged_outside_history_path=%staged_records_dir%\%record_file_stem%_runs_outside_history.csv"
 set "staged_seal_path=%staged_records_dir%\%seal_file_name%"
 set "staged_root_history_path=%staged_root_dir%\%HISTORY_FILE_NAME%"
-call :is_directory destination_set_with_backslash || mkdir "%destination_set_path%" >nul 2>&1
-call :is_directory destination_set_with_backslash || (
-    set "abort_reason=Could not create the destination set directory."
-    exit /b 1
-)
+if "%run_kind%"=="copy" call :make_destination_set_directory || exit /b 1
 set "destination_attributes_before="
 call :is_directory destination_with_backslash && for %%A in ("%destination_path%") do set "destination_attributes_before=%%~aA"
 mkdir "%staged_records_dir%" >nul 2>&1
@@ -1721,6 +2039,16 @@ if defined staging_dir_missing (
 )
 set "log_ready=1"
 exit /b 0
+
+:make_destination_set_directory
+rem (:init_run, a copy run) The destination set directory, made if it
+rem isn't there. A check's is the set itself; a relocation's is made by
+rem the move (:relocate_set): making it first would put the moved set
+rem inside it.
+call :is_directory destination_set_with_backslash || mkdir "%destination_set_path%" >nul 2>&1
+call :is_directory destination_set_with_backslash && exit /b 0
+set "abort_reason=Could not create the destination set directory."
+exit /b 1
 
 :init_plain_run
 rem Non-forensic run: no record, so a UTC time is welcome but not required.
@@ -1803,6 +2131,22 @@ set "temp_dashboard_copy_tail=%temp_path_prefix%_dashboard_copy_tail.tmp"
 set "temp_dashboard_started_lines=%temp_path_prefix%_dashboard_started_lines.tmp"
 set "temp_dashboard_error_lines=%temp_path_prefix%_dashboard_error_lines.tmp"
 set "temp_copy_pass_listing=%temp_path_prefix%_copy_pass_listing.tmp"
+rem The FOR /F rework's files (2.5.0): every listing or search a loop reads
+rem goes to a file first and is read from there (:list_directory), so no
+rem path, record value or TEMP path goes on a child cmd's command line. One
+rem file per loop that can run inside another: the records directory's
+rem listing (temp_directory_listing, the prompt-time listings too: set by
+rem :init_listing_file) holds a run record's file listing
+rem (temp_record_files_listing) inside it; the history's numbered lines
+rem (temp_history_numbered) hold a sealed history's (the _second) inside.
+set "temp_record_files_listing=%temp_path_prefix%_record_files_listing.tmp"
+set "temp_history_numbered=%temp_path_prefix%_history_numbered.tmp"
+set "temp_history_numbered_second=%temp_path_prefix%_history_numbered_second.tmp"
+set "temp_record_match=%temp_path_prefix%_record_match.tmp"
+set "temp_robocopy_numbered=%temp_path_prefix%_robocopy_numbered.tmp"
+set "temp_link_listing=%temp_path_prefix%_link_listing.tmp"
+set "temp_summary_warnings_wrapped=%temp_path_prefix%_summary_warnings_wrapped.tmp"
+set "temp_summary_failures_wrapped=%temp_path_prefix%_summary_failures_wrapped.tmp"
 exit /b 0
 
 :hash_this_script
@@ -1837,7 +2181,10 @@ set "source_history_sealed_run="
 set "source_history_superseded="
 if defined source_set_path call :resolve_set_history source
 if "%source_history_origin%"=="missing" set "history_base_missing=1"
-call :resolve_set_history destination
+rem A check's destination is the set itself (resolved once, as the
+rem source); a relocation's doesn't exist yet: neither has a history of
+rem its own to choose from.
+if "%run_kind%"=="copy" (call :resolve_set_history destination) else call :clear_destination_history
 call :continue_destination_history_instead && goto read_history_base_chosen
 set "history_base_path=%source_history_path%"
 set "history_base_side=source"
@@ -1858,6 +2205,16 @@ set /a "source_history_newest_line=source_history_row_count + 1"
 if %source_history_row_count% gtr 0 call :read_history_row source_history_path %source_history_newest_line% source_last
 set /a "this_run_number=history_row_count + 1"
 call :describe_history_for_header
+exit /b 0
+
+:clear_destination_history
+rem Caller's scope (:read_history): the destination's history variables as
+rem :resolve_set_history leaves them for a set with no history and no run
+rem records.
+set "destination_history_path="
+set "destination_history_origin=none"
+set "destination_history_problem="
+set "destination_history_sealed_run="
 exit /b 0
 
 :continue_destination_history_instead
@@ -1959,7 +2316,9 @@ setlocal DisableDelayedExpansion
 call :copy_variable %~1 records_root
 call :is_directory records_root || (endlocal & exit /b 1)
 set "holds_records="
-for /f "eol=/ delims=" %%E in ('dir /b /a "%records_root%\" 2^>nul') do if not defined holds_records (
+set "records_root_with_backslash=%records_root%\"
+call :list_directory "/b /a" records_root_with_backslash temp_directory_listing
+for /f "usebackq eol=/ delims=" %%E in ("%temp_directory_listing%") do if not defined holds_records (
     set "records_entry=%%E"
     call :records_entry_counts && set "holds_records=1"
 )
@@ -1987,7 +2346,9 @@ rem Its own pending seal text is filled in with its seal's SHA-256, into
 rem temp_sealed_history_<side> (sets head_run); exit 0 only if that history
 rem matches the run records.
 set "head_run="
-for /f "eol=/ delims=" %%R in ('dir /b /ad /on "%resolve_records_root%\" 2^>nul') do (
+set "resolve_records_root_with_backslash=%resolve_records_root%\"
+call :list_directory "/b /ad /on" resolve_records_root_with_backslash temp_directory_listing
+for /f "usebackq eol=/ delims=" %%R in ("%temp_directory_listing%") do (
     set "head_candidate_run=%%R"
     call :is_run_directory_name head_candidate_run && set "head_run=%%R"
 )
@@ -2042,7 +2403,8 @@ rem The number of runs in a history: its lines, less the header.
 setlocal EnableDelayedExpansion
 set "lines=0"
 call :copy_for_reading %~1 temp_custody_copy
-for /f %%N in ('find /c /v "" ^< "!temp_custody_copy!" 2^>nul') do set "lines=%%N"
+find /c /v "" <"!temp_custody_copy!" >"!temp_count!" 2>nul
+for /f "usebackq" %%N in ("!temp_count!") do set "lines=%%N"
 set /a "rows=lines - 1"
 if !rows! lss 0 set "rows=0"
 endlocal & set "%~2=%rows%"
@@ -2060,7 +2422,8 @@ for %%F in (run result source source_serial source_volume_label_and_filesystem d
 call :copy_variable %~1 read_history_row_file
 set "history_row_line="
 call :copy_for_reading read_history_row_file temp_custody_copy
-for /f "tokens=1* delims=:" %%A in ('findstr /n "^" "%temp_custody_copy%" 2^>nul') do if "%%A"=="%~2" set "history_row_line=%%B"
+findstr /n "^" "%temp_custody_copy%" >"%temp_history_numbered%" 2>nul
+for /f "usebackq tokens=1* delims=:" %%A in ("%temp_history_numbered%") do if "%%A"=="%~2" set "history_row_line=%%B"
 if not defined history_row_line exit /b 1
 call :split_history_line %~3
 exit /b %errorlevel%
@@ -2108,9 +2471,11 @@ setlocal DisableDelayedExpansion
 call :copy_for_reading short_file temp_custody_copy_second
 call :copy_for_reading long_file temp_custody_copy
 set "short_lines=0"
-for /f %%N in ('find /c /v "" ^< "%temp_custody_copy_second%" 2^>nul') do set "short_lines=%%N"
+find /c /v "" <"%temp_custody_copy_second%" >"%temp_count%" 2>nul
+for /f "usebackq" %%N in ("%temp_count%") do set "short_lines=%%N"
 type nul >"%temp_history_lines%"
-for /f "tokens=1* delims=:" %%A in ('findstr /n "^" "%temp_custody_copy%" 2^>nul') do if %%A leq %short_lines% >>"%temp_history_lines%" echo(%%B
+findstr /n "^" "%temp_custody_copy%" >"%temp_history_numbered_second%" 2>nul
+for /f "usebackq tokens=1* delims=:" %%A in ("%temp_history_numbered_second%") do if %%A leq %short_lines% >>"%temp_history_lines%" echo(%%B
 fc /b "%temp_custody_copy_second%" "%temp_history_lines%" >nul 2>&1
 set "starts_with_exit_code=%errorlevel%"
 endlocal & endlocal & exit /b %starts_with_exit_code%
@@ -2177,7 +2542,8 @@ if "%version_order%"=="newer" (
 set "previous_log=%previous_run_dir%\%RECORD_FILE_PREFIX%%previous_run%.log"
 set "previous_script_sha256="
 call :copy_for_reading previous_log temp_custody_copy
-for /f "tokens=1* delims=:" %%A in ('findstr /b /c:"  Script SHA-256      : " "%temp_custody_copy%" 2^>nul') do set "previous_script_sha256=%%B"
+findstr /b /c:"  Script SHA-256      : " "%temp_custody_copy%" >"%temp_record_match%" 2>nul
+for /f "usebackq tokens=1* delims=:" %%A in ("%temp_record_match%") do set "previous_script_sha256=%%B"
 call :clean_sha256_from_record previous_script_sha256
 if not exist "%previous_log%" (
     set "msg=Script: the SHA-256 can't be compared: the previous run's record has no log."
@@ -2216,11 +2582,7 @@ rem has none), without putting the text on a command line: it comes from a
 rem record. The result is checked by the caller (e.g. :parse_version).
 setlocal EnableDelayedExpansion
 set "word=!%~1!"
-:last_word_next
-if defined word if not "!word: =!"=="!word!" (
-    set "word=!word:* =!"
-    goto last_word_next
-)
+for /l %%I in (1,1,%RECORD_CELL_MAX_WORDS%) do if defined word if not "!word: =!"=="!word!" set "word=!word:* =!"
 endlocal & set "%~2=%word%"
 exit /b 0
 
@@ -2278,7 +2640,9 @@ rem ignoring the drive letter and case, are compared with that run's
 rem destination (the newest row of the source's history). Warnings only;
 rem a different drive letter alone isn't flagged. A source set with run
 rem records whose history gives no newest row can't be checked: a warning
-rem says so (owner, 2026-10-16, after test round 7).
+rem says so (owner, 2026-10-16, after test round 7). A relocation runs this
+rem before its move, on the set where it is: a set moved by hand before is
+rem still flagged, and the new location goes into this run's row.
 if not defined source_set_path exit /b 0
 if not defined source_last_run if not "%source_history_origin%"=="none" (
     set "msg=Location: not checked: the source set's history can't be used, so where the run that made the set copied it isn't known."
@@ -2347,7 +2711,9 @@ rem only a .partial has no earlier runs). Each name is warned about once
 rem (temp_partial_warned), also by :check_run_records after the copy.
 call :copy_variable %~1_set_with_backslash precheck_partial_set
 if not defined precheck_partial_set exit /b 0
-for /f "eol=/ delims=" %%R in ('dir /b /ad "%precheck_partial_set%%RECORDS_DIR_NAME%\" 2^>nul') do (
+set "precheck_partial_records_root=%precheck_partial_set%%RECORDS_DIR_NAME%\"
+call :list_directory "/b /ad" precheck_partial_records_root temp_directory_listing
+for /f "usebackq eol=/ delims=" %%R in ("%temp_directory_listing%") do (
     set "record_directory_name=%%R"
     call :precheck_partial_directory
 )
@@ -2490,6 +2856,11 @@ rem :init_dashboard): then the log gets its column and the console the
 rem pairs (:write_header_set_pairs).
 set "header_source_set=none: raw evidence (a first copy)"
 if defined source_set_path set "header_source_set=%source_set_with_backslash%"
+set "header_source_evidence=%source_with_backslash%"
+rem A relocation's source is the set where it was (the checks before the
+rem move read it there); the Destination section has its new location.
+if "%run_kind%"=="relocate" set "header_source_set=%relocate_from_with_backslash% (before this run's move)"
+if "%run_kind%"=="relocate" set "header_source_evidence=%relocate_from_with_backslash%%evidence_directory_name%\ (before this run's move)"
 set "header_records=%destination_run_dir%\"
 if defined header_side_by_side (
     call :write_header_set_fields log
@@ -2503,7 +2874,7 @@ rem the console, the log or both.
 set "msg=" & call :emit_free_text msg %~1
 set "msg=Source" & call :emit_free_text msg %~1
 call :log_field "Set directory" header_source_set %~1
-call :log_field "Evidence directory" source_with_backslash %~1
+call :log_field "Evidence directory" header_source_evidence %~1
 call :log_field "Chosen" source_set_rule %~1
 call :log_field "Volume" header_source_volume %~1
 call :log_housekeeping source "Skipped at root" %~1
@@ -2536,7 +2907,7 @@ call :describe_housekeeping_for_pair source pair_source_root_text
 set "msg=" & call :show msg
 call :emit_pair_titles Source Destination
 call :emit_field_pair "Set dir" header_source_set "Set dir" destination_set_with_backslash
-call :emit_field_pair "Evidence" source_with_backslash "Evidence" destination_with_backslash
+call :emit_field_pair "Evidence" header_source_evidence "Evidence" destination_with_backslash
 call :emit_field_pair "Chosen" source_set_rule "Chosen" destination_set_rule
 call :emit_field_pair "Volume" header_source_volume "Volume" header_destination_volume
 call :emit_field_pair "At root" pair_source_root_text "Was" destination_state_text
@@ -2611,9 +2982,11 @@ rem line's value column, continuations one column right of it; a break at
 rem the last space or after the last backslash that fits (a path breaks
 rem between its names); failing those, after the last "_", "." or "-"
 rem that fits (a name longer than the column breaks between its parts:
-rem round 12.13); else after the last character that fits (a part longer
-rem than the column is cut here, on the console only; the log holds it
-rem whole). A FOR /L, never a goto, per piece.
+rem round 12.13), a "." only when five or more characters follow it (round
+rem 12.15: "evidence-robocopy_<UTC>." left "log" alone on a row); else
+rem after the last character that fits (a part longer than the column is
+rem cut here, on the console only; the log holds it whole). A FOR /L,
+rem never a goto, per piece.
 set "wrap_label=%~1!BLANKS!"
 set "wrap_prefix=  !wrap_label:~0,%HEADER_PAIR_LABEL_WIDTH%!: "
 set "wrap_text=!%~2!"
@@ -2633,7 +3006,8 @@ for /l %%S in (1,1,200) do if defined wrap_text (
         )
         if not defined wrap_break_at for /l %%I in (!wrap_room!,-1,1) do if not defined wrap_break_at (
             set "wrap_head=!wrap_text:~0,%%I!"
-            for %%C in (_ . -) do if "!wrap_head:~-1!"=="%%C" set "wrap_break_at=%%I"
+            for %%C in (_ -) do if "!wrap_head:~-1!"=="%%C" set "wrap_break_at=%%I"
+            if "!wrap_head:~-1!"=="." if not "!wrap_text:~%%I,5!"=="!wrap_text:~%%I,4!" set "wrap_break_at=%%I"
         )
         if defined wrap_break_at for %%B in (!wrap_break_at!) do (
             set "wrap_piece=!wrap_text:~0,%%B!"
@@ -2737,6 +3111,8 @@ for %%P in (%COPY_PASSES%) do (
 )
 set "writes=unbuffered (robocopy /j), evidence and custody records: verification reads file contents from the drive"
 if "%run_mode%"=="nonforensic" set "writes=unbuffered (robocopy /j): verification reads file contents from the drive"
+if not "%run_kind%"=="copy" set "writes=the run record only, unbuffered (robocopy /j): nothing copied (%run_kind_switch%)"
+if not "%run_kind%"=="copy" set "buffered_passes="
 if defined buffered_passes (
     set "writes=buffered for: !buffered_passes:~2!"
     set "msg=Copy pass without /j (!buffered_passes:~2!): its files may be verified from the Windows cache rather than read back from the drive."
@@ -2746,24 +3122,76 @@ endlocal & set "header_writes=%writes%"
 exit /b 0
 
 :find_skipped_links
-rem After the copy passes. Links in the source (the L attribute: junctions
-rem and symbolic links, which robocopy doesn't follow or copy with /xj) that
-rem are not in the destination: each is a warning, since what it points to
-rem is not part of this copy. Other reparse points that robocopy did copy
-rem (e.g. cloud placeholder files) are left alone: only the outcome counts. A
-rem link inside a link that wasn't copied isn't listed again: DIR /S looks
-rem inside links, and lists what is inside one after other links, not
-rem straight after it (test round 7), so each link's directories are checked.
-for /f "eol=/ delims=" %%L in ('dir /s /b /a:l "%source_with_backslash%" 2^>nul') do (
-    set "skipped_link_path=%%L"
-    call :report_skipped_link
+rem After the copy passes. Links in the source (junctions and symbolic
+rem links: the L attribute), which robocopy doesn't follow or copy (/xj),
+rem that are not in the destination: each is a warning, since what it
+rem points to is not part of this copy. Other reparse points that robocopy
+rem did copy (e.g. cloud placeholder files) are left alone: only the
+rem outcome counts. The source is walked by robocopy itself
+rem (LINK_LIST_FLAGS): a link is listed once and never followed, so a loop
+rem of junctions ends at once and nothing inside a skipped link is listed
+rem (round 12.2's probe; before 2.5.0, DIR /S walked into every link: a
+rem junction back to its parent was walked to the path-length limit, round
+rem 7). The listing is read numbered, as every listing (section 6), and
+rem each line's attributes are read in-process (FOR %%~a: an "l" at
+rem position 9 is a link) with delayed expansion off, so "!" and "%" in a
+rem path stay and no path goes on a child command line. A walk robocopy
+rem couldn't complete, and lines cmd couldn't carry (over about 8,000
+rem characters), give one warning each: a link there, if any, isn't
+rem listed. Links are findings, not a check: a warning never changes the
+rem verdict.
+setlocal EnableDelayedExpansion
+set "excluded_dirs="
+set "excluded_files="
+call :add_housekeeping_exclusions source
+call :build_exclusion_args
+robocopy "!source_with_backslash! " "!temp_path_prefix!_nonexistent" *.* !LINK_LIST_FLAGS! !backup_flag! !exclusion_args! /unilog:"!temp_robocopy_unicode_output!" >nul 2>&1
+set "link_list_exit_code=!errorlevel!"
+call :save_robocopy_unicode_output temp_link_listing new
+set "link_listing_incomplete="
+if !link_list_exit_code! geq 8 set "link_listing_incomplete=1"
+call :is_robocopy_exit_code_in_range link_list_exit_code || set "link_listing_incomplete=1"
+if not "!robocopy_output_lines_written!"=="!robocopy_output_lines_total!" set "link_listing_incomplete=1"
+endlocal & set "link_listing_incomplete=%link_listing_incomplete%"
+if defined link_listing_incomplete (
+    set "msg=Links in the source couldn't all be looked for: robocopy's walk of the source didn't complete, or a line of it couldn't be read. A link it holds, if any, isn't listed here."
+    call :add_warning msg
+)
+call :number_listing temp_link_listing
+set "link_lines_handled=0"
+for /f "usebackq tokens=1* delims=:" %%A in ("%temp_listing_numbered%") do (
+    set "link_candidate_path="
+    for /f "tokens=1*" %%S in ("%%B") do set "link_candidate_path=%%T"
+    call :check_listed_link
+)
+if %link_lines_handled% neq %listing_line_count% (
+    set "msg=Links in the source: %link_lines_handled% of the %listing_line_count% lines of robocopy's walk could be read (cmd can't carry a line over 8000 characters). A link on one of the others, if any, isn't listed here."
+    call :add_warning msg
 )
 exit /b 0
 
+:check_listed_link
+rem Caller's scope (:find_skipped_links, delayed expansion off): one line
+rem of robocopy's walk, in link_candidate_path (a file, or a directory with
+rem its trailing backslash; empty for a line that names no path). A link
+rem (the L attribute) that isn't in the destination is reported. The source
+rem directory's own line is passed over: its contents were copied whatever
+rem it is.
+set /a "link_lines_handled+=1"
+if not defined link_candidate_path exit /b 0
+if /i "%link_candidate_path%"=="%source_with_backslash%" exit /b 0
+if "%link_candidate_path:~-1%"=="\" set "link_candidate_path=%link_candidate_path:~0,-1%"
+set "link_candidate_attributes="
+for %%A in ("%link_candidate_path%") do set "link_candidate_attributes=%%~aA"
+if not defined link_candidate_attributes exit /b 0
+if not "%link_candidate_attributes:~8,1%"=="l" exit /b 0
+set "skipped_link_path=%link_candidate_path%"
+call :report_skipped_link
+exit /b 0
+
 :report_skipped_link
-rem Caller's scope (:find_skipped_links): one link, in skipped_link_path.
+rem Caller's scope (:check_listed_link): one link, in skipped_link_path.
 call :link_was_copied skipped_link_path && exit /b 0
-call :is_inside_skipped_link skipped_link_path && exit /b 0
 set "msg=Not copied: %skipped_link_path% is a link (a junction or symbolic link), which robocopy doesn't follow (/xj): what it points to is not part of this copy."
 call :add_warning msg
 set "msg=[WARN] %msg%"
@@ -2777,41 +3205,22 @@ call :relative_path %~1 source_with_backslash link_relative_path || (endlocal & 
 if exist "!destination_with_backslash!!link_relative_path!" (endlocal & exit /b 0)
 endlocal & exit /b 1
 
-:is_inside_skipped_link  linkPathVar
-rem Exit 0 if one of the directories between the source and the link is
-rem itself a link that wasn't copied (reported already, or inside one that
-rem was). Walks up from the link's directory to the source.
-setlocal DisableDelayedExpansion
-call :copy_variable %~1 enclosing_path
-:is_inside_skipped_link_up
-set "previous_enclosing_path=%enclosing_path%"
-for %%A in ("%enclosing_path%\..") do set "enclosing_path=%%~fA"
-if "%enclosing_path:~-1%"=="\" set "enclosing_path=%enclosing_path:~0,-1%"
-if /i "%enclosing_path%"=="%previous_enclosing_path%" (endlocal & exit /b 1)
-if /i "%enclosing_path%\"=="%source_with_backslash%" (endlocal & exit /b 1)
-set "enclosing_with_backslash=%enclosing_path%\"
-call :path_is_under enclosing_with_backslash source_with_backslash || (endlocal & exit /b 1)
-set "enclosing_attributes="
-for %%A in ("%enclosing_path%") do set "enclosing_attributes=%%~aA"
-if not "%enclosing_attributes:~8,1%"=="l" goto is_inside_skipped_link_up
-call :link_was_copied enclosing_path && goto is_inside_skipped_link_up
-endlocal & exit /b 0
-
-:path_is_under  pathVar  prefixVar
-rem Exit 0 if the path starts with the prefix (a directory path ending in
-rem "\"), ignoring case.
-setlocal EnableDelayedExpansion
-call :relative_path %~1 %~2 path_is_under_rest || (endlocal & exit /b 1)
-endlocal & exit /b 0
-
 :find_recovered_dirs  pattern
 rem :each_item callback: the directories matching one pattern at
-rem callback_drive_root.
-for /f "eol=/ delims=" %%F in ('dir /b /ad "%callback_drive_root%%~1" 2^>nul') do call :add_recovered_dir "%%F"
+rem callback_drive_root. Each name goes to its helper by variable (a CALL
+rem argument is expanded a second time, so a "%" in a name would change).
+set "callback_pattern_path=%callback_drive_root%%~1"
+call :list_directory "/b /ad" callback_pattern_path temp_directory_listing
+for /f "usebackq eol=/ delims=" %%F in ("%temp_directory_listing%") do (
+    set "callback_found_name=%%F"
+    call :add_recovered_dir callback_found_name
+)
 exit /b 0
 
-:add_recovered_dir  name
-if defined recovered_dirs_found (set "recovered_dirs_found=%recovered_dirs_found%, %~1") else set "recovered_dirs_found=%~1"
+:add_recovered_dir  nameVar
+setlocal EnableDelayedExpansion
+if defined recovered_dirs_found (set "found=!recovered_dirs_found!, !%~1!") else set "found=!%~1!"
+endlocal & set "recovered_dirs_found=%found%"
 exit /b 0
 
 :find_drive_root_housekeeping  side  recordItems
@@ -2840,23 +3249,41 @@ rem directory would list its contents); a pattern with * or ? is expanded with
 rem DIR.
 echo(%~1| findstr /r "[*?]" >nul && goto find_housekeeping_dir_wildcard
 set "housekeeping_dir_path=%callback_drive_root%%~1"
-call :is_directory housekeeping_dir_path && call :record_housekeeping_item D "%~1"
+set "callback_found_name=%~1"
+call :is_directory housekeeping_dir_path && call :record_housekeeping_item D callback_found_name
 exit /b 0
 :find_housekeeping_dir_wildcard
-for /f "eol=/ delims=" %%F in ('dir /b /ad "%callback_drive_root%%~1" 2^>nul') do call :record_housekeeping_item D "%%F"
+set "callback_pattern_path=%callback_drive_root%%~1"
+call :list_directory "/b /ad" callback_pattern_path temp_directory_listing
+for /f "usebackq eol=/ delims=" %%F in ("%temp_directory_listing%") do (
+    set "callback_found_name=%%F"
+    call :record_housekeeping_item D callback_found_name
+)
 exit /b 0
 
 :find_housekeeping_file  pattern
 rem :each_item callback: one file pattern of DRIVE_ROOT_HOUSEKEEPING_FILES at
 rem callback_drive_root.
-for /f "eol=/ delims=" %%F in ('dir /b /a-d "%callback_drive_root%%~1" 2^>nul') do call :record_housekeeping_item F "%%F"
+set "callback_pattern_path=%callback_drive_root%%~1"
+call :list_directory "/b /a-d" callback_pattern_path temp_directory_listing
+for /f "usebackq eol=/ delims=" %%F in ("%temp_directory_listing%") do (
+    set "callback_found_name=%%F"
+    call :record_housekeeping_item F callback_found_name
+)
 exit /b 0
 
-:record_housekeeping_item  kind  name
-rem Count one housekeeping item and, if recording, write it to the list.
+:record_housekeeping_item  kind  nameVar
+rem Count one housekeeping item and, if recording, write it to the list
+rem (the name by variable: delayed expansion is off, so "!" and "%" in it
+rem come through).
 set /a "housekeeping_item_count+=1"
-if defined housekeeping_list_file >>"%housekeeping_list_file%" echo(%~1:"%~2"
+if defined housekeeping_list_file call :append_housekeeping_line %~1 %~2
 exit /b 0
+
+:append_housekeeping_line  kind  nameVar
+setlocal EnableDelayedExpansion
+>>"!housekeeping_list_file!" echo(%~1:"!%~2!"
+endlocal & exit /b 0
 
 :log_housekeeping  side  label  [target]
 rem Log "label : ..." for the housekeeping items skipped at the side's drive
@@ -2907,7 +3334,8 @@ if exist "%temp_warnings%" for /f "usebackq delims=" %%L in ("%temp_warnings%") 
 if defined warning_already_listed (endlocal & exit /b 0)
 setlocal EnableDelayedExpansion
 >>"!temp_warnings!" echo([WARN] !warning_text!
->>"!temp_summary_warnings!" echo([WARN] !warning_text!
+set "tagged_warning=[WARN] !warning_text!"
+call :keep_summary_line tagged_warning warnings
 endlocal & endlocal & exit /b 0
 
 :is_same_warning
@@ -2969,11 +3397,9 @@ rem value after "label: ", without trailing spaces; the last line's value
 rem is the time since the last good sync.
 set /a "clock_line_number+=1"
 set "clock_line_value=%clock_line:*: =%"
-:read_clock_line_trim
-if "%clock_line_value:~-1%"==" " (
-    set "clock_line_value=%clock_line_value:~0,-1%"
-    goto read_clock_line_trim
-)
+setlocal EnableDelayedExpansion
+for /l %%I in (1,1,%OUTPUT_MAX_INDENT%) do if "!clock_line_value:~-1!"==" " set "clock_line_value=!clock_line_value:~0,-1!"
+endlocal & set "clock_line_value=%clock_line_value%"
 if %clock_line_number% equ 1 set "clock_leap_indicator=%clock_line_value:~0,1%"
 if %clock_line_number% equ 6 set "clock_reference_id=%clock_line_value:~0,10%"
 if %clock_line_number% equ 7 set "clock_last_sync_text=%clock_line_value%"
@@ -3419,16 +3845,17 @@ rem IGNORED_CUSTODY_FILES as robocopy /xf arguments: each item quoted.
 setlocal EnableDelayedExpansion
 set "arguments="
 set "remaining=!IGNORED_CUSTODY_FILES!"
-:ignored_names_as_robocopy_arguments_next
-if not defined remaining (endlocal & set "%~1=%arguments%" & exit /b 0)
-set "item="
-for /f "tokens=1* delims=|" %%A in ("!remaining!") do (
-    set "item=%%A"
-    set "remaining=%%B"
+for /l %%I in (1,1,%CONFIG_LIST_MAX_ITEMS%) do if defined remaining (
+    set "item="
+    for /f "tokens=1* delims=|" %%A in ("!remaining!") do (
+        set "item=%%A"
+        set "remaining=%%B"
+    )
+    if defined item set "arguments=!arguments! "!item!""
+    if not defined item set "remaining="
 )
-if defined item set "arguments=!arguments! "!item!""
-if not defined item set "remaining="
-goto ignored_names_as_robocopy_arguments_next
+endlocal & set "%~1=%arguments%"
+exit /b 0
 
 :restore_destination_attributes
 rem Undo container attributes (CONTAINER_ATTRIBUTES) that robocopy carried from
@@ -3495,8 +3922,10 @@ rem reference record. The reference record is row 1's source hash record or,
 rem if the source has no history, this run's own record of the source, made
 rem now. So the source is hashed once per set, and every later copy is
 rem checked back to it. The run records come before the compare: the compare
-rem relies on the reference record having passed its seal.
-call :check_metadata
+rem relies on the reference record having passed its seal. A check or a
+rem relocation has no copy to compare sizes and times with: its Metadata
+rem row is NONE (:skip_metadata_check); the rest is the same, on the set.
+if "%run_kind%"=="copy" (call :check_metadata) else call :skip_metadata_check
 where /q certutil.exe || (
     set "msg=[FAIL] certutil.exe not found: verification could not run."
     call :show_and_log msg
@@ -3548,6 +3977,17 @@ call :dashboard_stage_bar hash compare_lines_done compare_line_count
 call :compare_with_reference
 exit /b 0
 
+:skip_metadata_check
+rem A check or a relocation: nothing was copied, so there is no source to
+rem compare sizes and times with; the Metadata row says so (NONE, never a
+rem PASS: nothing was compared).
+set "heading=Metadata: no copy to compare with (%run_kind_switch%)"
+call :write_section_heading heading both
+call :work_out_metadata_status
+call :show_and_log result_metadata
+call :dashboard_stage metadata result_metadata
+exit /b 0
+
 :verify_plain_copy
 rem Non-forensic run: hash every source file and its copy and compare them,
 rem with the metadata check. Working files stay in TEMP; nothing is written
@@ -3577,12 +4017,15 @@ rem the history file. Ignored names (IGNORED_CUSTODY_FILES) are left out.
 rem They have a progress counter of their own and are never counted as
 rem evidence.
 type nul >"%temp_custody_list%"
-for /f "eol=/ delims=" %%F in ('dir /b /s /a-d "%destination_set_with_backslash%%RECORDS_DIR_NAME%\" 2^>nul') do (
+set "custody_records_root=%destination_set_with_backslash%%RECORDS_DIR_NAME%\"
+call :list_directory "/b /s /a-d" custody_records_root temp_directory_listing
+for /f "usebackq eol=/ delims=" %%F in ("%temp_directory_listing%") do (
     set "custody_file_path=%%F"
     for %%N in ("%%F") do set "custody_file_name=%%~nxN"
     call :list_custody_file
 )
-for /f "eol=/ delims=" %%F in ('dir /b /a-d "%destination_set_with_backslash%" 2^>nul') do (
+call :list_directory "/b /a-d" destination_set_with_backslash temp_directory_listing
+for /f "usebackq eol=/ delims=" %%F in ("%temp_directory_listing%") do (
     set "custody_file_name=%%F"
     call :list_top_level_custody_file
 )
@@ -4049,9 +4492,11 @@ sort /L C /O "%temp_compare_lines_sorted%" "%temp_compare_lines%"
 rem sort writes nothing for a record over its limit (:write_hash_csv): the
 rem sorted lines are counted against the unsorted ones.
 set "compare_lines_to_sort=0"
-for /f %%N in ('find /c /v "" ^< "%temp_compare_lines%"') do set "compare_lines_to_sort=%%N"
+find /c /v "" <"%temp_compare_lines%" >"%temp_count%" 2>nul
+for /f "usebackq" %%N in ("%temp_count%") do set "compare_lines_to_sort=%%N"
 set "compare_line_count=0"
-for /f %%N in ('find /c /v "" ^< "%temp_compare_lines_sorted%"') do set "compare_line_count=%%N"
+find /c /v "" <"%temp_compare_lines_sorted%" >"%temp_count%" 2>nul
+for /f "usebackq" %%N in ("%temp_count%") do set "compare_line_count=%%N"
 if %compare_line_count% neq %compare_lines_to_sort% call :report_compare_lines_lost compare_line_count compare_lines_to_sort
 set "msg=Pairing %compare_line_count% entries (%compare_reference_label% and destination) ..."
 call :show msg
@@ -4071,11 +4516,7 @@ rem Turn one row of the reference record ("relative path","SHA-256", maybe
 rem with trailing spaces from 1.0.x) into a compare line "...*...*REF".
 setlocal EnableDelayedExpansion
 set "row=!%~1!"
-:add_reference_row_trim
-if "!row:~-1!"==" " (
-    set "row=!row:~0,-1!"
-    goto add_reference_row_trim
-)
+for /l %%I in (1,1,%OUTPUT_MAX_INDENT%) do if "!row:~-1!"==" " set "row=!row:~0,-1!"
 set "compare_entry=!row:","=*!"
 set "compare_entry=!compare_entry:"=!"
 rem A row without the "," separator has no "*" now ("!x:**=!" removes
@@ -4385,18 +4826,22 @@ type nul >"%temp_history_runs%"
 type nul >"%temp_outside_history%"
 type nul >"%temp_predating_records%"
 if defined history_check_history call :copy_for_reading history_check_history temp_custody_copy
-if defined history_check_history for /f "tokens=1* delims=:" %%A in ('findstr /n "^" "%temp_custody_copy%" 2^>nul') do if %%A gtr 1 (
+if defined history_check_history findstr /n "^" "%temp_custody_copy%" >"%temp_history_numbered%" 2>nul
+if defined history_check_history for /f "usebackq tokens=1* delims=:" %%A in ("%temp_history_numbered%") do if %%A gtr 1 (
     set "history_row_line=%%B"
     set "history_line_number=%%A"
     call :check_history_row
 )
 if "%history_check_mode%"=="quiet" if %history_check_rows% equ 0 set "history_check_problem=1"
 if "%history_check_mode%"=="quiet" if defined history_check_problem exit /b 1
-if not "%history_check_mode%"=="quiet" for /f "eol=/ delims=" %%F in ('dir /b /a-d "%history_check_records_root%\" 2^>nul') do (
+set "history_check_records_root_with_backslash=%history_check_records_root%\"
+if not "%history_check_mode%"=="quiet" call :list_directory "/b /a-d" history_check_records_root_with_backslash temp_directory_listing
+if not "%history_check_mode%"=="quiet" for /f "usebackq eol=/ delims=" %%F in ("%temp_directory_listing%") do (
     set "stray_name=%%F"
     call :report_stray_record_file
 )
-for /f "eol=/ delims=" %%R in ('dir /b /ad /on "%history_check_records_root%\" 2^>nul') do (
+call :list_directory "/b /ad /on" history_check_records_root_with_backslash temp_directory_listing
+for /f "usebackq eol=/ delims=" %%R in ("%temp_directory_listing%") do (
     set "record_directory_name=%%R"
     call :check_record_directory_listed
 )
@@ -4595,7 +5040,8 @@ rem outside_listed_by and exit 0; otherwise exit 1.
 set "outside_seal_sha256="
 set "outside_listed_by="
 if not exist "%temp_outside_history%" exit /b 1
-for /f "tokens=1-3 delims=*" %%A in ('findstr /b /l /c:"%record_directory_name%*" "%temp_outside_history%" 2^>nul') do if not defined outside_listed_by (
+findstr /b /l /c:"%record_directory_name%*" "%temp_outside_history%" >"%temp_record_match%" 2>nul
+for /f "usebackq tokens=1-3 delims=*" %%A in ("%temp_record_match%") do if not defined outside_listed_by (
     set "outside_seal_sha256=%%B"
     set "outside_listed_by=%%C"
 )
@@ -4664,10 +5110,12 @@ rem The directory's files are counted first: cmd skips a FOR /F iteration
 rem whose expanded command would pass 8,191 characters without a word, so a
 rem file with such a path would go unchecked (round 12.7's class of defect).
 set "files_in_directory=0"
-dir /b /s /a-d "%record_files_dir%\" 2>nul | find /c /v "" >"%temp_count%"
+set "record_files_dir_with_backslash=%record_files_dir%\"
+call :list_directory "/b /s /a-d" record_files_dir_with_backslash temp_record_files_listing
+find /c /v "" <"%temp_record_files_listing%" >"%temp_count%" 2>nul
 for /f "usebackq" %%N in ("%temp_count%") do set "files_in_directory=%%N"
 set "files_checked=0"
-for /f "eol=/ delims=" %%F in ('dir /b /s /a-d "%record_files_dir%\" 2^>nul') do (
+for /f "usebackq eol=/ delims=" %%F in ("%temp_record_files_listing%") do (
     set /a "files_checked+=1"
     set "directory_file_path=%%F"
     call :check_file_listed_in_seal %~1 %~2 %~3 directory_file_path
@@ -4735,11 +5183,7 @@ set "file_path=!%~4!"
 set "run_dir_with_backslash=!%~2!\"
 call :relative_path file_path run_dir_with_backslash name_in_record || goto check_file_listed_in_seal_unresolved
 set "file_name=!name_in_record!"
-:check_file_listed_in_seal_name
-if not "!file_name:\=!"=="!file_name!" (
-    set "file_name=!file_name:*\=!"
-    goto check_file_listed_in_seal_name
-)
+for /l %%I in (1,1,%PATH_MAX_DEPTH%) do if not "!file_name:\=!"=="!file_name!" set "file_name=!file_name:*\=!"
 if /i "!name_in_record!"=="!RECORD_FILE_PREFIX!!%~1!.sha256" (endlocal & exit /b 0)
 call :name_matches_list file_name IGNORED_CUSTODY_FILES && (endlocal & exit /b 0)
 call :copy_for_reading %~3 temp_custody_copy
@@ -4834,11 +5278,13 @@ if "%run_mode%"=="forensic" set "verification_ran=1"
 if defined verification_ran call :work_out_verification_status
 rem The verdict: FAIL if the copy or any check failed (with verification on,
 rem a check that didn't pass counts as failed; run records and the script
-rem may also be NONE, with nothing earlier to check); UNVERIFIED if the copy
-rem passed but nothing was verified (non-forensic only); otherwise PASS.
+rem may also be NONE, with nothing earlier to check; the copy and the
+rem metadata check are NONE in a check or a relocation, which has no
+rem copy); UNVERIFIED if the copy passed but nothing was verified
+rem (non-forensic only); otherwise PASS.
 set "verdict=PASS"
-if not "%copy_status%"=="PASS" set "verdict=FAIL"
-if defined verification_ran if not "%metadata_status%"=="PASS" set "verdict=FAIL"
+if not "%copy_status%"=="PASS" if not "%copy_status%"=="NONE" set "verdict=FAIL"
+if defined verification_ran if not "%metadata_status%"=="PASS" if not "%metadata_status%"=="NONE" set "verdict=FAIL"
 if defined verification_ran if not "%hash_status%"=="PASS" set "verdict=FAIL"
 if "%run_records_status%"=="FAIL" set "verdict=FAIL"
 if "%script_status%"=="FAIL" set "verdict=FAIL"
@@ -4855,6 +5301,12 @@ exit /b 0
 rem copy_status (PASS or FAIL) and the Copy row's text from the robocopy
 rem exit codes of every pass; also called when the copy finishes, for the
 rem live display.
+if not "%run_kind%"=="copy" (
+    set "copy_status=NONE"
+    set "result_copy=NONE: nothing copied: the set verified in place (%run_kind_switch%)"
+    if "%run_kind%"=="relocate" set "result_copy=NONE: nothing copied: the set moved within its volume (/relocate)"
+    exit /b 0
+)
 set /a "copy_failed_bits=copy_exit_codes & ROBOCOPY_FAIL_MASK"
 set "copy_status=PASS"
 if %copy_failed_bits% neq 0 set "copy_status=FAIL"
@@ -4914,6 +5366,8 @@ if "%run_mode%"=="nonforensic" (
     exit /b 0
 )
 set "result_meaning=The copy completed, every file in the reference record is in the destination with the same SHA-256, and size and last-modified time match the source"
+if "%run_kind%"=="check" set "result_meaning=The set was verified in place: every file in the reference record is in its evidence directory with the same SHA-256"
+if "%run_kind%"=="relocate" set "result_meaning=The set was moved to %destination_set_path% and verified there: every file in the reference record is in its evidence directory with the same SHA-256"
 if "%run_records_status%"=="PASS" set "result_meaning=%result_meaning%; every earlier run record matches its seal and the history"
 exit /b 0
 
@@ -4922,8 +5376,8 @@ rem The closing line of a FAIL summary: each failed check, in the order they
 rem ran, then a pointer to the failures listed below the result.
 set "result_meaning="
 if "%script_status%"=="FAIL" call :add_failure_clause "The script check failed" "the script check failed"
-if not "%copy_status%"=="PASS" call :add_failure_clause "The copy failed" "the copy failed"
-if defined verification_ran if not "%metadata_status%"=="PASS" call :add_failure_clause "The metadata check failed" "the metadata check failed"
+if not "%copy_status%"=="PASS" if not "%copy_status%"=="NONE" call :add_failure_clause "The copy failed" "the copy failed"
+if defined verification_ran if not "%metadata_status%"=="PASS" if not "%metadata_status%"=="NONE" call :add_failure_clause "The metadata check failed" "the metadata check failed"
 if "%run_records_status%"=="FAIL" call :add_failure_clause "The run records check failed" "the run records check failed"
 if defined verification_ran if not "%hash_status%"=="PASS" call :add_failure_clause "The SHA-256 verification failed" "the SHA-256 verification failed"
 call :add_failure_clause "See the failures listed above" "see the failures listed above"
@@ -4996,6 +5450,11 @@ exit /b 0
 rem metadata_status (PASS or FAIL) and the Metadata row's text from the
 rem metadata check's counters; also called when that check finishes, for
 rem the live display.
+if not "%run_kind%"=="copy" (
+    set "metadata_status=NONE"
+    set "result_metadata=NONE: no copy to compare sizes and times with (%run_kind_switch%)"
+    exit /b 0
+)
 set "metadata_status=FAIL"
 set "result_metadata=NOT RUN"
 if defined metadata_check_ran set "metadata_status=PASS"
@@ -5089,6 +5548,11 @@ set "chosen_copy_version=%TOOL_VERSION%"
 set "result_script_copy=placed in the destination set directory as %script_file_name%"
 set "source_copy_path="
 set "source_copy_version="
+if not "%run_kind%"=="copy" (
+    set "script_copy_route=none"
+    set "result_script_copy=not placed: nothing copied (%run_kind_switch%); the set's own script copies stay as they are"
+    exit /b 0
+)
 if defined source_set_path set "source_copy_path=%source_set_with_backslash%%script_file_name%"
 if defined source_copy_path if exist "%source_copy_path%" call :read_script_version source_copy_path source_copy_version
 if defined source_copy_version call :version_is_newer source_copy_version TOOL_VERSION && (
@@ -5169,7 +5633,8 @@ set "file=!%~1!"
 set "version="
 call :copy_for_reading file temp_custody_copy
 for %%N in (TOOL_VERSION SCRIPT_VERSION) do if not defined version (
-    for /f "tokens=2 delims==" %%V in ('findstr /b /r /c:"set .%%N=" "!temp_custody_copy!" 2^>nul') do if not defined version set "version=%%V"
+    findstr /b /r /c:"set .%%N=" "!temp_custody_copy!" >"!temp_record_match!" 2>nul
+    for /f "usebackq tokens=2 delims==" %%V in ("!temp_record_match!") do if not defined version set "version=%%V"
 )
 if defined version set "version=!version:"=!"
 endlocal & set "%~2=%version%"
@@ -5186,6 +5651,10 @@ if defined history_continues copy /b "%history_base_path%" "%staged_history_path
 if not defined history_continues call :append_line_to_file HISTORY_HEADER staged_history_path
 set "history_source_set=%source_path%"
 if defined source_set_path set "history_source_set=%source_set_path%"
+rem A relocation's row: where the set was as the source, its new location
+rem as the destination (the Location check of later runs compares with the
+rem destination); its run record's relocation file says it was a move.
+if "%run_kind%"=="relocate" set "history_source_set=%relocate_from_path%"
 call :append_history_row
 exit /b 0
 
@@ -5218,10 +5687,14 @@ rem seal doesn't cover it would fail every later copy. Console only from
 rem here: the log is complete and is being sealed.
 set "heading=Record written: sealing this run's record and writing it to the destination"
 call :write_section_heading heading console
+rem From here the log is closed: nothing more is written into it, whatever
+rem the target a later line asks for (:emit_line), so the seal covers it as
+rem it stays.
+set "log_sealed=1"
 setlocal EnableDelayedExpansion
 set "sealed_count=0"
 set "seal_expected_count=0"
-for %%F in (log_staged_path staged_hash_csv_source staged_hash_csv_destination staged_hash_csv_custody staged_history_path staged_outside_history_path) do (
+for %%F in (log_staged_path staged_hash_csv_source staged_hash_csv_destination staged_hash_csv_custody staged_history_path staged_outside_history_path staged_relocation_path) do (
     if defined %%F if exist "!%%F!" (
         set /a "seal_expected_count+=1"
         set "record_path=!%%F!"
@@ -5399,14 +5872,16 @@ if "%~1"=="records" (set "publish_from=%staged_records_dir%") else set "publish_
 if "%~1"=="records" (set "publish_to=%destination_partial_run_dir%") else set "publish_to=%destination_set_path%"
 if "%~1"=="records" (set "publish_to_with_backslash=%destination_partial_run_dir%\") else set "publish_to_with_backslash=%destination_set_with_backslash%"
 set "publish_count=0"
-for /f "eol=/ delims=" %%F in ('dir /b /a-d "%publish_from%\" 2^>nul') do if /i not "%%F"=="%HISTORY_FILE_NAME%" set /a "publish_count+=1"
+set "publish_from_with_backslash=%publish_from%\"
+call :list_directory "/b /a-d" publish_from_with_backslash temp_directory_listing
+for /f "usebackq eol=/ delims=" %%F in ("%temp_directory_listing%") do if /i not "%%F"=="%HISTORY_FILE_NAME%" set /a "publish_count+=1"
 if %publish_count% equ 0 exit /b 0
 set /a "record_count+=publish_count"
 set "publish_overwrite_flags=/xc /xn /xo"
 if "%~1"=="root" if defined script_copy_replaces set "publish_overwrite_flags=/is /it"
 robocopy "%publish_from% " "%publish_to% " *.* /xf "%HISTORY_FILE_NAME%" /j %publish_overwrite_flags% /r:%RETRY_COUNT% /w:%RETRY_WAIT_SECONDS% /njh /njs /ndl /nfl /np >nul 2>&1
 set /a "records_robocopy_exit_codes|=%errorlevel%"
-for /f "eol=/ delims=" %%F in ('dir /b /a-d "%publish_from%\" 2^>nul') do if /i not "%%F"=="%HISTORY_FILE_NAME%" (
+for /f "usebackq eol=/ delims=" %%F in ("%temp_directory_listing%") do if /i not "%%F"=="%HISTORY_FILE_NAME%" (
     set "record_name=%%F"
     call :check_record_in_destination record_name publish_from publish_to_with_backslash
 )
@@ -5543,7 +6018,8 @@ if not defined robocopy_output_rewrite (
 )
 type "%temp_robocopy_unicode_output%" 2>nul | find /c /v "" >"%temp_count%"
 for /f "usebackq" %%N in ("%temp_count%") do set "lines_total=%%N"
-(for /f "delims=" %%L in ('type "%temp_robocopy_unicode_output%" 2^>nul ^| findstr /n "^"') do (
+type "%temp_robocopy_unicode_output%" 2>nul | findstr /n "^" >"%temp_robocopy_numbered%"
+(for /f "usebackq delims=" %%L in ("%temp_robocopy_numbered%") do (
     set /a "lines_written+=1"
     set "robocopy_output_line=%%L"
     setlocal EnableDelayedExpansion
@@ -5563,19 +6039,13 @@ for /f "usebackq" %%N in ("%temp_count%") do set "lines_total=%%N"
 del "%temp_robocopy_unicode_output%" >nul 2>&1
 endlocal & set "robocopy_output_lines_written=%lines_written%" & set "robocopy_output_lines_total=%lines_total%" & exit /b 0
 
-:check_script_path
-rem The script's own path goes on child command lines too (e.g.
-rem :read_carriage_return), so it may not contain "%" either (see
-rem :path_has_percent).
-call :path_has_percent script_path || exit /b 0
-set "abort_reason=The script's own path contains %%, which can't be handled safely yet: move or rename it."
-exit /b 1
-
 :read_carriage_return
 rem Set carriage_return to the CR character, for :save_robocopy_unicode_output
 rem (COPY /Z prints its progress with a CR; the standard pure-batch way).
+rem The file copied to nul is cmd.exe's own (ComSpec, never a path with
+rem "%" in it): this script's path would go on a child cmd's command line.
 set "carriage_return="
-for /f %%C in ('copy /z "%script_path%" nul') do set "carriage_return=%%C"
+for /f %%C in ('copy /z "%ComSpec%" nul') do set "carriage_return=%%C"
 exit /b 0
 
 :report_robocopy_exit_code  exitCodeVar  [custody]
@@ -5659,7 +6129,9 @@ rem Prompt with "<prompt>: " for a directory until it is valid, and set
 rem <side>_path and <side>_with_backslash. With allowDefault=1,
 rem default_source_path is shown on the line above the prompt and an empty
 rem answer takes it (sets default_source_taken). Anything that isn't a full
-rem path is refused and asked again. Exit 1 (with abort_reason) after
+rem path is refused and asked again. Any character Windows allows in a path
+rem is taken as it is ("%" included, since 2.5.0: no path goes on a child
+rem command line any more). Exit 1 (with abort_reason) after
 rem MAX_PROMPT_ATTEMPTS invalid answers.
 set "directory_attempts=0"
 set "default_source_taken="
@@ -5685,12 +6157,6 @@ rem again (owner, 2026-10-20).
 call :normalise_path
 if errorlevel 1 (
     echo Enter a full path: a drive letter and directory, or a UNC path.
-    echo.
-    goto ask_directory_loop
-)
-call :path_has_percent normalise_path_result && (
-    echo Paths containing %% can't be handled safely yet: rename the
-    echo   directory or choose another.
     echo.
     goto ask_directory_loop
 )
@@ -5728,17 +6194,6 @@ endlocal
 set "abort_reason=No usable %~2 after %MAX_PROMPT_ATTEMPTS% attempts (no console input?)."
 exit /b 1
 
-:path_has_percent  pathVar
-rem Exit 0 if the path contains "%". Many FOR /F commands put directory paths
-rem on a child command line, where %NAME% would be expanded, so such paths
-rem are refused at the prompt for now (owner, 2026-10-16). Evidence file
-rem names inside the directories are safe: hashing doesn't use a child
-rem command line (:get_sha256).
-setlocal EnableDelayedExpansion
-set "path_to_check=!%~1!"
-if "!path_to_check:%%=!"=="!path_to_check!" (endlocal & exit /b 1)
-endlocal & exit /b 0
-
 :normalise_path
 rem Caller's scope, fixed names: IN normalise_path_input. OUT
 rem normalise_path_result (full path, no trailing backslash unless a drive
@@ -5763,11 +6218,12 @@ if "%normalise_path_input:~0,2%"=="\\" set "normalise_path_is_full=1"
 if not defined normalise_path_is_full exit /b 1
 for %%A in ("%normalise_path_input%") do set "normalise_path_result=%%~fA"
 if not defined normalise_path_result exit /b 1
-:normalise_path_trim
-if "%normalise_path_result:~-1%"=="\" if not "%normalise_path_result:~-2%"==":\" if not "%normalise_path_result%"=="\" (
-    set "normalise_path_result=%normalise_path_result:~0,-1%"
-    goto normalise_path_trim
-)
+rem The trailing backslashes go in a bounded loop, with delayed expansion
+rem on inside it only (the value is a typed path: read with !var!, handed
+rem back with delayed expansion off, so "!" and "%" in it survive).
+setlocal EnableDelayedExpansion
+for /l %%I in (1,1,%OUTPUT_MAX_INDENT%) do if "!normalise_path_result:~-1!"=="\" if not "!normalise_path_result:~-2!"==":\" if not "!normalise_path_result!"=="\" set "normalise_path_result=!normalise_path_result:~0,-1!"
+endlocal & set "normalise_path_result=%normalise_path_result%"
 set "normalise_path_with_backslash=%normalise_path_result%"
 if not "%normalise_path_with_backslash:~-1%"=="\" set "normalise_path_with_backslash=%normalise_path_with_backslash%\"
 exit /b 0
@@ -5986,10 +6442,9 @@ set "free_text=!%~1!"
 if not defined free_text goto emit_free_text_as_is
 if "!free_text:~%OUTPUT_WIDTH%!"=="" goto emit_free_text_as_is
 set "free_text_indent=0"
-:emit_free_text_indent
-for %%I in (!free_text_indent!) do if "!free_text:~%%I,1!"==" " (
-    set /a "free_text_indent+=1"
-    goto emit_free_text_indent
+set "free_text_indent_counted="
+for /l %%I in (0,1,%OUTPUT_MAX_INDENT%) do if not defined free_text_indent_counted (
+    if "!free_text:~%%I,1!"==" " (set /a "free_text_indent+=1") else set "free_text_indent_counted=1"
 )
 set /a "free_text_continuation_width=free_text_indent + 2"
 for %%I in (!free_text_continuation_width!) do set "free_text_continuation=!BLANKS:~0,%%I!"
@@ -6008,7 +6463,10 @@ rem starts with continuationVar's text (the hanging indent). A word longer
 rem than the room left (a SHA-256, a path) stays whole: if longWordStartVar
 rem is given and the word fits within OUTPUT_WIDTH after its (shorter) text,
 rem the line starts with that instead, so an 80-column console doesn't
-rem split the word back to column 1; otherwise it runs past the width.
+rem split the word back to column 1; otherwise it runs past the width. The
+rem lines come off the text in a FOR /L (OUTPUT_MAX_WRAPPED_LINES at most;
+rem a text that would need more ends with the rest on one line), one
+rem :emit_wrapped_line each; never a goto loop (section 6).
 setlocal EnableDelayedExpansion
 set "remaining=!%~1!"
 set "line_kind=first"
@@ -6020,24 +6478,42 @@ set "long_word_start="
 if not "%~5"=="" set "long_word_start=!%~5!"
 if defined long_word_start call :strlen long_word_start long_word_start_length
 set /a "earliest_break=%~2 + 1"
-:emit_wrapped_next
-if "!remaining:~%OUTPUT_WIDTH%!"=="" goto emit_wrapped_last
+set "wrapping_done="
+for /l %%S in (1,1,%OUTPUT_MAX_WRAPPED_LINES%) do if not defined wrapping_done call :emit_wrapped_line %~4
+if not defined remaining (endlocal & exit /b 0)
+:emit_wrapped_last
+call :emit_line remaining %~4 !line_kind!
+endlocal & exit /b 0
+
+:emit_wrapped_line  target
+rem Caller's scope, delayed expansion on (:emit_wrapped): write the next
+rem line of the text, broken at the last space that fits (or the first
+rem after the width, for a word longer than the room), and put the hanging
+rem indent before what is left. Sets wrapping_done when the rest fits on
+rem one line (the caller writes it), when nothing is left, or when there is
+rem no space to break at.
+if "!remaining:~%OUTPUT_WIDTH%!"=="" (
+    set "wrapping_done=1"
+    exit /b 0
+)
 set "break_at="
 for /l %%I in (%OUTPUT_WIDTH%,-1,!earliest_break!) do if not defined break_at if "!remaining:~%%I,1!"==" " set "break_at=%%I"
 if not defined break_at call :find_next_space remaining %OUTPUT_WIDTH% break_at
-if not defined break_at goto emit_wrapped_last
+if not defined break_at (
+    set "wrapping_done=1"
+    exit /b 0
+)
 for %%B in (!break_at!) do (
     set "wrapped_line=!remaining:~0,%%B!"
     set "remaining=!remaining:~%%B!"
 )
-:emit_wrapped_trim
-if defined remaining if "!remaining:~0,1!"==" " (
-    set "remaining=!remaining:~1!"
-    goto emit_wrapped_trim
-)
-call :emit_line wrapped_line %~4 !line_kind!
+for /l %%T in (1,1,%OUTPUT_MAX_INDENT%) do if "!remaining:~0,1!"==" " set "remaining=!remaining:~1!"
+call :emit_line wrapped_line %~1 !line_kind!
 set "line_kind=continuation"
-if not defined remaining (endlocal & exit /b 0)
+if not defined remaining (
+    set "wrapping_done=1"
+    exit /b 0
+)
 set "line_start=!continuation!"
 set "line_start_length=!continuation_length!"
 if defined long_word_start call :first_word_fits_only_after remaining !continuation_length! !long_word_start_length! && (
@@ -6046,10 +6522,7 @@ if defined long_word_start call :first_word_fits_only_after remaining !continuat
 )
 set "remaining=!line_start!!remaining!"
 set /a "earliest_break=line_start_length + 1"
-goto emit_wrapped_next
-:emit_wrapped_last
-call :emit_line remaining %~4 !line_kind!
-endlocal & exit /b 0
+exit /b 0
 
 :first_word_fits_only_after  textVar  continuationLength  longWordStartLength
 rem Exit 0 if the text's first word doesn't fit within OUTPUT_WIDTH after
@@ -6065,41 +6538,44 @@ if !first_word_length! leq !room_after_continuation! (endlocal & exit /b 1)
 endlocal & exit /b 0
 
 :find_next_space  textVar  fromIndex  outVar
-rem Caller's scope, delayed expansion on (:emit_wrapped). Set outVar to the
-rem index of the first space at or after fromIndex, or clear it if there is
-rem none (a long unbreakable value is then written whole).
+rem Caller's scope, delayed expansion on (:emit_wrapped_line). Set outVar
+rem to the index of the first space at or after fromIndex, or clear it if
+rem there is none (a long unbreakable value is then written whole). A FOR
+rem /L over the text's characters (round 12.7: as a goto loop, 89 s for an
+rem 8,100-character path; the workshop measured 34 s to 40 ms).
 set "%~3="
-set /a "space_probe=%~2"
-:find_next_space_next
-set "space_probe_character="
-for %%P in (!space_probe!) do set "space_probe_character=!%~1:~%%P,1!"
-if not defined space_probe_character exit /b 0
-if "!space_probe_character!"==" " (
-    set "%~3=!space_probe!"
-    exit /b 0
-)
-set /a "space_probe+=1"
-goto find_next_space_next
+call :strlen %~1 find_next_space_length
+for /l %%P in (%~2,1,!find_next_space_length!) do if not defined %~3 if "!%~1:~%%P,1!"==" " set "%~3=%%P"
+exit /b 0
 
 :emit_line  lineVar  target  [lineKind]
 rem The one place a finished line is written. target: console, log or both.
 rem The console copy gets colour when :init_console_colour turned it on; the
 rem log copy never does (records are plain text, sealed, compared byte for
-rem byte). Lines reach the log only once it exists (log_ready). lineKind
+rem byte). Lines reach the log only once it exists (log_ready) and until
+rem it is sealed (log_sealed, :write_seal): a line after the seal would
+rem change a sealed file (round 13: the certutil retry's notes during the
+rem write-back's read-back went into the kept log). lineKind
 rem "continuation" (:emit_wrapped's further lines) is never coloured: a
 rem status starts a text, and a further line may hold the rest of an
 rem evidence name. While the live display is active, the console copy is
 rem left out (the block shows the run's progress; [WARN] and [FAIL] lines
 rem reach it through the summary's lists): the log copy is written as always.
+rem target "file": the line goes to the file emit_line_file_path names and
+rem nowhere else (the summary's lists are kept wrapped: :remember_problem).
 setlocal EnableDelayedExpansion
 set "line=!%~1!"
+if "%~2"=="file" (
+    >>"!emit_line_file_path!" echo(!%~1!
+    endlocal & exit /b 0
+)
 if "%~2"=="log" goto emit_line_to_log
 if defined dashboard_active goto emit_line_to_log
 if defined line if defined console_colour if not "%~3"=="continuation" call :colour_for_console line
 echo(!line!
 :emit_line_to_log
 if "%~2"=="console" (endlocal & exit /b 0)
-if defined log_ready >>"!log_staged_path!" echo(!%~1!
+if defined log_ready if not defined log_sealed >>"!log_staged_path!" echo(!%~1!
 endlocal & exit /b 0
 
 :colour_for_console  lineVar
@@ -6225,38 +6701,74 @@ exit /b 0
 :remember_problem  msgVar
 rem Remember a [FAIL] or [WARN] line for the summary: [FAIL] lines (anything
 rem that fails the run) go to its Failures list, all others to its Warnings
-rem list. Leading spaces are dropped.
+rem list. Leading spaces are dropped. Each line is kept twice: as it is
+rem (the lists' counts, the live display's last lines) and wrapped as the
+rem summary lays it out (:keep_summary_line), so the summary replays the
+rem lists from a file (:log_summary_list) rather than wrapping every line
+rem again through four helpers (round 12.4: about 50,000 failures were still
+rem being listed 56 minutes in).
 setlocal EnableDelayedExpansion
 set "line=!%~1!"
-:remember_problem_trim
-if "!line:~0,1!"==" " (
-    set "line=!line:~1!"
-    goto remember_problem_trim
-)
-if "!line:[FAIL]=!"=="!line!" (
-    >>"!temp_summary_warnings!" echo(!line!
-) else (
-    >>"!temp_summary_failures!" echo(!line!
-)
+for /l %%T in (1,1,%OUTPUT_MAX_INDENT%) do if "!line:~0,1!"==" " set "line=!line:~1!"
+set "list_kind=warnings"
+if not "!line:[FAIL]=!"=="!line!" set "list_kind=failures"
+call :keep_summary_line line !list_kind!
 endlocal & exit /b 0
+
+:keep_summary_line  lineVar  kind
+rem Caller's scope, delayed expansion on (:remember_problem, :add_warning):
+rem append the line to the summary's list of its kind (warnings or
+rem failures) as it is, and to the list's wrapped file as the summary shows
+rem it: four columns in, continued at six (:emit_free_text with the file
+rem target), once the run's working files exist.
+>>"!temp_summary_%~2!" echo(!%~1!
+set "emit_line_file_path=!temp_summary_%~2_wrapped!"
+if not defined emit_line_file_path exit /b 0
+set "summary_wrapped_line=    !%~1!"
+call :emit_free_text summary_wrapped_line file
+exit /b 0
 
 :log_summary_list  title  kind
 rem Show and log a titled list for the summary, one item per line, or
-rem "none". kind is "warnings" or "failures".
+rem "none". kind is "warnings" or "failures". The lines come wrapped from
+rem the list's file (:keep_summary_line): the log takes the file in one
+rem TYPE, the console a plain loop that colours the tag at column 5 ([WARN]
+rem or [FAIL], as :colour_for_console colours it; a continuation line starts
+rem with spaces and gets none), with delayed expansion off, so a "!" in an
+rem evidence name stays. The lists are read as :emit_line writes them: not
+rem to the console while the live display is active.
 setlocal DisableDelayedExpansion
-if "%~2"=="failures" (set "list_path=%temp_summary_failures%") else set "list_path=%temp_summary_warnings%"
+set "list_path=%temp_summary_warnings%"
+set "wrapped_path=%temp_summary_warnings_wrapped%"
+if "%~2"=="failures" set "list_path=%temp_summary_failures%"
+if "%~2"=="failures" set "wrapped_path=%temp_summary_failures_wrapped%"
 set "msg=  %~1"
 call :show_and_log msg
 set "item_count=0"
-if exist "%list_path%" for /f "usebackq delims=" %%L in ("%list_path%") do (
-    set "msg=    %%L"
-    call :show_and_log msg
-    set /a "item_count+=1"
-)
+if exist "%list_path%" for /f "usebackq delims=" %%L in ("%list_path%") do set /a "item_count+=1"
 if %item_count% equ 0 (
     set "msg=    none"
     call :show_and_log msg
+    endlocal & exit /b 0
 )
+if defined log_ready if exist "%wrapped_path%" type "%wrapped_path%" >>"%log_staged_path%" 2>nul
+if defined dashboard_active (endlocal & exit /b 0)
+if exist "%wrapped_path%" for /f "usebackq delims=" %%L in ("%wrapped_path%") do (
+    set "list_line=%%L"
+    call :echo_list_line
+)
+endlocal & exit /b 0
+
+:echo_list_line
+rem Caller's scope (:log_summary_list): one wrapped list line, in
+rem list_line, to the console, its tag coloured when colour is on.
+setlocal EnableDelayedExpansion
+set "line=!list_line!"
+if defined console_colour (
+    if "!line:~4,6!"=="[WARN]" set "line=    %coloured_warn_tag%!line:~10!"
+    if "!line:~4,6!"=="[FAIL]" set "line=    %coloured_fail_tag%!line:~10!"
+)
+echo(!line!
 endlocal & exit /b 0
 
 :is_directory  pathVar
@@ -6276,6 +6788,34 @@ if not defined directory_attributes (endlocal & exit /b 0)
 if "!directory_attributes:~0,1!"=="d" (endlocal & exit /b 0)
 endlocal & exit /b 1
 
+:list_directory  switches  pathVar  outFileVar
+rem Write DIR's listing of a directory to a file, for a FOR /F to read with
+rem usebackq (the FOR /F rework, 2.5.0): DIR runs here, in this cmd, with
+rem its output redirected, so the path is expanded once and "%" in it stays
+rem text. In a FOR /F command it went to a child cmd, which expands %NAME%
+rem in its command line (test runner round 6: "x %OS% y" became "x
+rem Windows_NT y"), the reason paths with "%" were refused until 2.5.0.
+rem Delayed expansion is off throughout, so "!" stays too. switches: DIR's
+rem (e.g. "/b /a"); the path as the variable holds it (a trailing backslash
+rem where the caller wants the directory's contents). A directory that
+rem can't be listed gives an empty file.
+setlocal DisableDelayedExpansion
+call :copy_variable %~2 list_directory_path
+call :copy_variable %~3 list_directory_file
+dir %~1 "%list_directory_path%" >"%list_directory_file%" 2>nul
+endlocal & exit /b 0
+
+:init_listing_file
+rem The working file the directory listings go to (:list_directory), made
+rem before the prompts: the set rules list directories to tell a set from
+rem raw evidence. Without a temporary directory nothing can be listed
+rem safely, so the run stops here (before 2.5.0 it stopped at :init_run,
+rem after the prompts, for the same reason). Deleted with the run's other
+rem working files (:cleanup_temp).
+call :choose_temp_dir || exit /b 1
+set "temp_directory_listing=%temp_dir%\%TOOL_NAME%_listing_%RANDOM%.tmp"
+exit /b 0
+
 :is_drive_root  pathVar
 rem Exit 0 if the path (in its with-backslash form) is a drive root: "X:\".
 setlocal EnableDelayedExpansion
@@ -6292,21 +6832,26 @@ rem variables persist; items are CONFIG values, safe to pass to CALL.
 setlocal EnableDelayedExpansion
 set "list=!%~1!"
 endlocal & set "each_item_rest=%list%"
-:each_item_loop
-if not defined each_item_rest exit /b 0
+for /l %%I in (1,1,%CONFIG_LIST_MAX_ITEMS%) do if defined each_item_rest call :each_item_next %~2
+exit /b 0
+
+:each_item_next  callback
+rem Caller's scope (:each_item, delayed expansion off): take the next item
+rem off each_item_rest and call the callback with it (a CALL per item, with
+rem the item read fresh by this line's own expansion).
 set "each_item_current="
 for /f "tokens=1* delims=|" %%A in ("%each_item_rest%") do (
     set "each_item_current=%%A"
     set "each_item_rest=%%B"
 )
 if not defined each_item_current set "each_item_rest="
-if defined each_item_current call :%~2 "%each_item_current%"
-goto each_item_loop
+if defined each_item_current call :%~1 "%each_item_current%"
+exit /b 0
 
 :cleanup_temp
 rem Delete this run's temporary files; a failed delete never stops the run.
 setlocal EnableDelayedExpansion
-for %%T in (temp_file_list temp_metadata_list temp_custody_copy temp_custody_copy_second temp_listing_numbered temp_listing_line temp_robocopy_unicode_output temp_certutil_output temp_hash_rows_source temp_hash_rows_destination temp_hash_rows_custody temp_custody_list temp_compare_lines temp_compare_lines_sorted temp_summary_warnings temp_summary_failures temp_warnings temp_clock_status temp_housekeeping_source temp_housekeeping_destination temp_history_runs temp_history_lines temp_history_filled temp_outside_history temp_partial_warned temp_predating_records temp_sealed_history_source temp_sealed_history_destination temp_count temp_dashboard_pass temp_dashboard_lock temp_dashboard_helper_done temp_dashboard_lists temp_dashboard_count temp_dashboard_list_tail temp_dashboard_copy_tail temp_dashboard_started_lines temp_dashboard_error_lines temp_copy_pass_listing plain_hash_csv_source plain_hash_csv_destination) do (
+for %%T in (temp_file_list temp_metadata_list temp_custody_copy temp_custody_copy_second temp_listing_numbered temp_listing_line temp_robocopy_unicode_output temp_certutil_output temp_hash_rows_source temp_hash_rows_destination temp_hash_rows_custody temp_custody_list temp_compare_lines temp_compare_lines_sorted temp_summary_warnings temp_summary_failures temp_warnings temp_clock_status temp_housekeeping_source temp_housekeeping_destination temp_history_runs temp_history_lines temp_history_filled temp_outside_history temp_partial_warned temp_predating_records temp_sealed_history_source temp_sealed_history_destination temp_count temp_dashboard_pass temp_dashboard_lock temp_dashboard_helper_done temp_dashboard_lists temp_dashboard_count temp_dashboard_list_tail temp_dashboard_copy_tail temp_dashboard_started_lines temp_dashboard_error_lines temp_copy_pass_listing temp_directory_listing temp_record_files_listing temp_history_numbered temp_history_numbered_second temp_record_match temp_robocopy_numbered temp_link_listing temp_summary_warnings_wrapped temp_summary_failures_wrapped plain_hash_csv_source plain_hash_csv_destination) do (
     if defined %%T if exist "!%%T!" del /f /q "!%%T!" >nul 2>&1
 )
 rem The staging directories go only if empty: if they still hold records,
@@ -6775,9 +7320,16 @@ del "%temp_dashboard_helper_done%" >nul 2>&1
 set "msg=running" & call :dashboard_stage copy msg
 rem The copy bar's start, inherited by the helper (its time read from it).
 call :dashboard_read_clock dashboard_copy_started
+rem The child cmd is given the script's path by variable name ("%%" here
+rem is one "%" on its command line): a child cmd expands %NAME% in its
+rem command line, so a path holding "%" would be changed; the variable's
+rem value is expanded once, by the child, as it is. No CALL, which would
+rem expand it a second time (round 13: the helper never started).
 set "evidence_robocopy_display_helper=%temp_path_prefix%"
-start "" /b cmd /d /v:off /c call "%script_path%"
+set "evidence_robocopy_display_helper_script=%script_path%"
+start "" /b cmd /d /v:off /c ""%%evidence_robocopy_display_helper_script%%""
 set "evidence_robocopy_display_helper="
+set "evidence_robocopy_display_helper_script="
 exit /b 0
 
 :dashboard_add_pass_total  passId
@@ -7048,20 +7600,14 @@ if not "!after_first_cr!"=="!line!" (
     set /a "path_end=line_length - after_length - 1"
 )
 set "found="
-set /a "index=dashboard_copy_files_started"
-if !index! lss 1 set "index=1"
-:dashboard_find_file_in_line_next
-if !index! gtr %dashboard_copy_total% goto dashboard_find_file_in_line_done
-for %%N in (!index!) do (
+set /a "first_index=dashboard_copy_files_started"
+if !first_index! lss 1 set "first_index=1"
+for /l %%N in (!first_index!,1,%dashboard_copy_total%) do if not defined found (
     set "name=!copy_pass_%dashboard_copy_pass%_file_%%N_name!"
     set "name_length=!copy_pass_%dashboard_copy_pass%_file_%%N_name_length!"
+    set /a "name_start=path_end - name_length"
+    if !name_start! geq 0 for %%S in (!name_start!) do for %%L in (!name_length!) do if "!line:~%%S,%%L!"=="!name!" set "found=%%N"
 )
-set /a "name_start=path_end - name_length"
-if !name_start! geq 0 for %%S in (!name_start!) do for %%L in (!name_length!) do if "!line:~%%S,%%L!"=="!name!" set "found=!index!"
-if defined found goto dashboard_find_file_in_line_done
-set /a "index+=1"
-goto dashboard_find_file_in_line_next
-:dashboard_find_file_in_line_done
 endlocal & set "dashboard_copy_file_found=%found%"
 exit /b 0
 

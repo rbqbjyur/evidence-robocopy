@@ -27,8 +27,10 @@ ten times; the prompts, the checks and the result block play at real speed.
 - **Evidence and custody files kept apart.** The evidence is copied as one
   directory, under its own name, into a *set directory*; beside it are the
   *custody files*: the script, the history and the records directory. Nothing
-  is ever written into the evidence directory, and nothing is ever written to
-  the source. See [Set and evidence directories](#set-and-evidence-directories).
+  is ever written into the evidence directory, and a copy never writes to
+  the source (`/check` writes its record into the set it checks and
+  `/relocate` moves a set, each confirmed first). See [Set and evidence
+  directories](#set-and-evidence-directories).
 - **SHA-256 verification against a reference record.** A first copy hashes
   the source and records it; that record is the reference for this and every
   later copy. Each copy hashes its destination with `certutil` and compares
@@ -56,6 +58,11 @@ ten times; the prompts, the checks and the result block play at real speed.
 - **Checks between copies.** A different script version, and a set that
   reached this drive by other means since the run that made it, are
   flagged. See [Checks between copies](#checks-between-copies).
+- **A set verified in place, or moved.** `/check` verifies a set where it
+  is, without copying, and records the check in it; `/relocate` moves a
+  set to a new place on the same volume, verifies it there and records the
+  move, so later copies don't flag it. See [Verifying a set in place, and
+  moving one](#verifying-a-set-in-place-and-moving-one).
 - **Evidence counts are evidence only.** The custody files are copied in a
   pass of their own and hashed with their own counter into a separate CSV,
   so robocopy's totals, the hashing counters and the summary count evidence
@@ -243,6 +250,8 @@ with every file named `evidence-robocopy_<run UTC>…`:
 - `…_history.csv`: the history as this run left it (below).
 - `…_runs_outside_history.csv` (only when this run restarted the history):
   the run records it found outside the history, with their seals' SHA-256.
+- `…_relocation.txt` (only when the run was a `/relocate`): what was
+  moved, from where to where, when, by whom and on what.
 - `evidence-robocopy_<UTC>.sha256`, the seal: one `<SHA-256> *<file name>`
   line for each of the above. Its own SHA-256 is shown at the end of the
   run, for the chain-of-custody notes. The script copy isn't listed: the
@@ -255,7 +264,7 @@ with every file named `evidence-robocopy_<run UTC>…`:
 |--------|---------|
 | Run (UTC) | the run record's name |
 | Result | PASS or FAIL |
-| Source directory | the source set directory, or for a first copy the evidence directory copied |
+| Source directory | the source set directory, or for a first copy the evidence directory copied; for a relocation, where the set was |
 | Source volume serial, Source volume | volume serial number; label line and file system |
 | Destination set directory | path |
 | Destination volume serial, Destination volume | as for the source |
@@ -342,6 +351,33 @@ failed write; later copies warn about the `.partial`.
   made it copied it. A difference in either is a warning: the set reached
   this place by other means since (copied or moved without this script).
 
+## Verifying a set in place, and moving one
+
+`/check` is a forensic run without a copy: the SOURCE prompt only (a set
+directory or its evidence directory; raw evidence is refused, since there
+is nothing to verify it against), then, confirmed, every file in the
+evidence directory is hashed and compared with the set's reference record,
+and every run record is checked against its seal and the history, as on a
+copy. A run record and a history row are written into the set (the row's
+source and destination are both the set). The Copy and Metadata rows of
+the result read NONE: nothing was copied, so there is nothing to compare
+sizes and times with. A set whose history names no reference record is
+refused.
+
+`/relocate` moves a set to a new location on the same volume: the SOURCE
+prompt (a set), then the new location (a full path that doesn't exist yet,
+in a directory that does), confirmed. The checks that read the set run
+first, where it is; then the set is moved (one rename within the volume:
+instant, and done or not), verified at its new location as `/check` does,
+and the move is recorded: a history row with the old path as the source
+and the new as the destination, and a sealed `…_relocation.txt` in the run
+record saying it was a move, not a copy. Later copies compare the set's
+location with that row, so a set put right this way isn't flagged as moved
+by other means. Refused: a location that exists, another volume (that is a
+copy), a network path (its volume can't be read), a location inside the
+set, raw evidence, and the set the script itself runs from. A move that
+fails leaves the set where it was, and the run stops with the reason.
+
 ## Non-forensic mode
 
 `/nonforensic` is a plain copy utility for non-evidence copies, confirmed
@@ -375,6 +411,10 @@ without the script.
 
 ```
 evidence-robocopy.bat                 forensic mode (default)
+evidence-robocopy.bat /check          verify a set in place, no copy; a run
+                                      record and a history row into the set
+evidence-robocopy.bat /relocate       move a set within its volume, verify it
+                                      there and record the move
 evidence-robocopy.bat /update         replace this file with the latest release
                                       if it is newer, then a forensic run
 evidence-robocopy.bat /nonforensic    plain copy utility, no log or records
@@ -405,8 +445,13 @@ the log or the records.
   removed from it or added outside it. Each sealed history holds every
   earlier run's seal SHA-256, so the newest seal SHA-256 anchors the whole
   chain.
-- A set is checked only when it is copied again; between copies nothing
-  checks it.
+- A set is checked only when it is copied again or checked in place
+  (`/check`); between those nothing checks it.
+- A relocation's run record shows the set was moved by this script, from
+  where to where; a set moved by other means gets no row, and only the
+  Location warning of the next copy shows it. A relocation interrupted
+  between the move and its record leaves the set at its new place with no
+  row: it then looks like a set moved by other means.
 - The seals are plain SHA-256 values, not signatures: they make a change
   detectable, not impossible. Someone with write access to the set and the
   script can build a new, consistent chain, or remove the newest run record
@@ -427,9 +472,6 @@ the log or the records.
 
 ## What it does not do
 
-- Accept a source or destination path containing `%`: such paths are
-  refused at the prompt (rename the directory or choose another). File and
-  directory names inside the evidence may contain `%`.
 - Replace chain-of-custody documentation: it records copies, not who held
   the media, why, seals or signatures.
 - Verify an image against its acquisition hash.
@@ -461,6 +503,8 @@ the log or the records.
   reference record.
 - Use a proxy: a machine that reaches GitHub only through one reports the
   update check as "not checked" (a warning), and `/update` can't download.
+- Move a set to another volume or to or from a network path (`/relocate`
+  is a rename within one volume; for another volume, copy the set there).
 
 Opening the CSVs in Excel can evaluate cells that start with `=`; open them
 as text, imported as UTF-8. Seals have CRLF line endings: convert them before

@@ -5,6 +5,54 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.5.0 - 2026-10-20
+
+### Added
+- `/check`: verifies a set in place, without copying. The SOURCE prompt
+  only (a set directory or its evidence directory; raw evidence is
+  refused); every file is hashed and compared with the reference record,
+  and the run records are checked against their seals and the history; a
+  run record and a history row are written into the set, confirmed before
+  anything else. The Copy and Metadata rows read NONE (nothing was copied
+  or compared); a set with no reference record is refused.
+- `/relocate`: moves a set to a new location on the same volume (one
+  rename, nothing copied), confirmed, after the checks that read it where
+  it is; then verifies it there as `/check` does and records the move: a
+  history row with the old path as the source and the new as the
+  destination, and a sealed `evidence-robocopy_<UTC>_relocation.txt` in
+  the run record. Later copies then don't warn that the set was moved by
+  other means. Refused: a target that exists, another volume, a network
+  path, a target inside the set, raw evidence, the set this script runs
+  from. A move that fails leaves the set where it was and the run stops.
+
+### Changed
+- Paths containing `%` are accepted everywhere: typed source and
+  destination directories, an evidence directory's name, a drive's volume
+  label, the script's own path. No path, record value or working file goes
+  on a child command line any more (every listing is written to a file and
+  read from it); the refusals at the prompts, in the set rules and at the
+  start are gone.
+- Links in the source are found by robocopy's own walk of it, which never
+  follows a link: a junction loop no longer costs a walk to the path-length
+  limit, and nothing inside a skipped link is listed again. A walk robocopy
+  couldn't complete gives one warning.
+- Long lines and long lists cost milliseconds, not seconds: a path of
+  thousands of characters wraps at once, and the summary's warnings and
+  failures lists are replayed from files written as the lines were found
+  (tens of thousands of failures were listed for over an hour before).
+  Output and records are unchanged.
+- A run with no temporary directory (TEMP, TMP, LOCALAPPDATA\Temp) stops
+  before the prompts rather than after them, with the same message.
+- In the side-by-side header a name breaks after `_` or `-` rather than
+  at a `.` that would leave a short extension (`log`) alone on a row.
+
+### Fixed
+- When the write-back's read-back had to retry a file (the destination
+  removed or unreachable part-way), certutil's two retry notes were added
+  to the sealed log after the seal was made, so the run record kept in
+  TEMP no longer matched its own seal. Nothing is written into the log
+  once it is sealed. In every release since 2.3.0.
+
 ## 2.4.1 - 2026-10-20
 
 ### Fixed
