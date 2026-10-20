@@ -64,7 +64,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.4.0"
+set "TOOL_VERSION=2.4.1"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -2609,9 +2609,11 @@ rem "  label    : value" wrapped within the pair's column into
 rem <outPrefix>_1.. (<outPrefix>_count lines): the value from the first
 rem line's value column, continuations one column right of it; a break at
 rem the last space or after the last backslash that fits (a path breaks
-rem between its names), else after the last character that fits (a name
-rem longer than the column is cut here, on the console only; the log holds
-rem it whole). A FOR /L, never a goto, per piece.
+rem between its names); failing those, after the last "_", "." or "-"
+rem that fits (a name longer than the column breaks between its parts:
+rem round 12.13); else after the last character that fits (a part longer
+rem than the column is cut here, on the console only; the log holds it
+rem whole). A FOR /L, never a goto, per piece.
 set "wrap_label=%~1!BLANKS!"
 set "wrap_prefix=  !wrap_label:~0,%HEADER_PAIR_LABEL_WIDTH%!: "
 set "wrap_text=!%~2!"
@@ -2628,6 +2630,10 @@ for /l %%S in (1,1,200) do if defined wrap_text (
             set "wrap_head=!wrap_text:~0,%%I!"
             if "!wrap_text:~%%I,1!"==" " set "wrap_break_at=%%I"
             if "!wrap_head:~-1!"=="\" set "wrap_break_at=%%I"
+        )
+        if not defined wrap_break_at for /l %%I in (!wrap_room!,-1,1) do if not defined wrap_break_at (
+            set "wrap_head=!wrap_text:~0,%%I!"
+            for %%C in (_ . -) do if "!wrap_head:~-1!"=="%%C" set "wrap_break_at=%%I"
         )
         if defined wrap_break_at for %%B in (!wrap_break_at!) do (
             set "wrap_piece=!wrap_text:~0,%%B!"

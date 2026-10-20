@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.4.1 - 2026-10-20
+
+### Fixed
+- In the side-by-side header, a name longer than its column (the run
+  record's log, hash record and staging directory names; a long evidence
+  directory name) was cut at whatever character filled the column. It now
+  breaks after a `_`, `.` or `-` where it has one; only a part longer than
+  the column is still cut. The log is unchanged.
+
 ## 2.4.0 - 2026-10-20
 
 ### Added
