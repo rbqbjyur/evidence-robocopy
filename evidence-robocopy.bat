@@ -64,7 +64,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.3.0"
+set "TOOL_VERSION=2.3.1"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -96,6 +96,62 @@ rem How much of a refused path its failure line shows: the whole can't
 rem always be read (above), and the output wrapper spends about 10 ms per
 rem character of an unbreakable word.
 set "PATH_EXCERPT_LENGTH=200"
+
+rem Microsoft Defender's real-time protection, read only for a warning,
+rem given only when it is known to be on (owner, 2026-10-20;
+rem :check_realtime_scanning; best efforts; owner: "if real time protection
+rem is occurring, we want to know"). Taken as on when its engine runs (the
+rem service DEFENDER_SERVICE in sc's state 4, a number in any language, or
+rem else the process DEFENDER_ENGINE_PROCESS in tasklist's list: the signal
+rem AveYo's ToggleDefender uses), unless a row of DEFENDER_OFF_VALUES reads
+rem 0x1. The rows are the settings that turn it off (AveYo's
+rem ToggleDefender sets DisableAntiSpyware, DisableAntiVirus and
+rem PassiveMode; the registry and Group Policy methods
+rem DisableRealtimeMonitoring and DisableOnAccessProtection). With Tamper
+rem Protection on, Defender ignores the Policies keys, so a policy row
+rem counts only when DEFENDER_TAMPER_VALUE in DEFENDER_TAMPER_KEY reads one
+rem of DEFENDER_TAMPER_OFF_DATA (4: off; 5: on). Fields:
+rem   DEFENDER_OFF_<row>_KEY     the registry key
+rem   DEFENDER_OFF_<row>_VALUE   the value that turns protection off at 0x1
+rem   DEFENDER_OFF_<row>_POLICY  yes for a Policies key
+rem A value that can't be read turns nothing off: the engine running with
+rem nothing readable saying it's off gives the warning.
+set "DEFENDER_SERVICE=WinDefend"
+set "DEFENDER_ENGINE_PROCESS=MsMpEng.exe"
+set "DEFENDER_TAMPER_KEY=HKLM\SOFTWARE\Microsoft\Windows Defender\Features"
+set "DEFENDER_TAMPER_VALUE=TamperProtection"
+set "DEFENDER_TAMPER_OFF_DATA=0x4 0x0"
+set "DEFENDER_OFF_VALUES=realtime realtime_policy realtime_policy_root on_access_policy antivirus antivirus_policy antispyware antispyware_policy passive passive_policy"
+set "DEFENDER_OFF_realtime_KEY=HKLM\SOFTWARE\Microsoft\Windows Defender\Real-Time Protection"
+set "DEFENDER_OFF_realtime_POLICY=no"
+set "DEFENDER_OFF_realtime_VALUE=DisableRealtimeMonitoring"
+set "DEFENDER_OFF_realtime_policy_KEY=HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection"
+set "DEFENDER_OFF_realtime_policy_POLICY=yes"
+set "DEFENDER_OFF_realtime_policy_VALUE=DisableRealtimeMonitoring"
+set "DEFENDER_OFF_realtime_policy_root_KEY=HKLM\SOFTWARE\Policies\Microsoft\Windows Defender"
+set "DEFENDER_OFF_realtime_policy_root_POLICY=yes"
+set "DEFENDER_OFF_realtime_policy_root_VALUE=DisableRealtimeMonitoring"
+set "DEFENDER_OFF_on_access_policy_KEY=HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection"
+set "DEFENDER_OFF_on_access_policy_POLICY=yes"
+set "DEFENDER_OFF_on_access_policy_VALUE=DisableOnAccessProtection"
+set "DEFENDER_OFF_antivirus_KEY=HKLM\SOFTWARE\Microsoft\Windows Defender"
+set "DEFENDER_OFF_antivirus_POLICY=no"
+set "DEFENDER_OFF_antivirus_VALUE=DisableAntiVirus"
+set "DEFENDER_OFF_antivirus_policy_KEY=HKLM\SOFTWARE\Policies\Microsoft\Windows Defender"
+set "DEFENDER_OFF_antivirus_policy_POLICY=yes"
+set "DEFENDER_OFF_antivirus_policy_VALUE=DisableAntiVirus"
+set "DEFENDER_OFF_antispyware_KEY=HKLM\SOFTWARE\Microsoft\Windows Defender"
+set "DEFENDER_OFF_antispyware_POLICY=no"
+set "DEFENDER_OFF_antispyware_VALUE=DisableAntiSpyware"
+set "DEFENDER_OFF_antispyware_policy_KEY=HKLM\SOFTWARE\Policies\Microsoft\Windows Defender"
+set "DEFENDER_OFF_antispyware_policy_POLICY=yes"
+set "DEFENDER_OFF_antispyware_policy_VALUE=DisableAntiSpyware"
+set "DEFENDER_OFF_passive_KEY=HKLM\SOFTWARE\Microsoft\Windows Defender"
+set "DEFENDER_OFF_passive_POLICY=no"
+set "DEFENDER_OFF_passive_VALUE=PassiveMode"
+set "DEFENDER_OFF_passive_policy_KEY=HKLM\SOFTWARE\Policies\Microsoft\Windows Defender"
+set "DEFENDER_OFF_passive_policy_POLICY=yes"
+set "DEFENDER_OFF_passive_policy_VALUE=PassiveMode"
 
 rem Files of at least this many bytes go to the large-file pass.
 set "LARGE_FILE_BYTES=104857600"
@@ -345,6 +401,10 @@ rem                                  is shown by files (its per-file table
 rem                                  would be too large for the environment)
 rem   DASHBOARD_BAR_WIDTH            columns inside a bar's [ ]; BAR_FULL and
 rem                                  BAR_EMPTY are that many # and .
+rem   DASHBOARD_ESTIMATE_AFTER_SECONDS, _PERMILLE  a bar's time left is shown
+rem                                  once its stage has run this long and is
+rem                                  this far through (thousandths); before,
+rem                                  "estimating"
 rem   DASHBOARD_LIST_LINES           the last warnings and failures shown
 rem   DASHBOARD_LINE_COUNT           lines in the block (the redraw goes up
 rem                                  that many): a rule, the title, the six
@@ -358,9 +418,11 @@ set "DASHBOARD_TICK_EVERY_ITEMS=25"
 set "DASHBOARD_POLL_SECONDS=5"
 set "DASHBOARD_HELPER_WAIT_SECONDS=10"
 set "DASHBOARD_BYTES_TABLE_MAX_FILES=1000"
-set "DASHBOARD_BAR_WIDTH=36"
-set "DASHBOARD_BAR_FULL=####################################"
-set "DASHBOARD_BAR_EMPTY=...................................."
+set "DASHBOARD_BAR_WIDTH=34"
+set "DASHBOARD_BAR_FULL=##################################"
+set "DASHBOARD_BAR_EMPTY=.................................."
+set "DASHBOARD_ESTIMATE_AFTER_SECONDS=60"
+set "DASHBOARD_ESTIMATE_AFTER_PERMILLE=10"
 set "DASHBOARD_LIST_LINES=3"
 set "DASHBOARD_LINE_COUNT=21"
 set "DASHBOARD_STAGES=script copy metadata run_records hash record_written"
@@ -704,14 +766,48 @@ echo Version: %TOOL_VERSION%
 echo Author: outis
 echo Licence: 0BSD
 echo.
-echo Note: real-time antivirus scanning, where active, scans each file as it
-echo        is written: it slows copies of many small files, and a file it
-echo        quarantines fails verification as MISSING.
 echo Tip: don't click inside this window while it runs: a QuickEdit selection
 echo       pauses the copy until you press Esc.
-echo Check: a copy of this script that travelled with evidence should match
-echo         the published release (its SHA-256 is in the log header).
 echo.
+exit /b 0
+
+:check_realtime_scanning
+rem A warning when Microsoft Defender's real-time protection is known to be
+rem on (owner, 2026-10-20: a [WARN] up front, so it is in the header's
+rem Warnings and the live display's list from the start). Best efforts: a
+rem state that can't be read, or another antivirus, gives no warning.
+call :read_defender_realtime_protection
+if not defined defender_realtime_protection_on exit /b 0
+set "msg=Microsoft Defender's real-time protection is on: it scans each file as it is written, which slows copies of many small files, and a file it quarantines fails verification as MISSING."
+call :add_warning msg
+exit /b 0
+
+:read_defender_realtime_protection
+rem Define defender_realtime_protection_on when Microsoft Defender's
+rem real-time protection is taken as on (DEFENDER_* in CONFIG): its engine
+rem running (the service, or else the process), and no row of
+rem DEFENDER_OFF_VALUES reading 0x1 (a Policies row only while Tamper
+rem Protection reads off). Read only; nothing is changed.
+set "defender_realtime_protection_on="
+setlocal EnableDelayedExpansion
+set "engine_running="
+for /f "tokens=2 delims=:" %%S in ('sc query "!DEFENDER_SERVICE!" 2^>nul ^<nul') do for /f "tokens=1" %%N in ("%%S") do if "%%N"=="4" set "engine_running=1"
+rem Percent form on purpose: each side of a pipe runs in a new cmd without
+rem delayed expansion (a CONFIG constant, no path).
+if not defined engine_running tasklist /fi "imagename eq %DEFENDER_ENGINE_PROCESS%" /fo csv /nh 2>nul <nul | find /i "%DEFENDER_ENGINE_PROCESS%" >nul 2>&1 && set "engine_running=1"
+if not defined engine_running (endlocal & exit /b 0)
+set "tamper_protection_off="
+for /f "tokens=3" %%V in ('reg query "!DEFENDER_TAMPER_KEY!" /v "!DEFENDER_TAMPER_VALUE!" 2^>nul ^<nul') do for %%D in (%DEFENDER_TAMPER_OFF_DATA%) do if /i "%%V"=="%%D" set "tamper_protection_off=1"
+set "turned_off="
+for %%R in (%DEFENDER_OFF_VALUES%) do (
+    set "off_key=!DEFENDER_OFF_%%R_KEY!"
+    set "off_value=!DEFENDER_OFF_%%R_VALUE!"
+    set "off_row_counts=1"
+    if /i "!DEFENDER_OFF_%%R_POLICY!"=="yes" if not defined tamper_protection_off set "off_row_counts="
+    if defined off_row_counts for /f "tokens=3" %%V in ('reg query "!off_key!" /v "!off_value!" 2^>nul ^<nul') do if /i "%%V"=="0x1" set "turned_off=1"
+)
+if defined turned_off (endlocal & exit /b 0)
+endlocal & set "defender_realtime_protection_on=1"
 exit /b 0
 
 :check_robocopy
@@ -815,11 +911,15 @@ rem evidence directories"). Sets source_path / source_with_backslash (the
 rem evidence directory robocopy copies from), source_set_path /
 rem source_set_with_backslash (empty for raw evidence), evidence_directory_name,
 rem set_directory_name and source_set_rule.
-echo The evidence directory is copied, under its own name, into a set directory.
 call :find_default_source_set
 set "source_set_rejected_answers=0"
+rem The first prompt follows the elevation notice's blank line; a retry
+rem gets one of its own after the refusal (round 12.10: two blank lines
+rem once the line between them had gone).
+goto ask_source_set_prompt
 :ask_source_set_again
 echo.
+:ask_source_set_prompt
 call :ask_directory source_given "SOURCE directory" 1 1 || exit /b 1
 call :identify_source_set && exit /b 0
 call :show identify_problem
@@ -1380,6 +1480,8 @@ exit /b 0
 rem Working files in TEMP, all deleted by :cleanup_temp.
 set "temp_file_list=%temp_path_prefix%_list.tmp"
 set "temp_metadata_list=%temp_path_prefix%_metadata.tmp"
+set "temp_custody_copy=%temp_path_prefix%_custody_copy.tmp"
+set "temp_custody_copy_second=%temp_path_prefix%_custody_copy_second.tmp"
 set "temp_listing_numbered=%temp_path_prefix%_listing_numbered.tmp"
 set "temp_listing_line=%temp_path_prefix%_listing_line.tmp"
 set "temp_robocopy_unicode_output=%temp_path_prefix%_robocopy_unicode.tmp"
@@ -1651,9 +1753,9 @@ exit /b 0
 :count_history_rows  fileVar  outVar
 rem The number of runs in a history: its lines, less the header.
 setlocal EnableDelayedExpansion
-set "file=!%~1!"
 set "lines=0"
-for /f %%N in ('find /c /v "" ^< "!file!" 2^>nul') do set "lines=%%N"
+call :copy_for_reading %~1 temp_custody_copy
+for /f %%N in ('find /c /v "" ^< "!temp_custody_copy!" 2^>nul') do set "lines=%%N"
 set /a "rows=lines - 1"
 if !rows! lss 0 set "rows=0"
 endlocal & set "%~2=%rows%"
@@ -1670,7 +1772,8 @@ rem is no such line.
 for %%F in (run result source source_serial source_volume_label_and_filesystem destination destination_serial destination_volume_label_and_filesystem evidence_files host user script seal) do set "%~3_%%F="
 call :copy_variable %~1 read_history_row_file
 set "history_row_line="
-for /f "tokens=1* delims=:" %%A in ('findstr /n "^" "%read_history_row_file%" 2^>nul') do if "%%A"=="%~2" set "history_row_line=%%B"
+call :copy_for_reading read_history_row_file temp_custody_copy
+for /f "tokens=1* delims=:" %%A in ('findstr /n "^" "%temp_custody_copy%" 2^>nul') do if "%%A"=="%~2" set "history_row_line=%%B"
 if not defined history_row_line exit /b 1
 call :split_history_line %~3
 exit /b %errorlevel%
@@ -1715,11 +1818,13 @@ setlocal EnableDelayedExpansion
 set "long_file=!%~1!"
 set "short_file=!%~2!"
 setlocal DisableDelayedExpansion
+call :copy_for_reading short_file temp_custody_copy_second
+call :copy_for_reading long_file temp_custody_copy
 set "short_lines=0"
-for /f %%N in ('find /c /v "" ^< "%short_file%" 2^>nul') do set "short_lines=%%N"
+for /f %%N in ('find /c /v "" ^< "%temp_custody_copy_second%" 2^>nul') do set "short_lines=%%N"
 type nul >"%temp_history_lines%"
-for /f "tokens=1* delims=:" %%A in ('findstr /n "^" "%long_file%" 2^>nul') do if %%A leq %short_lines% >>"%temp_history_lines%" echo(%%B
-fc /b "%short_file%" "%temp_history_lines%" >nul 2>&1
+for /f "tokens=1* delims=:" %%A in ('findstr /n "^" "%temp_custody_copy%" 2^>nul') do if %%A leq %short_lines% >>"%temp_history_lines%" echo(%%B
+fc /b "%temp_custody_copy_second%" "%temp_history_lines%" >nul 2>&1
 set "starts_with_exit_code=%errorlevel%"
 endlocal & endlocal & exit /b %starts_with_exit_code%
 
@@ -1782,7 +1887,8 @@ if "%version_order%"=="newer" (
 )
 set "previous_log=%previous_run_dir%\%RECORD_FILE_PREFIX%%previous_run%.log"
 set "previous_script_sha256="
-if exist "%previous_log%" for /f "tokens=1* delims=:" %%A in ('findstr /b /c:"  Script SHA-256      : " "%previous_log%" 2^>nul') do set "previous_script_sha256=%%B"
+call :copy_for_reading previous_log temp_custody_copy
+for /f "tokens=1* delims=:" %%A in ('findstr /b /c:"  Script SHA-256      : " "%temp_custody_copy%" 2^>nul') do set "previous_script_sha256=%%B"
 call :clean_sha256_from_record previous_script_sha256
 if not exist "%previous_log%" (
     set "msg=Script: the SHA-256 can't be compared: the previous run's record has no log."
@@ -2128,6 +2234,7 @@ rem and collect the results as one list of warnings (:add_warning). The list
 rem heads the log header and is repeated in the summary.
 call :check_power
 call :read_clock_status
+call :check_realtime_scanning
 set "destination_volume_directory=%destination_path%"
 if "%run_mode%"=="forensic" set "destination_volume_directory=%destination_set_path%"
 call :describe_volume "%source_path:~0,2%" header_source_volume source_filesystem source_volume_serial source_volume_label_and_filesystem
@@ -2799,7 +2906,8 @@ if defined dashboard_active if /i "!PASS_%~1_PERCENTAGES!"=="yes" (
 rem The pass's state for the display helper. The block form puts cmd's own
 rem message for a failed redirection (the helper reading the file at that
 rem moment) under the 2>nul too: a message would move the block down.
-if defined dashboard_active (> "!temp_dashboard_pass!" echo %~1 running) 2>nul
+if defined dashboard_active call :dashboard_read_clock pass_started_clock
+if defined dashboard_active (> "!temp_dashboard_pass!" echo %~1 running !pass_started_clock!) 2>nul
 set "log_option="
 if "!log_enabled!"=="1" set log_option=/unilog:"!temp_robocopy_unicode_output!"
 robocopy "!source_path! " "!destination_path! " *.* !COPY_FLAGS! !PASS_%~1_FILTER! !PASS_%~1_FLAGS! /mt:!threads! /r:!RETRY_COUNT! /w:!RETRY_WAIT_SECONDS! !pass_progress_flags! !backup_flag! !exclusion_args! !log_option! %robocopy_console_redirection%
@@ -2912,14 +3020,27 @@ if not defined attrib_switches (
 attrib !attrib_switches! "!destination_path!" >nul 2>&1
 set "attributes_now="
 for %%A in ("!destination_path!") do set "attributes_now=%%~aA"
-set "msg=Destination directory: cleared!cleared_names! (carried over from the source directory)."
-call :show_and_log msg
+rem Each attribute is reported as the directory now has it: cleared, or a
+rem warning that it couldn't be (round 12.10: attrib doesn't reach a
+rem directory past 260 characters, and the log said "cleared" before the
+rem warning that it wasn't).
+set "cleared_names="
+set "not_cleared_names="
 for %%R in (%CONTAINER_ATTRIBUTES%) do for /f "tokens=1-3 delims=:" %%I in ("%%R") do (
-    if /i "!attributes_now:~%%I,1!"=="%%J" if "!attributes_before:~%%I,1!"=="-" (
-        set "msg=[WARN] Could not clear %%K on the destination directory."
-        call :show_and_log msg
-        call :remember_problem msg
+    if /i "!attributes_after_copy:~%%I,1!"=="%%J" if "!attributes_before:~%%I,1!"=="-" (
+        if /i "!attributes_now:~%%I,1!"=="%%J" (
+            set "not_cleared_names=!not_cleared_names! %%K"
+        ) else set "cleared_names=!cleared_names! %%K"
     )
+)
+if defined cleared_names (
+    set "msg=Destination directory: cleared!cleared_names! (carried over from the source directory)."
+    call :show_and_log msg
+)
+for %%K in (!not_cleared_names!) do (
+    set "msg=[WARN] Could not clear %%K on the destination directory."
+    call :show_and_log msg
+    call :remember_problem msg
 )
 endlocal & exit /b 0
 
@@ -3782,7 +3903,8 @@ set "history_check_rows=0"
 type nul >"%temp_history_runs%"
 type nul >"%temp_outside_history%"
 type nul >"%temp_predating_records%"
-if defined history_check_history for /f "tokens=1* delims=:" %%A in ('findstr /n "^" "%history_check_history%" 2^>nul') do if %%A gtr 1 (
+if defined history_check_history call :copy_for_reading history_check_history temp_custody_copy
+if defined history_check_history for /f "tokens=1* delims=:" %%A in ('findstr /n "^" "%temp_custody_copy%" 2^>nul') do if %%A gtr 1 (
     set "history_row_line=%%B"
     set "history_line_number=%%A"
     call :check_history_row
@@ -4137,7 +4259,8 @@ if not "!file_name:\=!"=="!file_name!" (
 )
 if /i "!name_in_record!"=="!RECORD_FILE_PREFIX!!%~1!.sha256" (endlocal & exit /b 0)
 call :name_matches_list file_name IGNORED_CUSTODY_FILES && (endlocal & exit /b 0)
-findstr /l /e /c:" *!name_in_record!" "!%~3!" >nul 2>&1 && (endlocal & exit /b 0)
+call :copy_for_reading %~3 temp_custody_copy
+findstr /l /e /c:" *!name_in_record!" "!temp_custody_copy!" >nul 2>&1 && (endlocal & exit /b 0)
 set "finding=Run record !%~1!: !name_in_record! is not listed in its seal."
 call :history_finding finding
 endlocal & set /a "problems+=1" & exit /b 0
@@ -4147,6 +4270,22 @@ rem never taken as listed: unknown is not passed.
 set "finding=Run record !%~1!: !file_path! is in the run record, but its path inside it couldn't be worked out, so it can't be checked against the seal."
 call :history_finding finding
 endlocal & set /a "problems+=1" & exit /b 0
+
+:copy_for_reading  pathVar  copyVar
+rem Copy a custody file (a history, a seal, a log, a script copy) byte for
+rem byte into the TEMP file copyVar names (temp_custody_copy, or
+rem temp_custody_copy_second where two are read together), for findstr,
+rem find or fc to read at once. cmd's own commands (copy, type, if exist,
+rem FOR /F) open a path of any length; those tools, given the path, can't
+rem open one over 260 characters (round 12.8, RECORD-DEEP: a set directory
+rem path of about 240 characters made its history read as matching no run
+rem record). The copy is emptied first, so a file that is missing or can't
+rem be copied reads as empty, as it did when the tool couldn't open it.
+setlocal EnableDelayedExpansion
+set "copy_path=!%~2!"
+type nul >"!copy_path!"
+if exist "!%~1!" copy /b /y "!%~1!" "!copy_path!" >nul 2>&1
+endlocal & exit /b 0
 
 :write_history_with_seal  sourceFileVar  pendingTextVar  sealVar  outFileVar
 rem Write a copy of a history with the pending seal text (only ever in its
@@ -4158,7 +4297,8 @@ set "history_seal_sha256=!%~3!"
 set "history_out_file=!%~4!"
 setlocal DisableDelayedExpansion
 type nul >"%history_out_file%"
-for /f "tokens=1* delims=:" %%A in ('findstr /n "^" "%history_source_file%" 2^>nul') do (
+call :copy_for_reading history_source_file temp_custody_copy
+for /f "tokens=1* delims=:" %%A in ('findstr /n "^" "%temp_custody_copy%" 2^>nul') do (
     set "history_line=%%B"
     call :append_history_line_with_seal
 )
@@ -4339,7 +4479,7 @@ if "%run_mode%"=="forensic" call :add_hash_detail "%invalid_row_count% invalid i
 if "%run_mode%"=="forensic" call :add_hash_detail "added since: %added_file_count% file(s)"
 if %hash_check_incomplete% neq 0 call :add_hash_detail "INCOMPLETE (see Failures)"
 if %unexpected_listing_lines% neq 0 call :add_hash_detail "%unexpected_listing_lines% unexpected listing line(s)"
-if %path_too_long_count% neq 0 call :add_hash_detail "paths too long: %path_too_long_text%"
+if %path_too_long_count% neq 0 call :add_hash_detail "paths too long: %path_too_long_detail_text%"
 rem Files added since the reference fail a forensic run even when every file
 rem in the record matches: say so first.
 if "%run_mode%"=="forensic" if %added_file_count% gtr 0 set "result_hash=%hash_status%: %added_file_count% file(s) in the destination aren't in the reference record (added since); %match_count% of %reference_row_count% %reference_label% match the destination"
@@ -4401,13 +4541,21 @@ exit /b 0
 rem Caller's scope (:work_out_result): path_too_long_count, the refusals for
 rem a path's length on both sides together, and path_too_long_text, the
 rem refusals by side ("1 in the source, 1 in the destination"; a side with
-rem none is left out; "none" if neither has any).
+rem none is left out; "none" if neither has any), and
+rem path_too_long_detail_text, the same for the Hash check's detail line,
+rem short enough to stay on one line from column 29 ("1 source, 1
+rem destination"; round 12.9: the longer form wrapped).
 set /a "path_too_long_count=path_too_long_source_count + path_too_long_destination_count"
 set "path_too_long_text="
+set "path_too_long_detail_text="
 if %path_too_long_source_count% gtr 0 set "path_too_long_text=%path_too_long_source_count% in the source"
+if %path_too_long_source_count% gtr 0 set "path_too_long_detail_text=%path_too_long_source_count% source"
 if %path_too_long_destination_count% gtr 0 if defined path_too_long_text set "path_too_long_text=%path_too_long_text%, "
+if %path_too_long_destination_count% gtr 0 if defined path_too_long_detail_text set "path_too_long_detail_text=%path_too_long_detail_text%, "
 if %path_too_long_destination_count% gtr 0 set "path_too_long_text=%path_too_long_text%%path_too_long_destination_count% in the destination"
+if %path_too_long_destination_count% gtr 0 set "path_too_long_detail_text=%path_too_long_detail_text%%path_too_long_destination_count% destination"
 if not defined path_too_long_text set "path_too_long_text=none"
+if not defined path_too_long_detail_text set "path_too_long_detail_text=none"
 exit /b 0
 
 :report_unaccounted_rows
@@ -4532,8 +4680,9 @@ rem if neither is found.
 setlocal EnableDelayedExpansion
 set "file=!%~1!"
 set "version="
+call :copy_for_reading file temp_custody_copy
 for %%N in (TOOL_VERSION SCRIPT_VERSION) do if not defined version (
-    for /f "tokens=2 delims==" %%V in ('findstr /b /r /c:"set .%%N=" "!file!" 2^>nul') do if not defined version set "version=%%V"
+    for /f "tokens=2 delims==" %%V in ('findstr /b /r /c:"set .%%N=" "!temp_custody_copy!" 2^>nul') do if not defined version set "version=%%V"
 )
 if defined version set "version=!version:"=!"
 endlocal & set "%~2=%version%"
@@ -5653,7 +5802,7 @@ goto each_item_loop
 :cleanup_temp
 rem Delete this run's temporary files; a failed delete never stops the run.
 setlocal EnableDelayedExpansion
-for %%T in (temp_file_list temp_metadata_list temp_listing_numbered temp_listing_line temp_robocopy_unicode_output temp_certutil_output temp_hash_rows_source temp_hash_rows_destination temp_hash_rows_custody temp_custody_list temp_compare_lines temp_compare_lines_sorted temp_summary_warnings temp_summary_failures temp_warnings temp_clock_status temp_housekeeping_source temp_housekeeping_destination temp_history_runs temp_history_lines temp_history_filled temp_outside_history temp_partial_warned temp_predating_records temp_sealed_history_source temp_sealed_history_destination temp_count temp_dashboard_pass temp_dashboard_lock temp_dashboard_helper_done temp_dashboard_lists temp_dashboard_count temp_dashboard_list_tail temp_dashboard_copy_tail temp_dashboard_started_lines temp_dashboard_error_lines temp_copy_pass_listing plain_hash_csv_source plain_hash_csv_destination) do (
+for %%T in (temp_file_list temp_metadata_list temp_custody_copy temp_custody_copy_second temp_listing_numbered temp_listing_line temp_robocopy_unicode_output temp_certutil_output temp_hash_rows_source temp_hash_rows_destination temp_hash_rows_custody temp_custody_list temp_compare_lines temp_compare_lines_sorted temp_summary_warnings temp_summary_failures temp_warnings temp_clock_status temp_housekeeping_source temp_housekeeping_destination temp_history_runs temp_history_lines temp_history_filled temp_outside_history temp_partial_warned temp_predating_records temp_sealed_history_source temp_sealed_history_destination temp_count temp_dashboard_pass temp_dashboard_lock temp_dashboard_helper_done temp_dashboard_lists temp_dashboard_count temp_dashboard_list_tail temp_dashboard_copy_tail temp_dashboard_started_lines temp_dashboard_error_lines temp_copy_pass_listing plain_hash_csv_source plain_hash_csv_destination) do (
     if defined %%T if exist "!%%T!" del /f /q "!%%T!" >nul 2>&1
 )
 rem The staging directories go only if empty: if they still hold records,
@@ -5731,8 +5880,9 @@ rem result, the run records as checked before the copy, every other stage
 rem waiting.
 if not "%dashboard_mode%"=="live" exit /b 0
 set "dashboard_active=1"
+set /a "dashboard_cut_length=OUTPUT_WIDTH - 3"
 set "dashboard_script_text=%result_script%"
-if %history_row_count% gtr 0 set "dashboard_run_records_text=checked before the copy (findings: the header); after it: waiting"
+if %history_row_count% gtr 0 set "dashboard_run_records_text=checked before the copy; after it: waiting"
 rem The blank line a section opens with (shared rule), outside the redrawn
 rem block.
 echo(
@@ -5839,39 +5989,54 @@ endlocal & set "%~1=%centiseconds%"
 exit /b 0
 
 :dashboard_bar_text  doneVar  totalVar  startedVar  outVar
-rem "[####....]  nn %  h:mm:ss" from done of total and the time since the
-rem started centiseconds, taken against the redraw's own clock reading
-rem (dashboard_redraw_clock; a day's wrap allowed for); "starting" while
-rem the total isn't known yet. Counts only: delayed expansion is on.
+rem "[####....]  nn %  h:mm left" from done of total, and the time left
+rem estimated from the average rate since the started centiseconds (owner,
+rem 2026-10-20: time left only, hours and minutes, from the average since
+rem the start rather than the rate of the moment), taken against the
+rem redraw's own clock reading (dashboard_redraw_clock; a day's wrap
+rem allowed for). "estimating" until the stage has run
+rem DASHBOARD_ESTIMATE_AFTER_SECONDS and is DASHBOARD_ESTIMATE_AFTER_PERMILLE
+rem through; minutes rounded up; "starting" while the total isn't known
+rem yet. Progress is taken in thousandths, so no product passes set /a's
+rem 32 bits (2,000,000 MB times 1,000 would). Counts only: delayed
+rem expansion is on.
 setlocal EnableDelayedExpansion
 set "done=0"
 set "total=0"
 if defined %~1 set /a "done=!%~1!" 2>nul
 if defined %~2 set /a "total=!%~2!" 2>nul
-set "elapsed_text=unknown"
-if defined %~3 (
-    set /a "elapsed=(dashboard_redraw_clock - !%~3!) / 100"
-    if !elapsed! lss 0 set /a "elapsed+=86400"
-    set /a "hours=elapsed / 3600, minutes=(elapsed / 60) %% 60, seconds=elapsed %% 60"
-    if !minutes! lss 10 set "minutes=0!minutes!"
-    if !seconds! lss 10 set "seconds=0!seconds!"
-    set "elapsed_text=!hours!:!minutes!:!seconds!"
-)
-if !total! leq 0 (endlocal & set "%~4=starting  %elapsed_text%" & exit /b 0)
+if !total! leq 0 (endlocal & set "%~4=starting" & exit /b 0)
 if !done! gtr !total! set "done=!total!"
 set /a "percent=done * 100 / total, filled=done * DASHBOARD_BAR_WIDTH / total"
 set /a "empty=DASHBOARD_BAR_WIDTH - filled"
 for %%F in (!filled!) do for %%E in (!empty!) do set "bar=[!DASHBOARD_BAR_FULL:~0,%%F!!DASHBOARD_BAR_EMPTY:~0,%%E!]"
 set "padded_percent=   !percent!"
 set "padded_percent=!padded_percent:~-3!"
-endlocal & set "%~4=%bar% %padded_percent% %%  %elapsed_text%"
+set "time_text=estimating"
+set "elapsed=0"
+if defined %~3 (
+    set /a "elapsed=(dashboard_redraw_clock - !%~3!) / 100"
+    if !elapsed! lss 0 set /a "elapsed+=86400"
+)
+if !total! gtr 1000000 (set /a "permille=done / (total / 1000)") else set /a "permille=done * 1000 / total"
+if !permille! gtr 1000 set "permille=1000"
+if !elapsed! geq %DASHBOARD_ESTIMATE_AFTER_SECONDS% if !permille! geq %DASHBOARD_ESTIMATE_AFTER_PERMILLE% (
+    set /a "remaining=elapsed * (1000 - permille) / permille"
+    set /a "remaining_minutes=(remaining + 59) / 60"
+    set /a "hours=remaining_minutes / 60, minutes=remaining_minutes %% 60"
+    if !minutes! lss 10 set "minutes=0!minutes!"
+    set "time_text=!hours!:!minutes! left"
+)
+endlocal & set "%~4=%bar% %padded_percent% %%  %time_text%"
 exit /b 0
 
 :dashboard_redraw
 rem Redraw the block: the cursor up DASHBOARD_LINE_COUNT lines (not the
 rem first time), then every line erased and rewritten (VT sequences, as the
 rem colour uses). Each line is cut to OUTPUT_WIDTH so the console never
-rem wraps one (a wrapped line would put the lines below out of step). A
+rem wraps one (a wrapped line would put the lines below out of step), its
+rem last three characters "..." so the cut shows (round 12.9: rows cut
+rem mid-word looked whole; the summary holds every line in full). A
 rem stage row has the field layout (the status at column 25) and the list
 rem lines the lists' ([WARN] at column 5): their colour is the same rule as
 rem :colour_for_console's for those shapes, written here rather than
@@ -5893,7 +6058,7 @@ for %%S in (%DASHBOARD_STAGES%) do (
     if defined dashboard_%%S_bar call :dashboard_bar_text !dashboard_%%S_done_var! !dashboard_%%S_total_var! dashboard_%%S_started dashboard_stage_text
     set "dashboard_padded_label=!DASHBOARD_STAGE_%%S_LABEL!                    "
     set "dashboard_line=  !dashboard_padded_label:~0,20!: !dashboard_stage_text!"
-    if not "!dashboard_line:~%OUTPUT_WIDTH%!"=="" set "dashboard_line=!dashboard_line:~0,%OUTPUT_WIDTH%!"
+    if not "!dashboard_line:~%OUTPUT_WIDTH%!"=="" set "dashboard_line=!dashboard_line:~0,%dashboard_cut_length%!..."
     if defined console_colour (
         if "!dashboard_line:~24,5!"=="PASS:" set "dashboard_line=!dashboard_line:~0,24!%coloured_pass%!dashboard_line:~28!"
         if "!dashboard_line:~24,5!"=="FAIL:" set "dashboard_line=!dashboard_line:~0,24!%coloured_fail%!dashboard_line:~28!"
@@ -5902,7 +6067,7 @@ for %%S in (%DASHBOARD_STAGES%) do (
     set "dashboard_detail_lines=!DASHBOARD_STAGE_%%S_DETAILS!"
     if defined dashboard_detail_lines for %%D in (!dashboard_detail_lines!) do (
         set "dashboard_line=    !%%D!"
-        if not "!dashboard_line:~%OUTPUT_WIDTH%!"=="" set "dashboard_line=!dashboard_line:~0,%OUTPUT_WIDTH%!"
+        if not "!dashboard_line:~%OUTPUT_WIDTH%!"=="" set "dashboard_line=!dashboard_line:~0,%dashboard_cut_length%!..."
         echo(!dashboard_erase!!dashboard_line!
     )
 )
@@ -5913,7 +6078,7 @@ for %%K in (W F) do (
     echo(!dashboard_erase!!dashboard_line!
     for /l %%N in (1,1,%DASHBOARD_LIST_LINES%) do (
         set "dashboard_line=    !dashboard_list_%%K%%N!"
-        if not "!dashboard_line:~%OUTPUT_WIDTH%!"=="" set "dashboard_line=!dashboard_line:~0,%OUTPUT_WIDTH%!"
+        if not "!dashboard_line:~%OUTPUT_WIDTH%!"=="" set "dashboard_line=!dashboard_line:~0,%dashboard_cut_length%!..."
         if defined console_colour (
             if "!dashboard_line:~4,6!"=="[WARN]" set "dashboard_line=    %coloured_warn_tag%!dashboard_line:~10!"
             if "!dashboard_line:~4,6!"=="[FAIL]" set "dashboard_line=    %coloured_fail_tag%!dashboard_line:~10!"
@@ -6039,6 +6204,9 @@ rem temp_dashboard_pass, written by :run_copy_pass.
 if not defined dashboard_active exit /b 0
 set "copy_excluded_item_count=0"
 if exist "%temp_housekeeping_source%" for /f "usebackq eol=| delims=" %%L in ("%temp_housekeeping_source%") do set /a "copy_excluded_item_count+=1"
+rem The length of the source evidence directory's path, cut from a listed
+rem file's to give its path within the directory (the copy's detail line).
+call :strlen source_with_backslash dashboard_source_prefix_length
 rem Every pass's files, for the count of a pass by files
 rem (:dashboard_count_listed_files); a pass whose listing failed counts 0.
 set "copy_files_all_passes=0"
@@ -6134,10 +6302,14 @@ if exist "%temp_dashboard_pass%" set /p "dashboard_copy_pass_line=" <"%temp_dash
 if not defined dashboard_copy_pass_line exit /b 0
 set "dashboard_copy_pass="
 set "dashboard_copy_pass_state="
-for /f "tokens=1,2" %%A in ("%dashboard_copy_pass_line%") do (
+set "dashboard_copy_pass_started="
+for /f "tokens=1-3" %%A in ("%dashboard_copy_pass_line%") do (
     set "dashboard_copy_pass=%%A"
     set "dashboard_copy_pass_state=%%B"
+    set "dashboard_copy_pass_started=%%C"
 )
+rem The bar's time left is from the pass's own start (:run_copy_pass).
+if defined dashboard_copy_pass_started set "dashboard_copy_started=%dashboard_copy_pass_started%"
 if not defined dashboard_copy_pass exit /b 0
 if "%dashboard_copy_pass%"=="none" exit /b 0
 call :copy_variable PASS_%dashboard_copy_pass%_LABEL dashboard_copy_pass_label
@@ -6365,8 +6537,9 @@ rem (dashboard_copy_done, dashboard_copy_bar_total) and the line under the
 rem copy's bar. A files pass: files done of the total. A bytes pass: MB
 rem done, plus the share of the file in progress that its percentage gives,
 rem of the MB in all; the line gives the file in progress, its percentage
-rem (a pass without /np), the GB done and in all, and the end of the file's
-rem path, as much as fits in the line.
+rem (a pass without /np), the GB done and in all, and the file by its path
+rem within the evidence directory, after the directory's own name (owner,
+rem 2026-10-19: "EV03\EV03.E02"), its end if it doesn't fit.
 set /a "dashboard_copy_current=dashboard_copy_files_done + 1"
 if %dashboard_copy_current% gtr %dashboard_copy_total% set "dashboard_copy_current=%dashboard_copy_total%"
 rem Every file done: the last one is shown at 100 %.
@@ -6385,6 +6558,7 @@ for %%N in (%dashboard_copy_current%) do (
     set "current_name=!copy_pass_%dashboard_copy_pass%_file_%%N_name!"
     set "current_end_mb=!copy_pass_%dashboard_copy_pass%_file_%%N_cumulative_mb!"
 )
+for %%P in (!dashboard_source_prefix_length!) do set "current_name=!evidence_directory_name!\!current_name:~%%P!"
 set /a "bar_done=done_mb + (current_end_mb - done_mb) * dashboard_copy_percent_of_file / 100"
 call :dashboard_gb_text bar_done done_gb
 call :dashboard_gb_text total_mb total_gb

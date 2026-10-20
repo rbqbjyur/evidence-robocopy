@@ -97,8 +97,10 @@ ten times; the prompts, the checks and the result block play at real speed.
   summary's warnings.
 - **Live display.** While a forensic run works, the console shows one
   block, redrawn in place: each check of the result block with its status
-  or a progress bar, the file being copied (with robocopy's percentage
-  within each large file) or hashed, and the last warnings and failures.
+  or a progress bar with an estimate of the time left (from the average
+  rate since that stage began), the file being copied (with robocopy's
+  percentage within each large file) or hashed, and the last warnings and
+  failures.
   Console only: the log and the records are written as before. Windows 10
   or later, not the legacy console; `EVIDENCE_ROBOCOPY_PLAIN=1` gives the
   plain output instead (robocopy's per-file lines, a line per hashed file),
@@ -379,17 +381,17 @@ Warnings (read before relying on this copy)
   Findings made after the copy (such as links not copied) are in the summary.
 
 Environment
-  Script              : evidence-robocopy 2.3.0
+  Script              : evidence-robocopy 2.3.1
   Script path         : C:\Tools\evidence-robocopy.bat
-  Script SHA-256      : 9befc6ffffb467ec215dca8a229cea529606c57a06a5884d486d1acba352da77
+  Script SHA-256      : 7836e0a887a6d2ec51091810b0fd6cb1f41e9c97abbd9d7efa68bdbc227bede3
   Mode                : forensic (default): log, SHA-256 verification and run
                          records
-  Started (UTC)       : 2026-10-19T23:28:15Z (source: robocopy)
+  Started (UTC)       : 2026-10-20T10:27:38Z (source: robocopy)
   Local UTC offset    : +01:00 (robocopy's Started/Ended and ERROR times are
                          local; its file times are UTC)
   Time source         : time.windows.com,0x9
-  Last time sync      : 20/10/2026 00:27:38 (local time, as w32tm reports it),
-                         38 s ago
+  Last time sync      : 20/10/2026 11:26:37 (local time, as w32tm reports it),
+                         1 min ago
   Host                : WORKSTATION-01
   User                : workstation-01\analyst (SID
                          S-1-5-21-1111111111-2222222222-3333333333-1001)
@@ -415,12 +417,12 @@ Source
                          set directory
   Volume              : Volume in drive G is TRANSFER; serial 1A2B-3C4D; exFAT
   Skipped at root     : n/a (not a drive root)
-  Reference record    : evidence-robocopy-records\20261019T232749Z\evidence-robocopy_20261019T232749Z_hashes_source.csv
+  Reference record    : evidence-robocopy-records\20261020T102712Z\evidence-robocopy_20261020T102712Z_hashes_source.csv
                          (row 1 of the history)
   History             : 2 earlier run(s); this is run 3
-  Previous run        : 20261019T232759Z (PASS, host WORKSTATION-01)
+  Previous run        : 20261020T102722Z (PASS, host WORKSTATION-01)
                         seal SHA-256:
-    824d451507e22ac37504e0a09a330a134c5a07f370241642c9f06c1ba6c9d452
+    9fbddd0dfbfa49658614aa4de4ff55b2a6a0340e534d4221b3771477a8ecc4c0
 
 Destination
   Set directory       : H:\Processing\EV03\
@@ -430,47 +432,47 @@ Destination
                          directory
   Was                 : new set (empty, or only an empty evidence directory)
   Volume              : Volume in drive H is PROCESSING; serial 5E6F-7A8B; NTFS
-  Run record          : H:\Processing\EV03\evidence-robocopy-records\20261019T232815Z\
-  Log                 : H:\Processing\EV03\evidence-robocopy-records\20261019T232815Z\evidence-robocopy_20261019T232815Z.log
-  Log during run      : C:\Users\analyst\AppData\Local\Temp\evidence-robocopy_20261019T232815Z_16781_staging\records\evidence-robocopy_20261019T232815Z.log
+  Run record          : H:\Processing\EV03\evidence-robocopy-records\20261020T102738Z\
+  Log                 : H:\Processing\EV03\evidence-robocopy-records\20261020T102738Z\evidence-robocopy_20261020T102738Z.log
+  Log during run      : C:\Users\analyst\AppData\Local\Temp\evidence-robocopy_20261020T102738Z_3627_staging\records\evidence-robocopy_20261020T102738Z.log
 ===============================================================================
 
 -------------------------------------------------------------------------------
 Script: checked against the previous run
-  Script              : PASS: same version (2.3.0) and SHA-256 as the previous
+  Script              : PASS: same version (2.3.1) and SHA-256 as the previous
                          run's script
 
 [...]
 
 -------------------------------------------------------------------------------
 Run records: against the history and their seals
-Run record 20261019T232749Z: 5 file(s) match its seal, 0 problem(s).
+Run record 20261020T102712Z: 5 file(s) match its seal, 0 problem(s).
   Seal SHA-256:
-    a3e812f17acbe056f1361a99fb09fc5b4874c8ce73fd64012efdec51af81ea14
-Run record 20261019T232759Z: 4 file(s) match its seal, 0 problem(s).
+    397a8bdc3ecd39cdefef66b2e7fa4a28ee84f8d06f0bd0d0a6c612cb7165d368
+Run record 20261020T102722Z: 4 file(s) match its seal, 0 problem(s).
   Seal SHA-256:
-    824d451507e22ac37504e0a09a330a134c5a07f370241642c9f06c1ba6c9d452
+    9fbddd0dfbfa49658614aa4de4ff55b2a6a0340e534d4221b3771477a8ecc4c0
 
 -------------------------------------------------------------------------------
 Hash (SHA-256): hashing the destination
 
 -------------------------------------------------------------------------------
 Hash (SHA-256): destination vs reference record
-  evidence-robocopy_20261019T232749Z_hashes_source.csv
+  evidence-robocopy_20261020T102712Z_hashes_source.csv
 
 -------------------------------------------------------------------------------
 Summary
-  Finished (UTC)      : 2026-10-19T23:28:31Z
+  Finished (UTC)      : 2026-10-20T10:27:55Z
   Script copy         : placed in the destination set directory as
                          evidence-robocopy.bat; its SHA-256 matches the Script
                          SHA-256 above
-  Reference record    : evidence-robocopy_20261019T232749Z_hashes_source.csv
+  Reference record    : evidence-robocopy_20261020T102712Z_hashes_source.csv
                         matches its seal
-                         evidence-robocopy_20261019T232749Z.sha256
+                         evidence-robocopy_20261020T102712Z.sha256
                         seal SHA-256:
-    a3e812f17acbe056f1361a99fb09fc5b4874c8ce73fd64012efdec51af81ea14
+    397a8bdc3ecd39cdefef66b2e7fa4a28ee84f8d06f0bd0d0a6c612cb7165d368
   History             : run 3 (2 earlier run(s) in the history)
-  Log                 : H:\Processing\EV03\evidence-robocopy-records\20261019T232815Z\evidence-robocopy_20261019T232815Z.log
+  Log                 : H:\Processing\EV03\evidence-robocopy-records\20261020T102738Z\evidence-robocopy_20261020T102738Z.log
 
   Warnings (did not fail the run)
     none
@@ -484,7 +486,7 @@ The copy completed, every file in the reference record is in the destination
 
 ===============================================================================
   RESULT: PASS (exit code 0)
-    |-Script              : PASS: same version (2.3.0) and SHA-256 as the
+    |-Script              : PASS: same version (2.3.1) and SHA-256 as the
     |                        previous run's script
     |-Copy                : PASS: robocopy exit codes combined: 1
     |-Metadata            : PASS: size and last-modified time match for every
@@ -558,11 +560,6 @@ The copy completed, every file in the reference record is in the destination
   such a path, so the run fails and names the file by the first 200
   characters of its path. No mainstream system makes paths this long
   (Linux stops at 4,096 bytes, macOS at 1,024).
-- Read its own custody files past 260 characters: a set directory whose
-  path is longer than about 170 characters puts its run records and
-  history beyond what cmd's tools open, and a copy from or to it fails
-  (Run records FAIL), though the failure is named as a history mismatch.
-  The evidence files inside the set are not affected. To be fixed in 2.3.1.
 - Flush file-system metadata or a drive's own write cache: file contents
   are written unbuffered, but only ejecting or dismounting the drive
   flushes the rest.

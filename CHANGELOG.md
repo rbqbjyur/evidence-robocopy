@@ -5,9 +5,48 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.3.1 - 2026-10-20
+
+### Changed
+- The live display's bars show an estimate of the time left, in hours and
+  minutes, from the average rate since that stage began (each copy pass
+  on its own), in place of the time elapsed; "estimating" for the first
+  minute and the first 1 %. The bars are two characters shorter to fit.
+- The copy's detail line names the file by its path within the evidence
+  directory, after the directory's own name (`EV03\EV03.E02`), rather than
+  by the end of its source path.
+- A display line too long for the console ends in "..." where it is cut
+  (the summary holds it in full); the Run records row before the copy
+  reads "checked before the copy; after it: waiting".
+- The note on real-time antivirus scanning is now a warning, listed up
+  front with the others and in the live display from its start. It is
+  given when Microsoft Defender's real-time protection appears to be on:
+  its engine is running and no setting that turns it off is found (Group
+  Policy settings count only while Tamper Protection is off, as Defender
+  ignores them otherwise). Best efforts: another antivirus gives none.
+- Removed from the banner: the note on real-time scanning (above), and the
+  reminder that a travelled copy of the script should match the published
+  release (the Script check and the log's Script SHA-256 cover it).
+  Removed before the source prompt: "The evidence directory is copied,
+  under its own name, into a set directory."
+- The Hash check's detail line for paths too long reads "paths too long:
+  1 source, 1 destination", so it stays on one line.
+
+### Fixed
+- A set directory whose path is longer than about 170 characters put its
+  custody files past 260 characters, which findstr, find and fc can't open
+  by path: a copy from or to it failed (Run records FAIL), named as a
+  history mismatch, and the source was hashed anew as the reference
+  record. Custody files are now read through a byte-for-byte copy in TEMP.
+- When an attribute carried over onto the destination evidence directory
+  (Hidden, System, Read-only) couldn't be cleared (attrib doesn't reach a
+  directory past 260 characters), the log said it was cleared and then
+  warned that it wasn't. Each attribute is now reported as the directory
+  has it after the attempt: cleared, or a warning.
+
 ## 2.3.0 - 2026-10-19
 
-Known issue (in every release so far, to be fixed in 2.3.1): a set
+Known issue (in every release so far, fixed in 2.3.1): a set
 directory whose path is longer than about 170 characters puts its custody
 files past 260 characters, which cmd's tools can't open; a copy from or to
 it fails (Run records FAIL, exit 1), but the failure is named as a history
