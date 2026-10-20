@@ -5,6 +5,56 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.4.0 - 2026-10-20
+
+### Added
+- An update check at the start of every run: one header-only request to
+  the GitHub releases page (3 s limit) names the latest release, recorded
+  in the header's "Latest release" field; a warning when this script is
+  older than it, or newer than any published release. The script never
+  updates itself. Offline, behind a proxy, or without `curl.exe`, the
+  field reads "not checked" with the reason, a warning says so, and the
+  run goes on.
+- `/update`: downloads the latest release and its
+  `evidence-robocopy.bat.sha256`, checks the download's SHA-256 against it
+  and its version line, replaces this file in place and starts the updated
+  script for a normal run; when there is nothing newer, says so and goes on
+  with this script. Any failure (no download, a wrong hash, a file that
+  can't be replaced) is a warning, nothing is replaced, and the run goes on.
+  Nothing is recorded: records are for the evidence. Every release from
+  2.4.0 on carries the `.sha256` asset.
+- On a console 100 columns or wider, the header's Source and Destination
+  sections are shown side by side, the same field on the same line
+  (console only; the log keeps one column).
+- WARN as a check status: the Script check reads WARN for a script newer
+  than the previous run's, or a SHA-256 that couldn't be compared (no log
+  in the previous record); the Run records check reads WARN when every
+  record matches after the copy but the check before it raised a warning
+  about the records (`.partial` directories, records outside a restarted
+  history). A WARN never fails the run; the verdict and exit code are
+  unchanged.
+- The elevation notice is an `[INFO]` line, its tag coloured cyan, as every
+  `[INFO]` tag now is where the layout puts a tag (console only).
+
+### Changed
+- The live display's Hash bars count bytes (100 KB units, with a fixed
+  share per file) rather than files, so loose files of mixed sizes give a
+  steadier estimate; the listings that feed them carry sizes.
+- The live display's Run records row reads "waiting" until the check after
+  the copy; the check before it reports through the warnings.
+- While the live display is on, the "Script: checked against the previous
+  run" section goes to the log only (the display's Script row shows the
+  result); the plain output keeps it on the console.
+- The live display needs a window of at least 23 rows and 80 columns: a
+  smaller one, or one whose size can't be read, gets the plain output with
+  a line saying why.
+- The prompts' own refusals ("Directory not found.", "That is a file, not a
+  directory.", the `%` refusal) leave a blank line before the question is
+  asked again; a path that isn't a full path is now refused with a message
+  too, rather than asked again silently.
+- The README shows the tool through its demo and pictures (WebP) and no
+  longer carries a text example of a run.
+
 ## 2.3.1 - 2026-10-20
 
 ### Changed

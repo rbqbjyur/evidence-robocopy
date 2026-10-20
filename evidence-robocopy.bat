@@ -64,7 +64,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.3.1"
+set "TOOL_VERSION=2.4.0"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -153,6 +153,23 @@ set "DEFENDER_OFF_passive_policy_KEY=HKLM\SOFTWARE\Policies\Microsoft\Windows De
 set "DEFENDER_OFF_passive_policy_POLICY=yes"
 set "DEFENDER_OFF_passive_policy_VALUE=PassiveMode"
 
+rem The update check (:check_latest_release; owner, 2026-10-20): every run
+rem asks GitHub, once, which release of this script is the latest, with
+rem curl.exe (built into Windows since 10 1803): a header-only request to
+rem UPDATE_LATEST_URL, answered with a redirect to .../tag/v<version>. A
+rem newer release is a warning; the check never updates anything. /update
+rem (:prepare_update) downloads UPDATE_ASSET_NAME and its SHA-256 file
+rem UPDATE_HASH_ASSET_NAME from UPDATE_DOWNLOAD_URL/<tag>/ and replaces this
+rem file with the download once it is checked. Best efforts: no answer
+rem within UPDATE_CHECK_MAX_SECONDS, or any failure, is a warning and the
+rem run goes on; no proxy handling.
+set "UPDATE_LATEST_URL=https://github.com/rbqbjyur/evidence-robocopy/releases/latest"
+set "UPDATE_DOWNLOAD_URL=https://github.com/rbqbjyur/evidence-robocopy/releases/download"
+set "UPDATE_ASSET_NAME=evidence-robocopy.bat"
+set "UPDATE_HASH_ASSET_NAME=evidence-robocopy.bat.sha256"
+set "UPDATE_CHECK_MAX_SECONDS=3"
+set "UPDATE_DOWNLOAD_MAX_SECONDS=60"
+
 rem Files of at least this many bytes go to the large-file pass.
 set "LARGE_FILE_BYTES=104857600"
 set /a "SMALL_FILE_MAX_BYTES=LARGE_FILE_BYTES - 1, LARGE_FILE_MIB=LARGE_FILE_BYTES / 1048576"
@@ -236,7 +253,17 @@ rem includes empty directories. /xj doesn't follow junctions: only what is
 rem physically inside the source is copied, and junction loops (e.g.
 rem "Application Data" in a user profile) can't recurse forever.
 set "COPY_FLAGS=/e /xj /v /x /ts /fp /bytes /dcopy:DAT /copy:DAT"
-set "LIST_FLAGS=/l /e /xj /njh /njs /ndl /nc /ns /fp /r:0 /w:0"
+rem Every listing carries each file's exact size before its path (/bytes; the
+rem loops that read a listing split it off): the Hash bars count bytes.
+set "LIST_FLAGS=/l /e /xj /njh /njs /ndl /nc /fp /bytes /r:0 /w:0"
+rem The Hash bars' progress (owner, 2026-10-20: by bytes, not files): each
+rem file counts its size in units of 10^HASH_PROGRESS_UNIT_DIGITS bytes (5:
+rem 100 KB; set /a is 32-bit, so 100 KB units reach 214 TB) plus
+rem HASH_WEIGHT_PER_FILE_UNITS for the fixed cost of hashing a file (about
+rem 33 ms on the test machine, worth some 30 MB of hashing: a bar by bytes
+rem alone would stand still through thousands of small files).
+set "HASH_PROGRESS_UNIT_DIGITS=5"
+set "HASH_WEIGHT_PER_FILE_UNITS=300"
 rem The listing made before each copy pass (:count_copy_pass_files): as
 rem LIST_FLAGS, with each file's exact size.
 set "COPY_COUNT_FLAGS=/l /e /xj /njh /njs /ndl /nc /fp /bytes /r:0 /w:0"
@@ -247,7 +274,7 @@ rem last-modified time differ (or that are missing). /xx leaves out files that
 rem exist only in the destination. No /v or class column, so nothing
 rem localised is parsed. Attributes and creation time are copied but not
 rem compared: exFAT can't hold every NTFS attribute.
-set "METADATA_FLAGS=/l /e /xj /xx /njh /njs /ndl /nc /ns /fp /r:0 /w:0"
+set "METADATA_FLAGS=/l /e /xj /xx /njh /njs /ndl /nc /fp /bytes /r:0 /w:0"
 rem File systems with coarse timestamps: if the source or destination is one,
 rem times are compared to 2 s (/fft) instead of exactly.
 set "COARSE_TIME_FILESYSTEMS=FAT FAT32 exFAT"
@@ -365,6 +392,15 @@ rem with a blank line, RULE_LIGHT and a title (:write_section_heading); the
 rem header and the result block sit between RULE_HEAVY lines. BLANKS is a
 rem run of spaces to cut indents from.
 set "OUTPUT_WIDTH=79"
+rem The header's Source and Destination sections side by side on the console
+rem (owner, 2026-10-20), source left, destination right, the same field on
+rem the same row, when the console window is at least this many columns
+rem wide (read once at the start, :read_console_window_size); narrower,
+rem one below the other as the log always has them (the log keeps one
+rem column, for grepping). Each side's labels are HEADER_PAIR_LABEL_WIDTH
+rem wide.
+set "HEADER_SIDE_BY_SIDE_MIN_COLUMNS=100"
+set "HEADER_PAIR_LABEL_WIDTH=9"
 set "RULE_HEAVY================================================================================"
 set "RULE_LIGHT=-------------------------------------------------------------------------------"
 set "BLANKS=                                                                                "
@@ -375,6 +411,7 @@ rem are always written as well. COLOUR_<what>=code; verdicts are bold too.
 set "COLOUR_PASS=32"
 set "COLOUR_WARN=33"
 set "COLOUR_FAIL=31"
+set "COLOUR_INFO=36"
 set "COLOUR_BOLD=1"
 
 rem Live display on the console (:init_dashboard and the :dashboard_*
@@ -411,6 +448,13 @@ rem                                  that many): a rule, the title, the six
 rem                                  stage rows, two detail lines under Copy
 rem                                  and one under Hash, a blank line, the
 rem                                  two lists with their counts, a rule
+rem   DASHBOARD_MIN_WINDOW_ROWS      the console window must show this many
+rem                                  rows for the display (the block, the
+rem                                  blank line above it and the cursor's
+rem                                  line below: a shorter window can't be
+rem                                  redrawn in place, round 12.10); the
+rem                                  window's size is read once at the
+rem                                  start (:read_console_window_size)
 rem   DASHBOARD_STAGES               the result block's checks, in its order;
 rem                                  DASHBOARD_STAGE_<stage>_LABEL its label
 set "DASHBOARD_REDRAW_CENTISECONDS=500"
@@ -425,6 +469,7 @@ set "DASHBOARD_ESTIMATE_AFTER_SECONDS=60"
 set "DASHBOARD_ESTIMATE_AFTER_PERMILLE=10"
 set "DASHBOARD_LIST_LINES=3"
 set "DASHBOARD_LINE_COUNT=21"
+set /a "DASHBOARD_MIN_WINDOW_ROWS=DASHBOARD_LINE_COUNT + 2"
 set "DASHBOARD_STAGES=script copy metadata run_records hash record_written"
 set "DASHBOARD_STAGE_script_LABEL=Script"
 set "DASHBOARD_STAGE_copy_LABEL=Copy"
@@ -463,7 +508,34 @@ call :read_carriage_return
 call :show_banner
 call :check_robocopy || goto :abort
 call :detect_elevation
+call :check_latest_release
+if defined update_requested call :prepare_update
+rem /update, once :prepare_update has checked the download (update_ready): the
+rem replacement and the start of the new file, here in MAIN and inside one
+rem parenthesised block, which cmd parses whole before the copy runs. After
+rem the copy the next line read from this file would come from the new one
+rem at this file's byte offset, and an "exit /b" inside a called helper
+rem would only return here (workshop, 2026-10-20: both seen); in MAIN
+rem "exit /b" ends this script. Nothing in the block calls a label (it would
+rem be looked for in the new file): the code page goes back inline, the scope
+rem is closed (the new run starts in the environment this one started in,
+rem plus update_script_path: the path carried across the endlocal, read
+rem with !var! so a "!" in it survives the delayed expansion the exit code
+rem needs), a scope with delayed expansion is opened for the exit code
+rem (setlocal resets ERRORLEVEL, so it comes before the child), and this
+rem script ends with the new run's exit code.
+if defined update_ready (
+    copy /y "%update_download_path%" "%script_path%" >nul 2>&1 || goto update_replace_failed
+    del /q "%update_dir%\*" >nul 2>&1
+    rd "%update_dir%" >nul 2>&1
+    if not "%original_code_page%"=="unknown" chcp %original_code_page% >nul 2>&1 <nul
+    endlocal & set "update_script_path=%script_path%"
+    setlocal EnableDelayedExpansion
+    cmd /d /c ""!update_script_path!""
+    exit /b !errorlevel!
+)
 if "%run_mode%"=="nonforensic" goto :main_nonforensic
+:main_after_update
 
 rem --- Forensic run (the default): log, verification and run records -------
 call :use_log_mode
@@ -566,15 +638,24 @@ echo.
 echo /nonforensic: a plain copy utility for non-evidence copies: copies the
 echo   source directory's contents into the destination with ETA progress, no
 echo   log and no records; optional SHA-256 verification, shown on screen only.
+echo /update: asks GitHub for the latest release and, if it is newer, replaces
+echo   this file with it (the download checked against the release's SHA-256
+echo   file), then starts the updated script for a normal run.
+echo Every run asks GitHub (github.com) once which release is the latest and
+echo   warns when this script is older or newer than it, or when it can't tell;
+echo   it never updates itself.
 echo.
 echo Records are UTF-8 with CRLF line endings. Files are written unbuffered
 echo   (robocopy /j), so verification reads them back from the drive.
 echo Run as administrator to use backup mode (/b).
 echo A forensic run shows its progress in a live display on the console
-echo   (Windows 10 or later, not the legacy console): each check's status or
-echo   bar, the file in hand, the last warnings and failures. Set
-echo   EVIDENCE_ROBOCOPY_PLAIN=1 for the plain output instead (robocopy's
-echo   lines, a line per hashed file), e.g. when the output is captured.
+echo   (Windows 10 or later, not the legacy console, a window of at least %DASHBOARD_MIN_WINDOW_ROWS%
+echo   rows and more than %OUTPUT_WIDTH% columns): each check's status or bar, the file in
+echo   hand, the last warnings and failures. Set EVIDENCE_ROBOCOPY_PLAIN=1 for
+echo   the plain output instead (robocopy's lines, a line per hashed file),
+echo   e.g. when the output is captured. With the live display, on a console
+echo   %HEADER_SIDE_BY_SIDE_MIN_COLUMNS% columns or wider, the header's Source and Destination sections
+echo   sit side by side.
 echo.
 echo Exit codes:
 echo   %EXIT_CODE_PASS% PASS
@@ -587,6 +668,10 @@ rem Counters and flags used across the run, all given a starting value here.
 rem   copy_exit_codes            robocopy exit codes of all passes, OR-ed
 rem   hashed_count_<side>        files hashed in the source / destination, and
 rem                              custody files hashed in the destination
+rem   hashed_units_<side>        the same in the Hash bars' units (bytes in
+rem                              100 KB units plus a share per file:
+rem                              HASH_WEIGHT_PER_FILE_UNITS), against
+rem                              listing_units_total, the listing's
 rem   unexpected_listing_lines   listing lines that weren't a path in the
 rem                              directory
 rem   hash_check_incomplete      1 if a listing, certutil or the reference
@@ -613,6 +698,10 @@ rem   added_file_count           evidence files added since the reference record
 rem   reference_seal_failed      1 if the reference record's run record fails
 rem                              its checks
 rem   run_records_checked        defined once the run records were checked
+rem   run_records_warned         defined once a warning about the run records
+rem                              was raised (before the copy, or a .partial
+rem                              found after it): a clean check after the
+rem                              copy then reads WARN, not PASS
 rem   run_record_count           run records checked
 rem   run_record_file_match_count  files in them that match their seal
 rem   run_record_problem_count   run record problems (see :check_run_records)
@@ -628,11 +717,13 @@ rem                              :save_robocopy_unicode_output wrote, of
 rem                              those robocopy's output held
 rem   header_written             defined once the log header is complete
 for %%V in (copy_exit_codes hashed_count_source hashed_count_destination hashed_count_custody unexpected_listing_lines hash_check_incomplete) do set "%%V=0"
+for %%V in (hashed_units_source hashed_units_destination hashed_units_custody listing_units_total) do set "%%V=0"
 for %%V in (metadata_differ_count metadata_check_incomplete reference_row_count match_count differ_count missing_count) do set "%%V=0"
 for %%V in (unreadable_count invalid_row_count added_file_count reference_seal_failed utc_clock_failed) do set "%%V=0"
 for %%V in (run_record_count run_record_file_match_count run_record_problem_count history_row_count) do set "%%V=0"
 for %%V in (path_too_long_source_count path_too_long_destination_count copy_log_incomplete robocopy_output_lines_written robocopy_output_lines_total) do set "%%V=0"
 set "run_records_checked="
+set "run_records_warned="
 set "metadata_check_ran="
 set "metadata_time_precision=exact"
 set "compare_lines_done=0"
@@ -701,7 +792,9 @@ set "colour_end=%escape_character%[0m"
 set "coloured_pass=%escape_character%[%COLOUR_PASS%mPASS%colour_end%"
 set "coloured_fail=%escape_character%[%COLOUR_FAIL%mFAIL%colour_end%"
 set "coloured_not_run=%escape_character%[%COLOUR_WARN%mNOT RUN%colour_end%"
+set "coloured_warn=%escape_character%[%COLOUR_WARN%mWARN%colour_end%"
 set "coloured_warn_tag=%escape_character%[%COLOUR_WARN%m[WARN]%colour_end%"
+set "coloured_info_tag=%escape_character%[%COLOUR_INFO%m[INFO]%colour_end%"
 set "coloured_fail_tag=%escape_character%[%COLOUR_FAIL%m[FAIL]%colour_end%"
 set "coloured_verdict_pass=%escape_character%[%COLOUR_BOLD%;%COLOUR_PASS%mPASS%colour_end%"
 set "coloured_verdict_fail=%escape_character%[%COLOUR_BOLD%;%COLOUR_FAIL%mFAIL%colour_end%"
@@ -714,8 +807,10 @@ rem Forensic mode unless /nonforensic is given. Anything else (an unknown
 rem option, a directory dropped on the script, a second argument) stops the run,
 rem so a typo can't silently fall back to a different mode than intended.
 set "run_mode=forensic"
+set "update_requested="
 if /i "%~1"=="/nonforensic" set "run_mode=nonforensic"
-if "%run_mode%"=="forensic" if not "%~1"=="" (
+if /i "%~1"=="/update" set "update_requested=1"
+if "%run_mode%"=="forensic" if not defined update_requested if not "%~1"=="" (
     set "abort_reason=Unknown option. Run with /? for the options."
     exit /b 1
 )
@@ -769,6 +864,10 @@ echo.
 echo Tip: don't click inside this window while it runs: a QuickEdit selection
 echo       pauses the copy until you press Esc.
 echo.
+if not defined dashboard_window_text exit /b 0
+set "msg=Plain output instead of the live display: %dashboard_window_text%."
+call :show msg
+echo.
 exit /b 0
 
 :check_realtime_scanning
@@ -810,6 +909,192 @@ if defined turned_off (endlocal & exit /b 0)
 endlocal & set "defender_realtime_protection_on=1"
 exit /b 0
 
+:check_latest_release
+rem Ask GitHub which release of this script is the latest (owner,
+rem 2026-10-20: every run; never an automatic update): one header-only
+rem request to UPDATE_LATEST_URL with curl.exe, which answers with a
+rem redirect to the release's tag page (.../tag/v<version>); nothing is
+rem downloaded and the API's rate limit doesn't apply. Best efforts within
+rem UPDATE_CHECK_MAX_SECONDS: no curl.exe, no answer in time, or another
+rem answer, and the run goes on with "not checked". Sets
+rem latest_release_version and latest_release_tag (empty unless a version
+rem was read), latest_release_order (the latest against this script: newer,
+rem same or older), latest_release_text (the header's "Latest release"
+rem field) and latest_release_warning (shown here at once, before the
+rem prompts, and added to the warnings by :check_environment). curl's
+rem output goes to a file and is read from there (nothing from the network
+rem goes on a command line); the tag is used only once :parse_version has
+rem accepted it as MAJOR.MINOR.PATCH.
+set "latest_release_version="
+set "latest_release_tag="
+set "latest_release_order="
+set "latest_release_warning="
+set "latest_release_text=not checked"
+where /q curl.exe || (
+    set "latest_release_text=not checked: curl.exe is not on this machine"
+    set "latest_release_warning=Update check: curl.exe is not on this machine, so whether a newer release of this script exists isn't known. The latest release is at %UPDATE_LATEST_URL%."
+    goto check_latest_release_done
+)
+call :choose_temp_dir || (
+    set "latest_release_text=not checked: no temporary directory for curl's answer"
+    set "latest_release_warning=Update check: no temporary directory (TEMP, TMP or LOCALAPPDATA\Temp) to read github.com's answer from, so whether a newer release of this script exists isn't known."
+    goto check_latest_release_done
+)
+set "temp_update_check=%temp_dir%\%TOOL_NAME%_update_check_%RANDOM%.tmp"
+curl.exe -s -S -I -o nul -w "%%{http_code} %%{redirect_url}" --connect-timeout %UPDATE_CHECK_MAX_SECONDS% --max-time %UPDATE_CHECK_MAX_SECONDS% "%UPDATE_LATEST_URL%" >"%temp_update_check%" 2>nul
+set "latest_release_curl_exit=%errorlevel%"
+set "latest_release_http_code="
+set "latest_release_location="
+for /f "usebackq tokens=1,*" %%A in ("%temp_update_check%") do (
+    set "latest_release_http_code=%%A"
+    set "latest_release_location=%%B"
+)
+del "%temp_update_check%" >nul 2>&1
+if not "%latest_release_curl_exit%"=="0" (
+    set "latest_release_text=not checked: github.com didn't answer within %UPDATE_CHECK_MAX_SECONDS% s (curl exit code %latest_release_curl_exit%)"
+    set "latest_release_warning=Update check: github.com couldn't be reached within %UPDATE_CHECK_MAX_SECONDS% s (curl exit code %latest_release_curl_exit%: offline, a proxy, or a slow link), so whether a newer release of this script exists isn't known."
+    goto check_latest_release_done
+)
+rem The tag is the last part of the redirect's URL ("v2.4.0").
+if "%latest_release_http_code%"=="302" if defined latest_release_location for %%P in ("%latest_release_location%") do set "latest_release_tag=%%~nxP"
+if defined latest_release_tag if "%latest_release_tag:~0,1%"=="v" set "latest_release_version=%latest_release_tag:~1%"
+if defined latest_release_version call :parse_version latest_release_version latest_release || set "latest_release_version="
+if not defined latest_release_version (
+    set "latest_release_tag="
+    set "latest_release_text=not checked: github.com's answer named no release (HTTP %latest_release_http_code%)"
+    set "latest_release_warning=Update check: github.com answered, but not with a release (HTTP %latest_release_http_code%: a captive portal or a proxy page?), so whether a newer release of this script exists isn't known."
+    goto check_latest_release_done
+)
+call :parse_version TOOL_VERSION this_version
+call :compare_versions latest_release this_version latest_release_order
+set "latest_release_text=%latest_release_version%: this script is the latest release"
+if "%latest_release_order%"=="newer" (
+    set "latest_release_text=%latest_release_version%, newer than this script (see Warnings)"
+    set "latest_release_warning=A newer release of this script is published: version %latest_release_version% (this is %TOOL_VERSION%). Run it with /update to replace this file with the latest release, or download it from %UPDATE_LATEST_URL%."
+)
+if "%latest_release_order%"=="older" (
+    set "latest_release_text=%latest_release_version%; this script (%TOOL_VERSION%) is newer: not a published release"
+    set "latest_release_warning=This script's version (%TOOL_VERSION%) is newer than the latest published release (%latest_release_version%): it is not a published release."
+)
+:check_latest_release_done
+if not defined latest_release_warning exit /b 0
+set "msg=[WARN] %latest_release_warning%"
+call :show msg
+echo.
+exit /b 0
+
+:prepare_update
+rem /update (owner, 2026-10-20): prepare to replace this script's file with
+rem the latest release when :check_latest_release found a newer one, then
+rem start the new file in this console with no arguments (a normal run) and
+rem end with its exit code. Otherwise say so and return: the run goes on
+rem with this script. Nothing of it reaches a record (records are for the
+rem evidence). The release's script and its SHA-256 file
+rem (UPDATE_HASH_ASSET_NAME, published with every release from 2.4.0 on)
+rem are downloaded into a directory of their own in TEMP; the download
+rem replaces this file only when its SHA-256 is the published one and its
+rem version line reads the release's version. The replacement and the
+rem start of the new file are MAIN's (see there, "update_ready"): this
+rem helper only prepares and checks. The hashing and reading helpers write
+rem their working files under the run's temporary names, which :init_run
+rem sets later: for this step they go into the update directory.
+set "update_ready="
+rem The section opens as every section does, less its empty line: the
+rem elevation notice and the update check's [WARN] before it each end with
+rem one (round 12.12: two empty lines).
+set "section_line=%RULE_LIGHT%"
+call :emit_line section_line console
+set "heading=Update: replacing this script with the latest release"
+call :emit_free_text heading console
+if not defined latest_release_version (
+    set "msg=[WARN] Update: the latest release couldn't be determined (see above), so nothing is replaced. Carrying on with this script (version %TOOL_VERSION%)."
+    call :show msg
+    echo.
+    exit /b 0
+)
+if not "%latest_release_order%"=="newer" (
+    set "msg=Nothing to update: this script (version %TOOL_VERSION%) is the latest release. Carrying on."
+    if "%latest_release_order%"=="older" set "msg=Nothing to update: this script (version %TOOL_VERSION%) is newer than the latest release (%latest_release_version%). Carrying on."
+    call :show msg
+    echo.
+    exit /b 0
+)
+call :choose_temp_dir || (
+    set "update_problem=no temporary directory (TEMP, TMP or LOCALAPPDATA\Temp) for the download"
+    goto update_failed
+)
+set "update_dir=%temp_dir%\%TOOL_NAME%_update_%RANDOM%"
+set "update_download_path=%update_dir%\%UPDATE_ASSET_NAME%"
+set "update_hash_path=%update_dir%\%UPDATE_HASH_ASSET_NAME%"
+mkdir "%update_dir%" >nul 2>&1
+call :is_directory update_dir || (
+    set "update_problem=a directory for the download couldn't be made in TEMP"
+    goto update_failed
+)
+set "temp_certutil_output=%update_dir%\certutil.tmp"
+set "temp_custody_copy=%update_dir%\custody_copy.tmp"
+set "msg=Latest release: %latest_release_version% (this script is %TOOL_VERSION%). Downloading it from %UPDATE_DOWNLOAD_URL%/%latest_release_tag%/ ..."
+call :show msg
+curl.exe -s -S -L -f -o "%update_download_path%" --connect-timeout %UPDATE_CHECK_MAX_SECONDS% --max-time %UPDATE_DOWNLOAD_MAX_SECONDS% "%UPDATE_DOWNLOAD_URL%/%latest_release_tag%/%UPDATE_ASSET_NAME%" 2>nul
+set "update_curl_exit=%errorlevel%"
+if not "%update_curl_exit%"=="0" (
+    set "update_problem=the download of %UPDATE_ASSET_NAME% failed (curl exit code %update_curl_exit%)"
+    goto update_failed
+)
+curl.exe -s -S -L -f -o "%update_hash_path%" --connect-timeout %UPDATE_CHECK_MAX_SECONDS% --max-time %UPDATE_DOWNLOAD_MAX_SECONDS% "%UPDATE_DOWNLOAD_URL%/%latest_release_tag%/%UPDATE_HASH_ASSET_NAME%" 2>nul
+set "update_curl_exit=%errorlevel%"
+if not "%update_curl_exit%"=="0" (
+    set "update_problem=the release's SHA-256 file (%UPDATE_HASH_ASSET_NAME%) couldn't be downloaded, so the download can't be checked (curl exit code %update_curl_exit%)"
+    goto update_failed
+)
+rem The published SHA-256: the first word of the file, as sha256sum writes
+rem it ("<sha256> *<name>"); record content is data (:clean_sha256_from_record).
+set "update_published_sha256="
+for /f "usebackq tokens=1" %%H in ("%update_hash_path%") do if not defined update_published_sha256 set "update_published_sha256=%%H"
+call :clean_sha256_from_record update_published_sha256
+if not defined update_published_sha256 (
+    set "update_problem=%UPDATE_HASH_ASSET_NAME% doesn't hold a SHA-256"
+    goto update_failed
+)
+set "update_download_sha256="
+call :get_sha256 update_download_path update_download_sha256
+if /i not "%update_download_sha256%"=="%update_published_sha256%" (
+    set "update_problem=the download's SHA-256 (%update_download_sha256%) isn't the published one (%update_published_sha256%)"
+    goto update_failed
+)
+set "update_download_version="
+call :read_script_version update_download_path update_download_version
+if not "%update_download_version%"=="%latest_release_version%" (
+    set "update_problem=the download's version line reads %update_download_version%, not %latest_release_version%"
+    goto update_failed
+)
+set "msg=Downloaded and checked: its SHA-256 is the published one (%update_published_sha256%) and its version line reads %latest_release_version%."
+call :show msg
+set "msg=Replacing %script_path% and starting the updated script; its output follows."
+call :show msg
+echo.
+set "update_ready=1"
+exit /b 0
+:update_replace_failed
+rem Reached from MAIN's block when the copy failed (the file is unchanged):
+rem the warning, then the normal run from where MAIN left off.
+set "update_problem=this script's file (%script_path%) couldn't be replaced: read-only, open in another program, or no permission to write it"
+call :report_update_failure
+if "%run_mode%"=="nonforensic" goto :main_nonforensic
+goto main_after_update
+:update_failed
+call :report_update_failure
+exit /b 0
+
+:report_update_failure
+rem The [WARN] for an update that didn't happen (update_problem); what was
+rem downloaded is left in the update directory, when there is one.
+set "msg=[WARN] Update: %update_problem%. Nothing was replaced; carrying on with this script (version %TOOL_VERSION%)."
+if defined update_dir if exist "%update_dir%\" set "msg=%msg% What was downloaded is kept in %update_dir%."
+call :show msg
+echo.
+exit /b 0
+
 :check_robocopy
 where /q robocopy.exe && exit /b 0
 set "abort_reason=robocopy.exe was not found."
@@ -824,17 +1109,18 @@ for %%M in (%ELEVATION_CHECKS%) do if not defined is_elevated call :elevation_ch
     set "is_elevated=1"
     set "elevation_detected_by=%%M"
 )
+rem The notice is an [INFO] line (owner, 2026-10-20: the analyst should be
+rem aware; neither state is preferred), its tag coloured on the console.
 if defined is_elevated (
     set "backup_flag=/b"
     set "header_elevated=yes (detected by %elevation_detected_by%), backup mode /b"
-    echo You are running as Administrator. Backup mode lets robocopy read files
-    echo   regardless of their permissions, but may be slower.
+    set "msg=[INFO] Running as administrator: backup mode (/b) lets robocopy read files regardless of their permissions, but may be slower."
 ) else (
     set "backup_flag="
     set "header_elevated=no"
-    echo You are not running as Administrator. Files your account can't read
-    echo   will fail to copy.
+    set "msg=[INFO] Not running as administrator: files your account can't read will fail to copy."
 )
+call :show msg
 echo.
 exit /b 0
 
@@ -1742,6 +2028,7 @@ if not defined set_aside_text exit /b 0
 if "%~2"=="before" (
     set "msg=%set_aside_text% The Run records check will fail."
     call :add_warning msg
+    set "run_records_warned=1"
     exit /b 0
 )
 set "msg=[FAIL] %set_aside_text%"
@@ -1852,10 +2139,12 @@ rem Compare this script with the previous run's (README, "Script check"):
 rem the version from the newest row of the previous run's sealed history,
 rem the SHA-256 from its sealed log header. The script never vouches for
 rem itself: a difference is flagged for the analyst to verify both scripts
-rem against the published release. Newer version: WARN. Older version, or
-rem the same version with a different SHA-256: FAIL. A previous run whose
-rem sealed history is missing or holds no MAJOR.MINOR.PATCH version: FAIL
-rem (a damaged record). No previous run: nothing to compare.
+rem against the published release. Newer version: WARN (the status too:
+rem owner, 2026-10-20). Older version, or the same version with a different
+rem SHA-256: FAIL. The same version with no log to take the SHA-256 from:
+rem WARN. A previous run whose sealed history is missing or holds no
+rem MAJOR.MINOR.PATCH version: FAIL (a damaged record). No previous run:
+rem nothing to compare.
 if not defined previous_run exit /b 0
 set "previous_run_dir=%history_base_set_with_backslash%%RECORDS_DIR_NAME%\%previous_run%"
 set "previous_sealed_history=%previous_run_dir%\%RECORD_FILE_PREFIX%%previous_run%_history.csv"
@@ -1881,8 +2170,8 @@ if "%version_order%"=="older" (
 if "%version_order%"=="newer" (
     set "msg=Script: this run's script (version %TOOL_VERSION%) is newer than the previous run's (version %previous_script_version%)."
     call :add_warning msg
-    set "script_status=PASS"
-    set "result_script=PASS: version %TOOL_VERSION%, newer than the previous run's %previous_script_version% (see Warnings)"
+    set "script_status=WARN"
+    set "result_script=WARN: version %TOOL_VERSION%, newer than the previous run's %previous_script_version% (see Warnings)"
     exit /b 0
 )
 set "previous_log=%previous_run_dir%\%RECORD_FILE_PREFIX%%previous_run%.log"
@@ -1893,8 +2182,8 @@ call :clean_sha256_from_record previous_script_sha256
 if not exist "%previous_log%" (
     set "msg=Script: the SHA-256 can't be compared: the previous run's record has no log."
     call :add_warning msg
-    set "script_status=PASS"
-    set "result_script=PASS: same version as the previous run (%TOOL_VERSION%); SHA-256 not compared (see Warnings)"
+    set "script_status=WARN"
+    set "result_script=WARN: same version as the previous run (%TOOL_VERSION%); SHA-256 not compared: its record has no log (see Warnings)"
     exit /b 0
 )
 if not defined previous_script_sha256 (
@@ -2036,6 +2325,7 @@ call :precheck_partial_directories destination
 if defined history_base_missing (
     set "msg=Run records: the source set holds run records but no history file (%HISTORY_FILE_NAME%): the Run records check will fail, and the history starts again with this run."
     call :add_warning msg
+    set "run_records_warned=1"
 )
 rem The full check of the earlier runs, before the copy (owner, 2026-10-16):
 rem the history this run continues against the run records of the set that
@@ -2070,6 +2360,7 @@ call :is_partial_run_directory record_directory_name || exit /b 0
 findstr /x /l /c:"%record_directory_name%" "%temp_partial_warned%" >nul 2>&1 && exit /b 0
 set "msg=Run records: %record_directory_name% is an interrupted write-back (a run record never completed); it is outside the history."
 call :add_warning msg
+set "run_records_warned=1"
 >>"%temp_partial_warned%" echo(%record_directory_name%
 exit /b 0
 
@@ -2083,11 +2374,16 @@ endlocal & exit /b 1
 
 :log_pre_copy_findings
 rem After the header: the script check's result, and its failure if any.
+rem With the live display they go to the log only: the display's Script row
+rem and its Failures list show them on the console a line later (owner,
+rem 2026-10-20: the same check shown twice, apart from the others).
+set "pre_copy_findings_target=both"
+if "%dashboard_mode%"=="live" set "pre_copy_findings_target=log"
 set "heading=Script: checked against the previous run"
-call :write_section_heading heading both
-call :log_field "Script" result_script
+call :write_section_heading heading %pre_copy_findings_target%
+call :log_field "Script" result_script %pre_copy_findings_target%
 if not defined script_failure_message exit /b 0
-call :show_and_log script_failure_message
+call :emit_free_text script_failure_message %pre_copy_findings_target%
 call :remember_problem script_failure_message
 exit /b 0
 
@@ -2138,6 +2434,7 @@ set "msg=Environment" & call :show_and_log msg
 call :log_field "Script" header_script
 call :log_field "Script path" script_path
 call :log_field "Script SHA-256" script_sha256
+call :log_field "Latest release" latest_release_text
 call :log_field "Mode" header_mode
 call :log_field "Started (UTC)" header_started
 call :log_field "Local UTC offset" header_utc_offset
@@ -2186,31 +2483,164 @@ set "msg=" & call :emit_free_text msg log
 exit /b 0
 
 :write_header_sets
-rem Forensic run: the source and destination sections, set by set.
+rem Forensic run: the source and destination sections, set by set, one
+rem below the other in the log always, and on the console too unless the
+rem window is wide enough for them side by side (header_side_by_side,
+rem :init_dashboard): then the log gets its column and the console the
+rem pairs (:write_header_set_pairs).
 set "header_source_set=none: raw evidence (a first copy)"
 if defined source_set_path set "header_source_set=%source_set_with_backslash%"
 set "header_records=%destination_run_dir%\"
-set "msg=" & call :show_and_log msg
-set "msg=Source" & call :show_and_log msg
-call :log_field "Set directory" header_source_set
-call :log_field "Evidence directory" source_with_backslash
-call :log_field "Chosen" source_set_rule
-call :log_field "Volume" header_source_volume
-call :log_housekeeping source "Skipped at root"
-call :log_field "Reference record" header_reference_record
-call :log_field "History" header_history
-call :log_field "Previous run" header_previous_run
-if defined header_previous_run_seal call :log_field_continued header_previous_run_seal
-set "msg=" & call :show_and_log msg
-set "msg=Destination" & call :show_and_log msg
-call :log_field "Set directory" destination_set_with_backslash
-call :log_field "Evidence directory" destination_with_backslash
-call :log_field "Chosen" destination_set_rule
-call :log_field "Was" destination_state_text
-call :log_field "Volume" header_destination_volume
-call :log_field "Run record" header_records
-call :log_field "Log" log_destination_text
-call :log_field "Log during run" log_staged_path
+if defined header_side_by_side (
+    call :write_header_set_fields log
+    call :write_header_set_pairs
+) else call :write_header_set_fields both
+exit /b 0
+
+:write_header_set_fields  target
+rem The Source and Destination sections as fields, one below the other, to
+rem the console, the log or both.
+set "msg=" & call :emit_free_text msg %~1
+set "msg=Source" & call :emit_free_text msg %~1
+call :log_field "Set directory" header_source_set %~1
+call :log_field "Evidence directory" source_with_backslash %~1
+call :log_field "Chosen" source_set_rule %~1
+call :log_field "Volume" header_source_volume %~1
+call :log_housekeeping source "Skipped at root" %~1
+call :log_field "Reference record" header_reference_record %~1
+call :log_field "History" header_history %~1
+call :log_field "Previous run" header_previous_run %~1
+if defined header_previous_run_seal call :log_field_continued header_previous_run_seal %~1
+set "msg=" & call :emit_free_text msg %~1
+set "msg=Destination" & call :emit_free_text msg %~1
+call :log_field "Set directory" destination_set_with_backslash %~1
+call :log_field "Evidence directory" destination_with_backslash %~1
+call :log_field "Chosen" destination_set_rule %~1
+call :log_field "Was" destination_state_text %~1
+call :log_field "Volume" header_destination_volume %~1
+call :log_field "Run record" header_records %~1
+call :log_field "Log" log_destination_text %~1
+call :log_field "Log during run" log_staged_path %~1
+exit /b 0
+
+:write_header_set_pairs
+rem Console only: the two sections side by side (owner, 2026-10-20), the
+rem source on the left, the destination on the right, each pair of fields
+rem on the same rows; the fields both sides share first, then each side's
+rem own in parallel. The items skipped at a drive root are summed up here
+rem (the log lists them). The previous run's seal SHA-256 is longer than a
+rem column: it gets a row of its own below the pairs, so it is never cut
+rem (round 12.12: a reader copying it would have copied half).
+set "pair_source_root_text="
+call :describe_housekeeping_for_pair source pair_source_root_text
+set "msg=" & call :show msg
+call :emit_pair_titles Source Destination
+call :emit_field_pair "Set dir" header_source_set "Set dir" destination_set_with_backslash
+call :emit_field_pair "Evidence" source_with_backslash "Evidence" destination_with_backslash
+call :emit_field_pair "Chosen" source_set_rule "Chosen" destination_set_rule
+call :emit_field_pair "Volume" header_source_volume "Volume" header_destination_volume
+call :emit_field_pair "At root" pair_source_root_text "Was" destination_state_text
+call :emit_field_pair "Reference" header_reference_record "Record" header_records
+call :emit_field_pair "History" header_history "Log" log_destination_text
+call :emit_field_pair "Previous" header_previous_run "Log (run)" log_staged_path
+if not defined header_previous_run_seal exit /b 0
+set "msg=  Previous run's %header_previous_run_seal%"
+call :show msg
+exit /b 0
+
+:describe_housekeeping_for_pair  side  outVar
+rem One line for the side-by-side header: the housekeeping items skipped at
+rem the side's drive root, as a count (the log lists each one).
+setlocal
+set "text=n/a (not a drive root)"
+call :is_drive_root %~1_with_backslash || (endlocal & set "%~2=%text%" & exit /b 0)
+if "%~1"=="source" (set "list_file=%temp_housekeeping_source%") else set "list_file=%temp_housekeeping_destination%"
+set "item_count=0"
+if exist "%list_file%" for /f "usebackq tokens=1* delims=:" %%A in ("%list_file%") do set /a "item_count+=1"
+set "text=none present"
+if %item_count% gtr 0 set "text=%item_count% item(s), excluded by exact path (listed in the log)"
+endlocal & set "%~2=%text%"
+exit /b 0
+
+:emit_pair_titles  leftTitle  rightTitle
+rem The two sections' titles on one console row, the right one at the
+rem right column's start.
+setlocal EnableDelayedExpansion
+call :pair_column_width
+set "pair_row=%~1!BLANKS!!BLANKS!!BLANKS!"
+set "pair_row=!pair_row:~0,%pair_column_width%! %~2"
+call :emit_line pair_row console continuation
+endlocal & exit /b 0
+
+:emit_field_pair  leftLabel  leftVar  rightLabel  rightVar
+rem One row of fields on the console, side by side: each field wrapped
+rem within its column (:wrap_field_into_column, the lines left_1.. and
+rem right_1..), the two sets of lines merged row by row, the left padded to
+rem the column's width, one space between. Values are read by name and cut
+rem with !var! substrings only (a "!" in a path stays).
+setlocal EnableDelayedExpansion
+call :pair_column_width
+call :wrap_field_into_column "%~1" %~2 left
+call :wrap_field_into_column "%~3" %~4 right
+set "pair_rows=!left_count!"
+if !right_count! gtr !pair_rows! set "pair_rows=!right_count!"
+for /l %%R in (1,1,!pair_rows!) do (
+    set "pair_left="
+    set "pair_right="
+    if %%R leq !left_count! set "pair_left=!left_%%R!"
+    if %%R leq !right_count! set "pair_right=!right_%%R!"
+    set "pair_left=!pair_left!!BLANKS!!BLANKS!!BLANKS!"
+    set "pair_row=!pair_left:~0,%pair_column_width%! !pair_right!"
+    call :emit_line pair_row console continuation
+)
+endlocal & exit /b 0
+
+:pair_column_width
+rem Caller's scope: pair_column_width, each side's columns (the window's
+rem width less the space between, halved), and pair_value_width, a value's
+rem room on a field's first line (after the indent, the label and ": ");
+rem a continuation gets one column less, as the single column's does.
+set /a "pair_column_width=(console_window_columns - 1) / 2, pair_value_width=pair_column_width - 4 - HEADER_PAIR_LABEL_WIDTH"
+exit /b 0
+
+:wrap_field_into_column  label  valueVar  outPrefix
+rem Caller's scope, delayed expansion on (:emit_field_pair): the field
+rem "  label    : value" wrapped within the pair's column into
+rem <outPrefix>_1.. (<outPrefix>_count lines): the value from the first
+rem line's value column, continuations one column right of it; a break at
+rem the last space or after the last backslash that fits (a path breaks
+rem between its names), else after the last character that fits (a name
+rem longer than the column is cut here, on the console only; the log holds
+rem it whole). A FOR /L, never a goto, per piece.
+set "wrap_label=%~1!BLANKS!"
+set "wrap_prefix=  !wrap_label:~0,%HEADER_PAIR_LABEL_WIDTH%!: "
+set "wrap_text=!%~2!"
+set "%~3_count=0"
+set "wrap_room=!pair_value_width!"
+for /l %%S in (1,1,200) do if defined wrap_text (
+    for %%W in (!wrap_room!) do (
+        set "wrap_piece=!wrap_text:~0,%%W!"
+        set "wrap_rest=!wrap_text:~%%W!"
+    )
+    if defined wrap_rest (
+        set "wrap_break_at="
+        for /l %%I in (!wrap_room!,-1,1) do if not defined wrap_break_at (
+            set "wrap_head=!wrap_text:~0,%%I!"
+            if "!wrap_text:~%%I,1!"==" " set "wrap_break_at=%%I"
+            if "!wrap_head:~-1!"=="\" set "wrap_break_at=%%I"
+        )
+        if defined wrap_break_at for %%B in (!wrap_break_at!) do (
+            set "wrap_piece=!wrap_text:~0,%%B!"
+            set "wrap_rest=!wrap_text:~%%B!"
+        )
+    )
+    for /l %%T in (1,1,4) do if "!wrap_rest:~0,1!"==" " set "wrap_rest=!wrap_rest:~1!"
+    set /a "%~3_count+=1"
+    for %%N in (!%~3_count!) do set "%~3_%%N=!wrap_prefix!!wrap_piece!"
+    set "wrap_text=!wrap_rest!"
+    set "wrap_prefix=!BLANKS:~0,%HEADER_PAIR_LABEL_WIDTH%!     "
+    set /a "wrap_room=pair_value_width - 1"
+)
 exit /b 0
 
 :write_header_plain_directories
@@ -2235,6 +2665,7 @@ rem heads the log header and is repeated in the summary.
 call :check_power
 call :read_clock_status
 call :check_realtime_scanning
+if defined latest_release_warning call :add_warning latest_release_warning
 set "destination_volume_directory=%destination_path%"
 if "%run_mode%"=="forensic" set "destination_volume_directory=%destination_set_path%"
 call :describe_volume "%source_path:~0,2%" header_source_volume source_filesystem source_volume_serial source_volume_label_and_filesystem
@@ -2421,14 +2852,17 @@ set /a "housekeeping_item_count+=1"
 if defined housekeeping_list_file >>"%housekeeping_list_file%" echo(%~1:"%~2"
 exit /b 0
 
-:log_housekeeping  side  label
+:log_housekeeping  side  label  [target]
 rem Log "label : ..." for the housekeeping items skipped at the side's drive
 rem root, one per line, or why there are none (side: source or
-rem destination, the directories robocopy copies between).
+rem destination, the directories robocopy copies between). target: console,
+rem log or both (the default).
 setlocal
+set "housekeeping_target=%~3"
+if not defined housekeeping_target set "housekeeping_target=both"
 set "text=n/a (not a drive root)"
 call :is_drive_root %~1_with_backslash || (
-    call :log_field "%~2" text
+    call :log_field "%~2" text %housekeeping_target%
     endlocal & exit /b 0
 )
 if "%~1"=="source" (set "list_file=%temp_housekeeping_source%") else set "list_file=%temp_housekeeping_destination%"
@@ -2436,19 +2870,19 @@ set "item_count=0"
 if exist "%list_file%" for /f "usebackq tokens=1* delims=:" %%A in ("%list_file%") do set /a "item_count+=1"
 set "text=none present"
 if %item_count% gtr 0 set "text=%item_count% item(s), excluded by exact path:"
-call :log_field "%~2" text
+call :log_field "%~2" text %housekeeping_target%
 if %item_count% equ 0 (endlocal & exit /b 0)
 for /f "usebackq tokens=1* delims=:" %%A in ("%list_file%") do (
     set "item_name=%%~B"
     if "%%A"=="D" (set "item_kind=directory") else set "item_kind=file"
-    call :log_housekeeping_line item_name item_kind
+    call :log_housekeeping_line item_name item_kind %housekeeping_target%
 )
 endlocal & exit /b 0
 
-:log_housekeeping_line  nameVar  kindVar
+:log_housekeeping_line  nameVar  kindVar  target
 setlocal EnableDelayedExpansion
 set "msg=                        !%~1! (!%~2!)"
-call :show_and_log msg
+call :emit_free_text msg %~3
 endlocal & exit /b 0
 
 :add_warning  msgVar
@@ -3085,14 +3519,14 @@ if not defined reference_run (
     set "heading=Hash (SHA-256): hashing the source, which becomes the reference record (none in the source's history)"
     call :write_section_heading heading both
     set "dashboard_hash_detail=hashing the source, which becomes the reference record"
-    call :dashboard_stage_bar hash hashed_count_source files_to_hash_count
+    call :dashboard_stage_bar hash hashed_units_source listing_units_total
     call :hash_directory source || set "hash_check_incomplete=1"
     call :write_hash_csv source || set "hash_check_incomplete=1"
 )
 set "heading=Hash (SHA-256): hashing the destination"
 call :write_section_heading heading both
 set "dashboard_hash_detail=hashing the destination"
-call :dashboard_stage_bar hash hashed_count_destination files_to_hash_count
+call :dashboard_stage_bar hash hashed_units_destination listing_units_total
 call :hash_directory destination || set "hash_check_incomplete=1"
 call :write_hash_csv destination || set "hash_check_incomplete=1"
 if not exist "%reference_csv_path%" (
@@ -3161,7 +3595,7 @@ exit /b 0
 rem Caller's scope (:hash_custody_files): a file in the records directory, in
 rem custody_file_path and custody_file_name; ignored names are left out.
 call :name_matches_list custody_file_name IGNORED_CUSTODY_FILES && exit /b 0
-call :append_line_to_file custody_file_path temp_custody_list
+call :append_sized_line_to_file custody_file_path temp_custody_list
 exit /b 0
 
 :list_top_level_custody_file
@@ -3169,8 +3603,20 @@ rem Caller's scope (:hash_custody_files): a file at the destination set's top
 rem level, in custody_file_name: listed if it is a custody file.
 call :is_custody_file_name custody_file_name || exit /b 0
 set "custody_file_path=%destination_set_with_backslash%%custody_file_name%"
-call :append_line_to_file custody_file_path temp_custody_list
+call :append_sized_line_to_file custody_file_path temp_custody_list
 exit /b 0
+
+:append_sized_line_to_file  pathVar  fileVar
+rem Append a file's path as a listing line ("<size> <path>": robocopy writes
+rem a tab between the two with /bytes, and the loops that read a listing
+rem split at either, so every listing has the same shape; the script holds
+rem no tab). The size from FOR's %%~z (a custody file's path is under cmd's
+rem limits).
+setlocal EnableDelayedExpansion
+set "sized_file_size=0"
+for %%A in ("!%~1!") do set "sized_file_size=%%~zA"
+>>"!%~2!" echo(!sized_file_size! !%~1!
+endlocal & exit /b 0
 
 :append_line_to_file  textVar  fileVar
 rem Append a variable's value as a line to a file.
@@ -3244,7 +3690,7 @@ set "metadata_unexpected_before=%unexpected_listing_lines%"
 for /f "usebackq tokens=1* delims=:" %%A in ("%temp_listing_numbered%") do (
     set "listed_line_number=%%A"
     set "listed_line="
-    for /f "tokens=*" %%L in ("%%B") do set "listed_line=%%L"
+    for /f "tokens=1*" %%S in ("%%B") do set "listed_line=%%T"
     call :report_metadata_difference listed_line
 )
 call :check_listing_tail
@@ -3329,17 +3775,41 @@ rem :check_listing_tail), as is a path over MAX_FILE_PATH_LENGTH. Each line
 rem is trimmed of the tabs and spaces robocopy puts before the path by a
 rem FOR /F of its own (tokens=*), the number having taken the first token.
 rem Last, every file listed must have been hashed, reported or refused
-rem (:report_unaccounted_listing_lines); exit 1 if not.
+rem (:report_unaccounted_listing_lines); exit 1 if not. Each line holds the
+rem file's size before its path (LIST_FLAGS /bytes): the Hash bar's units
+rem (HASH_PROGRESS_UNIT_DIGITS, HASH_WEIGHT_PER_FILE_UNITS) are added up
+rem here into listing_units_total, the bar's total.
 call :copy_variable %~1 hash_listing_path
 set "%~3=0"
-for /f "usebackq tokens=*" %%L in ("%hash_listing_path%") do set /a "%~3+=1"
+rem The files listed and the units they weigh (sizes are digits: delayed
+rem expansion on is safe here).
+setlocal EnableDelayedExpansion
+set "listed_count=0"
+set "listed_units=0"
+for /f "usebackq tokens=1" %%S in ("!hash_listing_path!") do (
+    set "listed_size=%%S"
+    rem A first word that isn't a size (a line of robocopy's own, which
+    rem fails the listing anyway) weighs the per-file share alone.
+    for /f "delims=0123456789" %%X in ("!listed_size!") do set "listed_size="
+    set "listed_file_units="
+    if defined listed_size set "listed_file_units=!listed_size:~0,-%HASH_PROGRESS_UNIT_DIGITS%!"
+    if not defined listed_file_units set "listed_file_units=0"
+    set /a "listed_count+=1, listed_units+=listed_file_units + HASH_WEIGHT_PER_FILE_UNITS"
+)
+endlocal & set "%~3=%listed_count%" & set "listing_units_total=%listed_units%"
 call :number_listing %~1
 call :copy_variable hashed_count_%~2 hash_listing_hashed_before
 set "hash_listing_unexpected_before=%unexpected_listing_lines%"
+rem Each line: its number, then the size and the path split by a FOR /F of
+rem its own (tokens=1*: the size, then the rest after the tab, the path).
 for /f "usebackq tokens=1* delims=:" %%A in ("%temp_listing_numbered%") do (
     set "listed_line_number=%%A"
     set "listed_line="
-    for /f "tokens=*" %%L in ("%%B") do set "listed_line=%%L"
+    set "listed_size="
+    for /f "tokens=1*" %%S in ("%%B") do (
+        set "listed_size=%%S"
+        set "listed_line=%%T"
+    )
     call :hash_listed_file listed_line %~2 %~3
 )
 call :check_listing_tail
@@ -3435,7 +3905,12 @@ call :get_sha256 full_path file_sha256
 if not defined file_sha256 set "file_sha256=UNREADABLE"
 >>"!temp_hash_rows_%~2!" echo("!file_relative_path!","!file_sha256!"
 if "%~2"=="destination" >>"!temp_compare_lines!" echo(!file_relative_path!*!file_sha256!*DST
-endlocal & set /a "hashed_count_%~2+=1" & set "dashboard_tick_count=%dashboard_tick_count%" & set "dashboard_last_redraw=%dashboard_last_redraw%" & set "listing_last_line_number=%listed_line_number%" & set "listing_refused_count=%listing_refused_count%" & exit /b 0
+rem The file's units for the Hash bar (listed_size: the caller's, from the
+rem listing's size column).
+set "file_units=!listed_size:~0,-%HASH_PROGRESS_UNIT_DIGITS%!"
+if not defined file_units set "file_units=0"
+set /a "file_units+=HASH_WEIGHT_PER_FILE_UNITS"
+endlocal & set /a "hashed_count_%~2+=1, hashed_units_%~2+=%file_units%" & set "dashboard_tick_count=%dashboard_tick_count%" & set "dashboard_last_redraw=%dashboard_last_redraw%" & set "listing_last_line_number=%listed_line_number%" & set "listing_refused_count=%listing_refused_count%" & exit /b 0
 :hash_listed_file_skipped
 endlocal & set "listing_last_line_number=%listed_line_number%" & set "listing_refused_count=%listing_refused_count%" & exit /b 0
 
@@ -3822,7 +4297,7 @@ set "line_start="
 findstr /b /l /c:"%~1:" "%temp_listing_numbered%" >"%temp_listing_line%" 2>nul
 set /p "line_start=" <"%temp_listing_line%"
 if defined line_start for /f "tokens=1* delims=:" %%A in ("%line_start%") do set "line_start=%%B"
-if defined line_start for /f "tokens=*" %%T in ("%line_start%") do set "line_start=%%T"
+if defined line_start for /f "tokens=1*" %%S in ("%line_start%") do set "line_start=%%T"
 endlocal & set "%~2=%line_start%"
 exit /b 0
 
@@ -3936,7 +4411,7 @@ setlocal EnableDelayedExpansion
 if "!history_check_mode!"=="warn" (
     set "msg=!%~1! The Run records check will fail."
     call :add_warning msg
-    endlocal & exit /b 0
+    endlocal & set "run_records_warned=1" & exit /b 0
 )
 set "msg=[FAIL] !%~1!"
 call :show_and_log msg
@@ -3964,7 +4439,7 @@ for /f "usebackq delims=" %%P in ("!temp_predating_records!") do (
 if !predating_count! equ 0 (endlocal & exit /b 0)
 set "msg=Run records: !predating_count! run record(s) predate the history (listed as outside it when it was restarted): !predating_names:~2!. Each one's seal file still has the SHA-256 listed for it; its files are checked against that seal separately."
 call :add_warning msg
-endlocal & exit /b 0
+endlocal & set "run_records_warned=1" & exit /b 0
 
 :check_history_row
 rem Caller's scope (:check_history_against_records): one row of the history,
@@ -4049,6 +4524,7 @@ rem the checks before and after the copy both find it); after the copy it
 rem is also logged with the run records.
 if "%history_check_mode%"=="quiet" exit /b 0
 set "msg=Run records: %record_directory_name% is an interrupted write-back (a run record never completed); it is outside the history."
+set "run_records_warned=1"
 set "tagged_msg=[WARN] %msg%"
 if "%history_check_mode%"=="fail" call :show_and_log tagged_msg
 call :add_warning msg
@@ -4064,6 +4540,7 @@ rem restart; the missing seal itself is a failure of :check_run_record.
 if "%outside_seal_sha256%"=="none" if not defined record_directory_seal_sha256 (
     set "msg=Run records: %record_directory_name% predates the history: run %outside_listed_by% found it outside the history it restarted, without a seal, and it still has none."
     call :add_warning msg
+    set "run_records_warned=1"
     exit /b 0
 )
 set "finding=Run records: %record_directory_name%, listed by run %outside_listed_by% as outside the history it restarted, has changed since: its seal's SHA-256 isn't the one listed."
@@ -4525,15 +5002,19 @@ if %metadata_check_incomplete% neq 0 set "result_metadata=FAIL: the comparison w
 exit /b 0
 
 :work_out_run_records_status
-rem run_records_status (PASS, FAIL or NONE) and the Run records row's text:
-rem NONE if the set has no earlier runs (a first copy); FAIL if there are
-rem some but the check didn't run, or found any problem. Also called when
-rem that check finishes, for the live display.
+rem run_records_status (PASS, WARN, FAIL or NONE) and the Run records row's
+rem text: NONE if the set has no earlier runs (a first copy); FAIL if there
+rem are some but the check didn't run, or found any problem; WARN if the
+rem check after the copy found none but a warning about the records was
+rem raised (run_records_warned; owner, 2026-10-20: the warning is inherited,
+rem never a PASS beside it). Also called when that check finishes, for the
+rem live display.
 set "run_records_status=NONE"
 set "result_run_records=NONE: no earlier runs found in the source"
 if %history_row_count% gtr 0 if not defined run_records_checked set "run_records_status=FAIL" & set "result_run_records=FAIL: not checked (verification stopped before the run records check; see Failures)"
 if defined run_records_checked set "run_records_status=PASS" & set "result_run_records=PASS: %run_record_count% run record(s) match their seals and the history (%run_record_file_match_count% sealed file(s))"
 if defined run_records_checked if %run_record_count% equ 0 if %run_record_problem_count% equ 0 set "run_records_status=NONE" & set "result_run_records=NONE: no earlier runs found in the source"
+if defined run_records_checked if defined run_records_warned if %run_record_count% gtr 0 if %run_record_problem_count% equ 0 set "run_records_status=WARN" & set "result_run_records=WARN: %run_record_count% run record(s) match their seals and the history (%run_record_file_match_count% sealed file(s)); warnings before the copy (see Warnings)"
 if %run_record_problem_count% neq 0 set "run_records_status=FAIL" & set "result_run_records=FAIL: %run_record_problem_count% problem(s) in the run records (see Run records above, and Failures)"
 exit /b 0
 
@@ -5172,7 +5653,7 @@ rem Prompt with "<prompt>: " for a directory until it is valid, and set
 rem <side>_path and <side>_with_backslash. With allowDefault=1,
 rem default_source_path is shown on the line above the prompt and an empty
 rem answer takes it (sets default_source_taken). Anything that isn't a full
-rem path is simply asked again. Exit 1 (with abort_reason) after
+rem path is refused and asked again. Exit 1 (with abort_reason) after
 rem MAX_PROMPT_ATTEMPTS invalid answers.
 set "directory_attempts=0"
 set "default_source_taken="
@@ -5193,17 +5674,25 @@ if not defined normalise_path_input if "%~4"=="1" if defined default_source_path
     set "normalise_path_input=%default_source_path%"
     set "default_source_taken=1"
 )
+rem Every refusal says why and leaves a blank line before the prompt comes
+rem again (owner, 2026-10-20).
 call :normalise_path
-if errorlevel 1 goto ask_directory_loop
+if errorlevel 1 (
+    echo Enter a full path: a drive letter and directory, or a UNC path.
+    echo.
+    goto ask_directory_loop
+)
 call :path_has_percent normalise_path_result && (
     echo Paths containing %% can't be handled safely yet: rename the
     echo   directory or choose another.
+    echo.
     goto ask_directory_loop
 )
 set "answer_is_directory="
 call :is_directory normalise_path_result && set "answer_is_directory=1"
 if exist "%normalise_path_result%" if not defined answer_is_directory (
     echo That is a file, not a directory.
+    echo.
     goto ask_directory_loop
 )
 if "%~3"=="1" if not defined answer_is_directory (
@@ -5212,6 +5701,7 @@ if "%~3"=="1" if not defined answer_is_directory (
         echo As administrator, drive letters mapped in your normal session are not
         echo   visible. For a network share, enter its UNC path: \\server\share\...
     )
+    echo.
     goto ask_directory_loop
 )
 set "%~1_path=%normalise_path_result%"
@@ -5455,15 +5945,17 @@ if not defined field_target set "field_target=both"
 call :emit_wrapped field_line 24 field_continuation !field_target! field_long_word_start
 endlocal & exit /b 0
 
-:log_field_continued  valueVar
+:log_field_continued  valueVar  [target]
 rem Show and log a further line of a field, starting at the value column
 rem (25); a long one continues from column 26, a word that can't fit there
-rem from column 5.
+rem from column 5. target: console, log or both (the default).
 setlocal EnableDelayedExpansion
 set "field_line=!BLANKS:~0,24!!%~1!"
 set "field_continuation=!BLANKS:~0,25!"
 set "field_long_word_start=!BLANKS:~0,4!"
-call :emit_wrapped field_line 24 field_continuation both field_long_word_start
+set "field_target=%~2"
+if not defined field_target set "field_target=both"
+call :emit_wrapped field_line 24 field_continuation !field_target! field_long_word_start
 endlocal & exit /b 0
 
 :write_section_heading  titleVar  target
@@ -5607,11 +6099,12 @@ endlocal & exit /b 0
 :colour_for_console  lineVar
 rem Caller's scope, delayed expansion on (:emit_line). Colour the status
 rem words of a console line (COLOUR_* in CONFIG): the verdict bold, PASS
-rem green, WARN and NOT RUN yellow, FAIL red. The words themselves stay.
-rem Only where the layout puts a status, so the same words in an evidence
-rem name ("[FAIL] x.txt", "PASSPORT.pdf") stay plain: a [FAIL] or [WARN]
-rem tag starting the line (column 1, or 3 and 5 in the Warnings and
-rem Failures lists), the verdict of the RESULT line, the status starting a
+rem green, WARN and NOT RUN yellow, FAIL red, an [INFO] tag cyan. The words
+rem themselves stay. Only where the layout puts a status, so the same words
+rem in an evidence name ("[FAIL] x.txt", "PASSPORT.pdf") stay plain: a
+rem [FAIL], [WARN] or [INFO] tag starting the line (column 1, or 3 and 5
+rem in the Warnings and Failures lists), the verdict of the RESULT line,
+rem the status starting a
 rem result block row's value (column 29), and a status and colon starting
 rem a field's value at column 25, on the field's own line or a detail line
 rem below it (the Script field; Script copy, or the Reference record's seal
@@ -5624,6 +6117,9 @@ if "!colour_line:~0,10!"=="    [FAIL]" set "%~1=    %coloured_fail_tag%!colour_l
 if "!colour_line:~0,6!"=="[WARN]" set "%~1=%coloured_warn_tag%!colour_line:~6!"
 if "!colour_line:~0,8!"=="  [WARN]" set "%~1=  %coloured_warn_tag%!colour_line:~8!"
 if "!colour_line:~0,10!"=="    [WARN]" set "%~1=    %coloured_warn_tag%!colour_line:~10!"
+if "!colour_line:~0,6!"=="[INFO]" set "%~1=%coloured_info_tag%!colour_line:~6!"
+if "!colour_line:~0,8!"=="  [INFO]" set "%~1=  %coloured_info_tag%!colour_line:~8!"
+if "!colour_line:~0,10!"=="    [INFO]" set "%~1=    %coloured_info_tag%!colour_line:~10!"
 if "!colour_line:~0,10!"=="  RESULT: " (
     set "%~1=!%~1:RESULT: PASS=RESULT: %coloured_verdict_pass%!"
     set "%~1=!%~1:RESULT: FAIL=RESULT: %coloured_verdict_fail%!"
@@ -5632,6 +6128,7 @@ if "!colour_line:~0,10!"=="  RESULT: " (
 if "!colour_line:~0,6!"=="    |-" if "!colour_line:~26,2!"==": " (
     if "!colour_line:~28,4!"=="PASS" set "%~1=!colour_line:~0,28!%coloured_pass%!colour_line:~32!"
     if "!colour_line:~28,4!"=="FAIL" set "%~1=!colour_line:~0,28!%coloured_fail%!colour_line:~32!"
+    if "!colour_line:~28,4!"=="WARN" set "%~1=!colour_line:~0,28!%coloured_warn%!colour_line:~32!"
     if "!colour_line:~28,7!"=="NOT RUN" set "%~1=!colour_line:~0,28!%coloured_not_run%!colour_line:~35!"
 )
 set "colour_field_value_line="
@@ -5640,6 +6137,7 @@ if "!colour_line:~0,24!"=="!BLANKS:~0,24!" set "colour_field_value_line=1"
 if defined colour_field_value_line (
     if "!colour_line:~24,5!"=="PASS:" set "%~1=!colour_line:~0,24!%coloured_pass%!colour_line:~28!"
     if "!colour_line:~24,5!"=="FAIL:" set "%~1=!colour_line:~0,24!%coloured_fail%!colour_line:~28!"
+    if "!colour_line:~24,5!"=="WARN:" set "%~1=!colour_line:~0,24!%coloured_warn%!colour_line:~28!"
     if "!colour_line:~24,8!"=="NOT RUN:" set "%~1=!colour_line:~0,24!%coloured_not_run%!colour_line:~31!"
 )
 exit /b 0
@@ -5868,10 +6366,65 @@ set "dashboard_copy_error_text="
 set "dashboard_hash_detail="
 for %%S in (%DASHBOARD_STAGES%) do set "dashboard_%%S_text=waiting"
 for %%S in (%DASHBOARD_STAGES%) do set "dashboard_%%S_bar="
+set "console_window_rows=unknown"
+set "console_window_columns=unknown"
+set "header_side_by_side="
+set "dashboard_window_text="
 if not "%run_mode%"=="forensic" exit /b 0
-if defined EVIDENCE_ROBOCOPY_PLAIN exit /b 0
 if not defined console_vt exit /b 0
+if defined EVIDENCE_ROBOCOPY_PLAIN exit /b 0
+call :read_console_window_size
+rem The header's Source and Destination sections side by side on a window
+rem HEADER_SIDE_BY_SIDE_MIN_COLUMNS wide or wider (owner, 2026-10-20). Not
+rem with EVIDENCE_ROBOCOPY_PLAIN: the plain output is today's, one column,
+rem whatever the window (captured output is read as text).
+if not "%console_window_columns%"=="unknown" if %console_window_columns% geq %HEADER_SIDE_BY_SIDE_MIN_COLUMNS% set "header_side_by_side=1"
+rem The display needs a window it can redraw in: DASHBOARD_MIN_WINDOW_ROWS
+rem rows and more than OUTPUT_WIDTH columns (round 12.10: a shorter window
+rem left partial blocks in the buffer); otherwise the plain output, the
+rem reason given after the banner (dashboard_window_text).
+if "%console_window_rows%"=="unknown" set "dashboard_window_text=the console window's size couldn't be read"
+if not "%console_window_rows%"=="unknown" if %console_window_rows% lss %DASHBOARD_MIN_WINDOW_ROWS% set "dashboard_window_text=the console window shows %console_window_rows% rows; the live display needs %DASHBOARD_MIN_WINDOW_ROWS%"
+if not "%console_window_columns%"=="unknown" if %console_window_columns% leq %OUTPUT_WIDTH% set "dashboard_window_text=the console window is %console_window_columns% columns wide; the live display needs more than %OUTPUT_WIDTH%"
+if defined dashboard_window_text exit /b 0
 set "dashboard_mode=live"
+exit /b 0
+
+:read_console_window_size
+rem The console window's rows and columns, into console_window_rows and
+rem _columns ("unknown" when they can't be read), from "mode con" inside
+rem the alternate screen buffer (VT ?1049): in conhost the main buffer's
+rem "Lines" is the scrollback buffer's height (9001 by default), while the
+rem alternate buffer is the window's size; Windows Terminal reports the
+rem window either way (workshop, 2026-10-20). The main screen is restored
+rem on switching back. mode con's lines come in a fixed order in any
+rem language, so the first two numbers are taken: rows, then columns. It
+rem reads the console input unless given <nul (round 1's lesson).
+set "console_window_rows=unknown"
+set "console_window_columns=unknown"
+call :choose_temp_dir || exit /b 0
+set "temp_console_size=%temp_dir%\%TOOL_NAME%_console_size_%RANDOM%.tmp"
+<nul set /p "=%escape_character%[?1049h"
+mode con >"%temp_console_size%" 2>nul <nul
+<nul set /p "=%escape_character%[?1049l"
+set "console_size_numbers_read=0"
+for /f "usebackq delims=" %%L in ("%temp_console_size%") do (
+    set "console_size_line=%%L"
+    call :read_console_size_number
+)
+del "%temp_console_size%" >nul 2>&1
+exit /b 0
+
+:read_console_size_number
+rem Caller's scope (:read_console_window_size): the last word of the line in
+rem console_size_line, if it is a number, is the next of rows and columns.
+set "console_size_word="
+for %%T in (%console_size_line%) do set "console_size_word=%%T"
+if not defined console_size_word exit /b 0
+for /f "delims=0123456789" %%X in ("%console_size_word%") do exit /b 0
+set /a "console_size_numbers_read+=1"
+if %console_size_numbers_read% equ 1 set "console_window_rows=%console_size_word%"
+if %console_size_numbers_read% equ 2 set "console_window_columns=%console_size_word%"
 exit /b 0
 
 :dashboard_start
@@ -5882,7 +6435,6 @@ if not "%dashboard_mode%"=="live" exit /b 0
 set "dashboard_active=1"
 set /a "dashboard_cut_length=OUTPUT_WIDTH - 3"
 set "dashboard_script_text=%result_script%"
-if %history_row_count% gtr 0 set "dashboard_run_records_text=checked before the copy; after it: waiting"
 rem The blank line a section opens with (shared rule), outside the redrawn
 rem block.
 echo(
@@ -6062,6 +6614,7 @@ for %%S in (%DASHBOARD_STAGES%) do (
     if defined console_colour (
         if "!dashboard_line:~24,5!"=="PASS:" set "dashboard_line=!dashboard_line:~0,24!%coloured_pass%!dashboard_line:~28!"
         if "!dashboard_line:~24,5!"=="FAIL:" set "dashboard_line=!dashboard_line:~0,24!%coloured_fail%!dashboard_line:~28!"
+        if "!dashboard_line:~24,5!"=="WARN:" set "dashboard_line=!dashboard_line:~0,24!%coloured_warn%!dashboard_line:~28!"
     )
     echo(!dashboard_erase!!dashboard_line!
     set "dashboard_detail_lines=!DASHBOARD_STAGE_%%S_DETAILS!"
