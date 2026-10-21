@@ -5,6 +5,58 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.6.0 - 2026-10-21
+
+Known issue: in the classic console (conhost; not Windows Terminal), after
+Ctrl+C (answered with Y) while the live display is on, the window closes
+at the first key pressed in it. The warning saying what the stop left and
+where the log is can be read until then.
+
+### Added
+- Options that answer the prompts, in any order with the modes: `/source
+  "<path>"`, `/destination "<path>"` (a relocation's new location; not
+  with `/check`), `/yes-to-all` (every question answered with its first
+  choice: the help lists them; it never moves a set) and `/nopause`. A
+  refused path stops the run before anything is written; a question no
+  option answers is asked at the console as usual. Each answer given by
+  `/yes-to-all` is echoed as a typed one is, and the log's header gains a
+  "Confirmations" field saying whether questions were asked at the
+  console or answered by it.
+- In a copy run, when the destination is a new set on the source set's
+  volume, a question: copy the set (Enter, or `copy`), or move it there
+  (the word `relocate`, typed in full, which is the confirmation): the
+  run is then a relocation, recorded as `/relocate` records it. An empty
+  destination directory, or an empty evidence-named directory inside an
+  otherwise empty one, is removed to make room for the move. Answer files
+  that end before the question, and `/yes-to-all`, copy.
+- The compare's fast path: when the destination's hash record is
+  identical to the reference record byte for byte, every file is known to
+  match and the row-by-row comparison is skipped, with a line in the log
+  saying so; any difference, an `UNREADABLE` row in the reference, no
+  rows, or a reference whose run record failed its seal runs the full
+  comparison as before. The counts and the result are those the full
+  comparison would give.
+
+### Changed
+- The live display is drawn on the console's second screen and laid out
+  for the window at every redraw, so the window can be made larger or
+  smaller at any time: the progress block always, with its Failures list
+  before its Warnings list (side by side from 160 columns; one above the
+  other sharing the rows two to one otherwise); above it, with rows to
+  spare, the Source and Destination sections, then the environment in
+  cells across the screen with short values; the rules and bars as wide
+  as the window. The display always starts; under 80 x 23 it shows one
+  line asking for a larger window until it has one. The header, the
+  summary and the result block stay on the normal screen. A watchdog
+  restores the normal screen when the run is stopped (Ctrl+C) while the
+  display is on, with a warning saying what the stop left and where the
+  log is. The 2.4.0 size check at the start and its note after the banner
+  are gone. A bar's fill is computed from thousandths, so a set of a few
+  TB no longer overflows it.
+- An unknown option is named in the refusal ("Unknown option: /x"); a
+  second mode, `/update` with another option, and `/check` with
+  `/destination` each have their own refusal ("Too many options" is gone).
+
 ## 2.5.0 - 2026-10-20
 
 ### Added

@@ -51,7 +51,11 @@ ten times; the prompts, the checks and the result block play at real speed.
   later copy. Each copy hashes its destination with `certutil` and compares
   every file by relative path, so it is checked back to the original record,
   not only to its immediate source. Files that differ, are missing or are
-  unreadable fail the run.
+  unreadable fail the run. When the destination's hash record is identical
+  to the reference record byte for byte, every file is known to match and
+  the row-by-row comparison is skipped; any difference, an unreadable file
+  in the reference, or a reference whose run record failed its seal, runs
+  the full comparison.
 - **Verified from the drive, not from memory.** Every copy pass and the
   run's own record are written unbuffered (`robocopy /j`), so hashing reads
   file contents back from the destination drive rather than from the
@@ -120,16 +124,22 @@ ten times; the prompts, the checks and the result block play at real speed.
   means; the console couldn't be switched to UTF-8. Links in the source
   that weren't copied are found after the copy, so they are listed with the
   summary's warnings.
-- **Live display.** While a forensic run works, the console shows one
-  block, redrawn in place: each check of the result block with its status
-  or a progress bar with an estimate of the time left (from the average
-  rate since that stage began; the hashing bars count bytes, with a fixed
-  share per file), the file being copied (with robocopy's percentage
-  within each large file) or hashed, and the last warnings and failures.
-  Console only: the log and the records are written as before. Windows 10
-  or later, not the legacy console, in a window of at least 23 rows and 80
-  columns that keeps its size during the run; a smaller window, or
-  `EVIDENCE_ROBOCOPY_PLAIN=1`, gives the plain output instead (robocopy's
+- **Live display.** While a forensic run works, the console shows its
+  progress on a second screen, laid out for the window at each redraw:
+  make the window larger at any time, maximise it, or make it smaller
+  again. The progress block is always there: each check of the result
+  block with its status or a progress bar with an estimate of the time
+  left (from the average rate since that stage began; the hashing bars
+  count bytes, with a fixed share per file), the file being copied (with
+  robocopy's percentage within each large file) or hashed, and the last
+  failures and warnings (side by side from 160 columns). With rows to
+  spare, the Source and Destination sections come above it, and then the
+  environment in cells across the screen. A window under 80 x 23 shows one
+  line asking for a larger one, and the display returns once it has it.
+  The header, the summary and the result block stay on the normal screen,
+  where the display leaves no trace. Console only: the log and the records
+  are written as before. Windows 10 or later, not the legacy console;
+  `EVIDENCE_ROBOCOPY_PLAIN=1` gives the plain output instead (robocopy's
   per-file lines, a line per hashed file), e.g. when the output is
   captured. On a console 100 columns or wider the header's Source and
   Destination sections sit side by side; the log keeps one column.
@@ -218,9 +228,29 @@ evidence-robocopy.bat /update         replace this file with the latest release
                                       if it is newer, then a forensic run
 evidence-robocopy.bat /nonforensic    plain copy utility, no log or records
 evidence-robocopy.bat /?              help
+
+Options, in any order with the modes:
+  /source "<path>"        answers the SOURCE prompt
+  /destination "<path>"   answers the DESTINATION prompt (a relocation's new
+                          location); not with /check
+  /yes-to-all             answers every question with its first choice (a
+                          destination that holds the set: continue; /check
+                          and /relocate: go ahead; copy or relocate: copy;
+                          the /nonforensic questions: continue, compare)
+  /nopause                no "Press any key" at the end
 ```
 
 Run as administrator for backup mode. Any other argument stops the run.
+Quote each path; the shell expands a `%name%` of a defined variable in it
+before the script runs, and from another batch file start the script
+without `CALL` (which doubles each `^` and expands `%%` again); from
+PowerShell, quote a path with `&` inside the string. A path the run
+refuses stops it before anything is written (exit 1); a question no option
+answers is asked at the console as usual. `/yes-to-all` says what it does:
+the analyst accepts every question the run may ask, whatever comes up, so
+give it only when you know which questions this run will ask. It never
+moves a set (that takes the word `relocate`, typed or as the option), and
+the log's header records whether questions were answered by it.
 `EVIDENCE_ROBOCOPY_PLAIN=1` in the environment gives the plain console output
 instead of the live display; `NO_COLOR=1` turns colour off. Neither changes
 the log or the records.
@@ -302,7 +332,8 @@ with every file named `evidence-robocopy_<run UTC>…`:
 - `evidence-robocopy_<UTC>.log`: the warnings, then a header in three
   sections (environment: script version, path and SHA-256, host, user,
   Windows version, encoding, elevation, UTC start, local offset, time source
-  and last sync, options; source: set and evidence directories, the rule that
+  and last sync, options, whether questions were answered at the console or
+  by `/yes-to-all`; source: set and evidence directories, the rule that
   chose them, volume label, serial and file system, reference record,
   history, previous run, each housekeeping item skipped at a drive root;
   destination: the same, and this run's record), the robocopy output with
@@ -450,6 +481,16 @@ copy), a network path (its volume can't be read), a location inside the
 set, raw evidence, and the set the script itself runs from. A move that
 fails leaves the set where it was, and the run stops with the reason.
 
+A copy run offers the move too: when the destination is a new set on the
+source set's volume (and the source is a set, not raw evidence or the
+script's own directory), the run asks whether to copy the set or to move
+it there. Enter, or `copy`, copies as always; the word `relocate`, typed
+in full, moves the set to the set directory the copy would have used (an
+empty destination directory, or an empty evidence-named directory inside
+one, is removed to make room) and the run is a relocation from there on,
+recorded as `/relocate` records it. Typing the word is the confirmation.
+`/yes-to-all` answers copy.
+
 ## Non-forensic mode
 
 `/nonforensic` is a plain copy utility for non-evidence copies, confirmed
@@ -535,6 +576,18 @@ without the script.
   update check as "not checked" (a warning), and `/update` can't download.
 - Move a set to another volume or to or from a network path (`/relocate`
   is a rename within one volume; for another volume, copy the set there).
+- Restore the console in every case when the run is stopped while the
+  live display is on. After Ctrl+C (answered with Y) a watchdog switches the
+  console back to the normal screen and says what the stop left and where
+  the log is; robocopy first finishes the files in flight. In the classic
+  console (conhost; not Windows Terminal) the window then closes at the
+  first key pressed in it, so read or copy the warning first. A process tree
+  killed by another tool takes the watchdog with it, and the console stays
+  on the display's screen until the window is closed or the script is run
+  again. Nothing of the display is in the log either way.
+- Restore the code page when the run is stopped with Ctrl+C (answered with
+  Y) without the live display: the console stays at UTF-8 (65001) until
+  `chcp` sets it back or the window is closed.
 
 Opening the CSVs in Excel can evaluate cells that start with `=`; open them
 as text, imported as UTF-8. Seals have CRLF line endings: convert them before
