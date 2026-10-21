@@ -125,8 +125,8 @@ the result block play at real speed.
   means; the console couldn't be switched to UTF-8. Links in the source
   that weren't copied are found after the copy, so they are listed with the
   summary's warnings.
-- **Live display.** While a forensic run works, the console shows its
-  progress on a second screen, laid out for the window at each redraw:
+- **Live display.** While a run works, the console shows its progress
+  on a second screen, laid out for the window at each redraw:
   make the window larger at any time, maximise it, or make it smaller
   again. The progress block is always there: each check of the result
   block with its status or a progress bar with an estimate of the time
@@ -135,15 +135,21 @@ the result block play at real speed.
   robocopy's percentage within each large file) or hashed, and the last
   failures and warnings (side by side from 160 columns). With rows to
   spare, the Source and Destination sections come above it, and then the
-  environment in cells across the screen. A window under 80 x 23 shows one
+  environment in cells across the screen; a value a warning is about is
+  coloured as its tag there (the destination's FAT32 file system, a clock
+  not synchronised, an older script: yellow; the elevation notice: cyan).
+  A window under 80 x 23 shows one
   line asking for a larger one, and the display returns once it has it.
   The header, the summary and the result block stay on the normal screen,
-  where the display leaves no trace. Console only: the log and the records
-  are written as before. Windows 10 or later, not the legacy console;
-  `EVIDENCE_ROBOCOPY_PLAIN=1` gives the plain output instead (robocopy's
-  per-file lines, a line per hashed file), e.g. when the output is
-  captured. On a console 100 columns or wider the header's Source and
-  Destination sections sit side by side; the log keeps one column.
+  where the display leaves no trace. Redrawn every 5 s (`/redraw
+  <seconds>` sets 1 to 60). Console only: the log and the records are
+  written as before, and a `/nonforensic` run gets the same display with
+  its rows that have nothing to show reading NONE. Windows 10 or later,
+  not the legacy console; `EVIDENCE_ROBOCOPY_PLAIN=1` gives the plain
+  output instead (robocopy's per-file lines, a line per hashed file),
+  e.g. when the output is captured. On a console 100 columns or wider the
+  header's Source and Destination sections sit side by side; the log
+  keeps one column.
 - **Update check.** Every run asks github.com once which release is the
   latest (a header-only request to the releases page, with a 3 s limit)
   and warns when this script is older, or newer than any release; it never
@@ -151,8 +157,9 @@ the result block play at real speed.
   goes on with a warning that it couldn't check. `/update` downloads the
   latest release and its `evidence-robocopy.bat.sha256`, checks the
   download's SHA-256 against it and its version line, replaces this file
-  and starts the updated script for a normal run; nothing is recorded
-  (records are for the evidence). A file that can't be replaced
+  and starts the updated script with the mode and options this run was
+  given (none: a forensic copy); nothing is recorded (records are for the
+  evidence). A file that can't be replaced
   (read-only, in use) is left and said so. A set's own copy updated this
   way is flagged by the next copy's Script check, as any replaced copy.
 - **What is preserved.** Data, attributes and timestamps of files and
@@ -226,7 +233,8 @@ evidence-robocopy.bat /check          verify a set in place, no copy; a run
 evidence-robocopy.bat /relocate       move a set within its volume, verify it
                                       there and record the move
 evidence-robocopy.bat /update         replace this file with the latest release
-                                      if it is newer, then a forensic run
+                                      if it is newer, then the run as asked
+                                      (with any mode and options)
 evidence-robocopy.bat /nonforensic    plain copy utility, no log or records
 evidence-robocopy.bat /?              help
 
@@ -239,6 +247,8 @@ Options, in any order with the modes:
                           and /relocate: go ahead; copy or relocate: copy;
                           the /nonforensic questions: continue, compare)
   /nopause                no "Press any key" at the end
+  /redraw <seconds>       the live display's redraw interval, 1 to 60
+                          (default 5); no effect with the plain output
 ```
 
 Run as administrator for backup mode. Any other argument stops the run.
@@ -251,7 +261,10 @@ answers is asked at the console as usual. `/yes-to-all` says what it does:
 the analyst accepts every question the run may ask, whatever comes up, so
 give it only when you know which questions this run will ask. It never
 moves a set (that takes the word `relocate`, typed or as the option), and
-the log's header records whether questions were answered by it.
+the log's header records whether questions were answered by it. A shorter
+`/redraw` interval costs copy time on many small files (about 16 % at 1 s
+against 9 % at 5 s, on 10,000 files); a longer one costs nothing more;
+the log's header records the interval used.
 `EVIDENCE_ROBOCOPY_PLAIN=1` in the environment gives the plain console output
 instead of the live display; `NO_COLOR=1` turns colour off. Neither changes
 the log or the records.
@@ -496,11 +509,14 @@ recorded as `/relocate` records it. Typing the word is the confirmation.
 
 `/nonforensic` is a plain copy utility for non-evidence copies, confirmed
 when chosen: it copies the source directory's contents into the destination
-with ETA progress, keeps no log and writes no records, and treats custody
-files and histories like any other file. It optionally verifies every file
-by SHA-256 and metadata against its source, with the result on screen only.
-A later forensic run on its output treats it like any other copy made
-without the script.
+with its progress on screen, keeps no log and writes no records, and treats
+custody files and histories like any other file. It optionally verifies
+every file by SHA-256 and metadata against its source, with the result on
+screen only. A later forensic run on its output treats it like any other
+copy made without the script. Its progress is the live display (the rows
+a non-forensic run has nothing for read NONE; the copy's progress is read
+from a temporary robocopy output file in TEMP, deleted at the end), or
+robocopy's own ETA lines with the plain output.
 
 ## What the records prove
 
@@ -578,14 +594,23 @@ without the script.
 - Move a set to another volume or to or from a network path (`/relocate`
   is a rename within one volume; for another volume, copy the set there).
 - Restore the console in every case when the run is stopped while the
-  live display is on. After Ctrl+C (answered with Y) a watchdog switches the
-  console back to the normal screen and says what the stop left and where
-  the log is; robocopy first finishes the files in flight. In the classic
-  console (conhost; not Windows Terminal) the window then closes at the
-  first key pressed in it, so read or copy the warning first. A process tree
-  killed by another tool takes the watchdog with it, and the console stays
-  on the display's screen until the window is closed or the script is run
-  again. Nothing of the display is in the log either way.
+  live display is on. After Ctrl+C (answered with Y) a watchdog says what
+  the stop left and where the log is (a `/nonforensic` run: that nothing
+  is kept), and restores the code page; robocopy first finishes the files
+  in flight. In a Windows Terminal tab (`WT_SESSION` set) it switches the
+  console back to the normal screen, where the header is. Otherwise (the
+  classic console, and a script Windows opens in Windows Terminal as the
+  default terminal, which has no `WT_SESSION`) it leaves the display's
+  last screen, with the warning and the prompt under it, because leaving
+  that screen closes a classic console window at the next key: the
+  header comes back when a run with the live display next ends in that
+  window. A process tree killed by another tool takes the watchdog with
+  it, and the console stays on the display's screen until the window is
+  closed or the script is run again. Nothing of the display is in the log
+  either way.
+- Copy from a source directory whose name ends in a space: it is refused
+  as not found (robocopy can't open it by its path either); give the
+  directory above it, or a copy under another name.
 - Restore the code page when the run is stopped with Ctrl+C (answered with
   Y) without the live display: the console stays at UTF-8 (65001) until
   `chcp` sets it back or the window is closed.

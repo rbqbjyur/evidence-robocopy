@@ -5,12 +5,67 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.7.0 - 2026-10-21
+
+### Added
+- `/nonforensic` gets the live display: the same screen as a forensic
+  run's, its rows that have nothing to show reading NONE (Script, Run
+  records, Record written; Metadata and Hash read NOT RUN when
+  verification wasn't chosen, as the result block does). The copy's
+  progress is read from a temporary robocopy output file in TEMP, written
+  for the display alone and deleted at the end (by the watchdog after a
+  Ctrl+C); nothing is kept. Robocopy's ETA lines stay with the plain
+  output. The confirmation reads "a plain copy with its progress on
+  screen" (was "with ETA progress").
+- `/redraw <seconds>` (1 to 60; default 5): the live display's redraw
+  interval and how often the copy's progress is read. A value that isn't
+  a whole number in that range, or given twice, stops the run before
+  anything is written. The log's header states the interval used
+  ("redrawn every 5 s" in the Progress field).
+- `/update` goes with any mode and option: the updated script is started
+  with the mode and options this run was given (`/nonforensic`, `/check`,
+  `/relocate`, `/source`, `/destination`, `/yes-to-all`, `/nopause`,
+  `/redraw`), and with nothing to update this script carries on with
+  them. The refusal "/update takes no other option" is gone; the
+  one-mode refusal now reads "Only one of /nonforensic, /check and
+  /relocate can be given."
+- The live display colours the values a warning or notice is about, as
+  its tag (WARN yellow, INFO cyan), in the environment cells and the
+  side-by-side Source and Destination columns: the elevation (cyan), the
+  time source and last sync when the clock can't be confirmed, the
+  latest release when this script isn't it, the sleep settings, a
+  volume whose file system is warned about (FAT32) or whose serial
+  differs from the history's, the source set's directory when it was
+  moved, a missing reference record, a non-empty `/nonforensic`
+  destination, fragments recovered at the source's root. Console only;
+  not with `NO_COLOR`, nor where the columns are one below the other.
+
+### Changed
+- After Ctrl+C (answered with Y) with the live display on, the watchdog
+  acts by console host: in a Windows Terminal tab (`WT_SESSION` set) it
+  switches the console back to the normal screen as before; otherwise
+  (the classic console, and a script Windows opens in Windows Terminal as
+  the default terminal) it leaves the display's last screen and writes
+  its warning there, since leaving that screen closed a classic console
+  window at the next key (2.6.0's known issue). The warning says where
+  the header is.
+- The live display's side-by-side Failures and Warnings lists (160
+  columns and wider) start under their headings, with the spare rows
+  blank at the bottom, as the stacked lists do.
+
+### Fixed
+- In the live display, at an odd window width, the Source and Destination
+  columns' rows could reach the window's full width, so a value that
+  filled the right column was cut with "..." (2.6.0: at 209 columns the
+  D3 rule's text and the staged log's path). Each column is now half the
+  width less one.
+
 ## 2.6.0 - 2026-10-21
 
-Known issue: in the classic console (conhost; not Windows Terminal), after
-Ctrl+C (answered with Y) while the live display is on, the window closes
-at the first key pressed in it. The warning saying what the stop left and
-where the log is can be read until then.
+Known issue (fixed in 2.7.0): in the classic console (conhost; not Windows
+Terminal), after Ctrl+C (answered with Y) while the live display is on,
+the window closes at the first key pressed in it. The warning saying what
+the stop left and where the log is can be read until then.
 
 ### Added
 - Options that answer the prompts, in any order with the modes: `/source

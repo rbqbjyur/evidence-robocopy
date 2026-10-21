@@ -64,7 +64,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.6.0"
+set "TOOL_VERSION=2.7.0"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -448,11 +448,17 @@ rem   DASHBOARD_REDRAW_CENTISECONDS  in the script's own loops (hashing, the
 rem                                  compare, the run records): at most one
 rem                                  redraw per this; 5 s is the shortest
 rem                                  interval that cost no more than a
-rem                                  longer one (workshop, 2026-10-18)
+rem                                  longer one (workshop, 2026-10-18). The
+rem                                  default: /redraw <seconds> sets a
+rem                                  run's (redraw_interval_centiseconds,
+rem                                  :init_dashboard)
 rem   DASHBOARD_TICK_EVERY_ITEMS     the loops read the clock every this many
 rem                                  items (:dashboard_tick)
 rem   DASHBOARD_POLL_SECONDS         how often the display helper reads the
-rem                                  copy's progress from robocopy's log
+rem                                  copy's progress from robocopy's log;
+rem                                  the default, /redraw sets a run's
+rem                                  (copy_progress_poll_seconds)
+rem   DASHBOARD_REDRAW_MAX_SECONDS   the most /redraw accepts (1 to this)
 rem   DASHBOARD_HELPER_WAIT_SECONDS  longest wait for the helper to see the
 rem                                  copy start, or to end
 rem   DASHBOARD_BYTES_TABLE_MAX_FILES  a bytes pass with more files than this
@@ -503,11 +509,26 @@ rem                                  DASHBOARD_FIELD_<field>_LABEL its label,
 rem                                  _VAR the variable with its short value
 rem                                  (written for the cell; the header and
 rem                                  the log hold the full text)
+rem   DASHBOARD_HIGHLIGHTS           values the display colours (2.7.0,
+rem                                  owner): items "<raised>:<shown>:<kind>";
+rem                                  <raised> a variable defined when the run
+rem                                  raised the [WARN] or [INFO] the value is
+rem                                  about (set where the warning is added),
+rem                                  <shown> the variable whose value an
+rem                                  environment cell (DASHBOARD_FIELD_<f>_VAR)
+rem                                  or a side-by-side Source/Destination
+rem                                  field shows, <kind> warn (COLOUR_WARN)
+rem                                  or info (COLOUR_INFO), as the tag. The
+rem                                  label stays plain; console only, and
+rem                                  not where the fields are one below the
+rem                                  other (under 100 columns). Add a row for
+rem                                  a new warning about a shown value.
 rem   DASHBOARD_STAGES               the result block's checks, in its order;
 rem                                  DASHBOARD_STAGE_<stage>_LABEL its label
 set "DASHBOARD_REDRAW_CENTISECONDS=500"
 set "DASHBOARD_TICK_EVERY_ITEMS=25"
 set "DASHBOARD_POLL_SECONDS=5"
+set "DASHBOARD_REDRAW_MAX_SECONDS=60"
 set "DASHBOARD_HELPER_WAIT_SECONDS=10"
 set "DASHBOARD_BYTES_TABLE_MAX_FILES=1000"
 set "DASHBOARD_BAR_WIDTH=34"
@@ -523,6 +544,7 @@ set /a "DASHBOARD_MIN_WINDOW_ROWS=DASHBOARD_BLOCK_FIXED_LINES + 2 + DASHBOARD_LI
 set /a "DASHBOARD_MIN_WINDOW_COLUMNS=OUTPUT_WIDTH + 1"
 set "DASHBOARD_CELL_WIDTH=40"
 set "DASHBOARD_ENVIRONMENT_FIELDS=script started host user os elevated clock sync release mode sleep"
+set "DASHBOARD_HIGHLIGHTS=elevation_noted:elevated_summary:info clock_warned:time_source_summary:warn clock_warned:last_sync_summary:warn latest_release_warning:latest_release_summary:warn power_warned:sleep_summary:warn filesystem_warned_source:header_source_volume:warn filesystem_warned_destination:header_destination_volume:warn location_serial_warned:header_source_volume:warn location_path_warned:header_source_set:warn reference_missing_warned:header_reference_record:warn destination_not_empty_warned:destination_state_text:warn recovered_warned_source:pair_source_root_text:warn"
 set "DASHBOARD_FIELD_script_LABEL=Script"
 set "DASHBOARD_FIELD_script_VAR=header_script"
 set "DASHBOARD_FIELD_started_LABEL=Started (UTC)"
@@ -594,6 +616,7 @@ call :check_robocopy || goto :abort
 call :detect_elevation
 call :check_latest_release
 if defined update_requested call :prepare_update
+if defined update_ready call :compose_update_arguments
 rem /update, once :prepare_update has checked the download (update_ready): the
 rem replacement and the start of the new file, here in MAIN and inside one
 rem parenthesised block, which cmd parses whole before the copy runs. After
@@ -613,14 +636,20 @@ rem expands %NAME% in its command line, so a path holding "%" would be
 rem changed; the variable's value is expanded once, by the child, as it is.
 rem No CALL: CALL would expand the path a second time (round 13: "%OS%" in
 rem it became "Windows_NT", "The system cannot find the path specified.").
+rem The mode and options this run was given follow the path the same way
+rem (update_arguments, :compose_update_arguments; 2.7.0), so the updated
+rem script runs what this one was asked for; /v:off keeps a "!" in a path
+rem as it is in the child. update_arguments is carried across the endlocal
+rem without quotes round the assignment, so each path in it stays inside
+rem its own quotes (:compose_update_arguments says why).
 if defined update_ready (
     copy /y "%update_download_path%" "%script_path%" >nul 2>&1 || goto update_replace_failed
     del /q "%update_dir%\*" >nul 2>&1
     rd "%update_dir%" >nul 2>&1
     if not "%original_code_page%"=="unknown" chcp %original_code_page% >nul 2>&1 <nul
-    endlocal & set "update_script_path=%script_path%"
+    endlocal & set "update_script_path=%script_path%" & set update_arguments=%update_arguments%
     setlocal EnableDelayedExpansion
-    cmd /d /c ""%%update_script_path%%""
+    cmd /d /v:off /c ""%%update_script_path%%" %%update_arguments%%"
     exit /b !errorlevel!
 )
 if "%run_mode%"=="nonforensic" goto :main_nonforensic
@@ -719,17 +748,37 @@ call :init_plain_run || goto :abort
 call :hash_this_script
 call :check_environment
 call :write_header
-for %%P in (%COPY_PASSES%) do call :count_copy_pass_files %%P
-for %%P in (%COPY_PASSES%) do call :run_copy_pass %%P
-call :find_skipped_links
-call :restore_destination_attributes
-if "%verification_enabled%"=="1" call :verify_plain_copy
-call :work_out_result
+call :dashboard_start
+rem The work under the live display (2.7.0), with the display's watch lock
+rem held open on handle 8 for its whole duration, as a forensic run's
+rem (MAIN above): the watchdog switches the console back when the lock
+rem opens without the end marker.
+(call :run_plain_work) 8>"%temp_dashboard_watch_lock%"
 call :write_summary
 call :cleanup_temp
 call :restore_console_code_page
 if not defined argument_nopause pause
 exit /b %exit_code%
+
+:run_plain_work
+rem The non-forensic run's work under the live display (2.7.0), called by
+rem MAIN with the watch lock held: the copy passes with the display's lock
+rem on handle 9 (the display helper ends when it opens; :copy_evidence is
+rem the model), the links left behind, the Copy row's result, the
+rem destination directory's attributes, the verification when it was
+rem chosen, the result and the display's end.
+for %%P in (%COPY_PASSES%) do call :count_copy_pass_files %%P
+call :dashboard_copy_begin
+(for %%P in (%COPY_PASSES%) do call :run_copy_pass %%P) 9>"%temp_dashboard_lock%"
+call :dashboard_copy_end
+call :find_skipped_links
+call :work_out_copy_status
+call :dashboard_stage_result copy result_copy
+call :restore_destination_attributes
+if "%verification_enabled%"=="1" call :verify_plain_copy
+call :work_out_result
+call :dashboard_finish
+exit /b 0
 
 rem ============================ FUNCTIONS ====================================
 
@@ -770,11 +819,14 @@ echo   nothing copied), confirmed; then verifies it there as /check does and
 echo   records the move in its run record, so later copies don't warn that it
 echo   was moved by other means.
 echo /nonforensic: a plain copy utility for non-evidence copies: copies the
-echo   source directory's contents into the destination with ETA progress, no
+echo   source directory's contents into the destination with its progress on
+echo   screen (the live display, or robocopy's ETA with the plain output), no
 echo   log and no records; optional SHA-256 verification, shown on screen only.
 echo /update: asks GitHub for the latest release and, if it is newer, replaces
 echo   this file with it (the download checked against the release's SHA-256
-echo   file), then starts the updated script for a normal run.
+echo   file), then starts the updated script with the mode and options this
+echo   run was given (none: a forensic copy); with nothing to update, this
+echo   script carries on with them.
 echo Every run asks GitHub (github.com) once which release is the latest and
 echo   warns when this script is older or newer than it, or when it can't tell;
 echo   it never updates itself.
@@ -794,6 +846,11 @@ echo                            /nonforensic: 1 (continue), 1 (compare), and
 echo                              1 (continue) when the destination isn't empty
 echo   /nopause               no "Press any key" at the end; the exit code is the
 echo                          result
+echo   /redraw ^<seconds^>      the live display's redraw interval, 1 to %DASHBOARD_REDRAW_MAX_SECONDS%
+echo                          (default %DASHBOARD_POLL_SECONDS%): the loops redraw at most this often
+echo                          and the copy's progress is read this often. Cost on
+echo                          10,000 small files: 1 s +16 %%, 5 s +9 %%, 10 s the
+echo                          same as 5 s. No effect with the plain output.
 echo   A refused path stops the run before anything is written (exit 1). A
 echo   question without /yes-to-all is asked at the console as usual. Quote
 echo   each path. The shell expands a %%name%% of a defined variable in it
@@ -807,7 +864,7 @@ echo.
 echo Records are UTF-8 with CRLF line endings. Files are written unbuffered
 echo   (robocopy /j), so verification reads them back from the drive.
 echo Run as administrator to use backup mode (/b).
-echo A forensic run shows its progress in a live display on the console
+echo A run shows its progress in a live display on the console
 echo   (Windows 10 or later, not the legacy console), drawn on the console's
 echo   second screen and laid out for the window at each redraw: make the
 echo   window larger at any time. The progress block (each check's status or
@@ -887,6 +944,9 @@ for %%V in (run_record_count run_record_file_match_count run_record_problem_coun
 for %%V in (path_too_long_source_count path_too_long_destination_count copy_log_incomplete robocopy_output_lines_written robocopy_output_lines_total) do set "%%V=0"
 set "run_records_checked="
 set "run_records_warned="
+rem The display's highlights (DASHBOARD_HIGHLIGHTS): defined where the
+rem [WARN] or [INFO] they stand for is raised.
+for %%V in (elevation_noted clock_warned power_warned filesystem_warned_source filesystem_warned_destination location_serial_warned location_path_warned reference_missing_warned destination_not_empty_warned recovered_warned_source) do set "%%V="
 set "metadata_check_ran="
 set "metadata_time_precision=exact"
 set "compare_lines_done=0"
@@ -987,12 +1047,16 @@ rem and the header's Confirmations field saying so; /nopause leaves out
 rem the pause at the end. A question with no option answering it is asked
 rem at the console as always. Options in any order, each a word of its
 rem own; a repeated option, an option without its value, an unknown option
-rem (a directory dropped on the script too), two modes, /update with
-rem anything else, or /check with /destination stop the run before
-rem anything is written, so a typo can't silently fall back to a different
-rem mode than intended. A path is handled on a plain line, never inside a
-rem parenthesised block: a ")" in it would close the block. shift /1 keeps
-rem %0 (this script's own path) as it is.
+rem (a directory dropped on the script too), two modes, or /check with
+rem /destination stop the run before anything is written, so a typo can't
+rem silently fall back to a different mode than intended. /update (2.7.0)
+rem goes with any mode and option: the updated script is started with the
+rem same ones (:compose_update_arguments), and with nothing to update this
+rem script carries on in that mode. /redraw <seconds> (2.7.0) sets the
+rem live display's redraw interval (:check_redraw_argument). A path is
+rem handled on a plain line, never inside a parenthesised block: a ")" in
+rem it would close the block. shift /1 keeps %0 (this script's own path)
+rem as it is.
 set "run_mode=forensic"
 set "run_kind=copy"
 set "run_kind_switch="
@@ -1001,6 +1065,8 @@ set "argument_source="
 set "argument_destination="
 set "argument_yes_to_all="
 set "argument_nopause="
+set "argument_redraw_text="
+set "argument_redraw_seconds="
 set "relocation_chosen_at_destination="
 set "relocation_how_text=/relocate"
 set "argument_count=0"
@@ -1009,11 +1075,12 @@ set "argument_mode_count=0"
 if "%~1"=="" goto parse_args_done
 set /a "argument_count+=1"
 if /i "%~1"=="/nonforensic" (set "run_mode=nonforensic" & set /a "argument_mode_count+=1" & goto parse_args_shift)
-if /i "%~1"=="/update" (set "update_requested=1" & set /a "argument_mode_count+=1" & goto parse_args_shift)
+if /i "%~1"=="/update" (set "update_requested=1" & goto parse_args_shift)
 if /i "%~1"=="/check" (set "run_kind=check" & set /a "argument_mode_count+=1" & goto parse_args_shift)
 if /i "%~1"=="/relocate" (set "run_kind=relocate" & set /a "argument_mode_count+=1" & goto parse_args_shift)
 if /i "%~1"=="/yes-to-all" (set "argument_yes_to_all=1" & goto parse_args_shift)
 if /i "%~1"=="/nopause" (set "argument_nopause=1" & goto parse_args_shift)
+if /i "%~1"=="/redraw" goto parse_args_redraw
 if /i "%~1"=="/source" goto parse_args_source
 if /i "%~1"=="/destination" goto parse_args_destination
 set "abort_reason=Unknown option: %~1. Run with /? for the options."
@@ -1030,14 +1097,20 @@ if "%~2"=="" (set "abort_reason=/destination needs a path after it (quoted)." & 
 set "argument_destination=%~2"
 shift /1
 goto parse_args_shift
+:parse_args_redraw
+if defined argument_redraw_text (set "abort_reason=/redraw was given twice." & goto :abort)
+if "%~2"=="" (set "abort_reason=/redraw needs a number of seconds after it (1 to %DASHBOARD_REDRAW_MAX_SECONDS%)." & goto :abort)
+set "argument_redraw_text=%~2"
+shift /1
+goto parse_args_shift
 :parse_args_shift
 shift /1
 goto parse_args_next
 :parse_args_done
 if not "%run_kind%"=="copy" set "run_kind_switch=/%run_kind%"
-if %argument_mode_count% gtr 1 (set "abort_reason=Only one of /nonforensic, /check, /relocate and /update can be given." & goto :abort)
-if defined update_requested if %argument_count% gtr 1 (set "abort_reason=/update takes no other option." & goto :abort)
+if %argument_mode_count% gtr 1 (set "abort_reason=Only one of /nonforensic, /check and /relocate can be given." & goto :abort)
 if "%run_kind%"=="check" if defined argument_destination (set "abort_reason=/check takes no /destination: the set is verified in place." & goto :abort)
+if defined argument_redraw_text call :check_redraw_argument || goto :abort
 set "header_confirmations=asked at the console"
 if defined argument_yes_to_all set "header_confirmations=/yes-to-all: every question answered with its first choice (copy at the copy-or-relocate question)"
 if "%run_mode%"=="forensic" (
@@ -1052,6 +1125,53 @@ if "%run_kind%"=="check" set "mode_summary=check (/check): no copy"
 if "%run_kind%"=="relocate" set "header_mode=relocation (/relocate): the set moved within its volume, then verified in place, with a run record"
 if "%run_kind%"=="relocate" set "mode_summary=relocation (/relocate)"
 goto main_after_parse_args
+
+:check_redraw_argument
+rem /redraw's value (argument_redraw_text, as typed): a whole number of
+rem seconds from 1 to DASHBOARD_REDRAW_MAX_SECONDS, into
+rem argument_redraw_seconds; anything else is refused (exit 1, the reason
+rem in abort_reason). Digits only, at most two, no leading zero (set /a
+rem would read one as octal), then the range.
+set "argument_redraw_seconds="
+set "abort_reason=/redraw takes a whole number of seconds, 1 to %DASHBOARD_REDRAW_MAX_SECONDS%; given: %argument_redraw_text%"
+setlocal
+set "redraw_digits_only=1"
+for /f "delims=0123456789" %%X in ("%argument_redraw_text%") do set "redraw_digits_only="
+if not defined redraw_digits_only (endlocal & exit /b 1)
+if not "%argument_redraw_text:~2%"=="" (endlocal & exit /b 1)
+if "%argument_redraw_text:~0,1%"=="0" (endlocal & exit /b 1)
+set /a "redraw_seconds=argument_redraw_text"
+if %redraw_seconds% lss 1 (endlocal & exit /b 1)
+if %redraw_seconds% gtr %DASHBOARD_REDRAW_MAX_SECONDS% (endlocal & exit /b 1)
+endlocal & set "argument_redraw_seconds=%redraw_seconds%" & set "abort_reason="
+exit /b 0
+
+:compose_update_arguments
+rem /update's hand-over (MAIN, 2.7.0): the mode and the options this run
+rem was given, as the words of the updated script's command line, into
+rem update_arguments: /nonforensic, /check or /relocate; /yes-to-all,
+rem /nopause, /redraw <n>; /source "<path>" and /destination "<path>" as
+rem given. Rebuilt from what the parser kept, never from the raw command
+rem line; delayed expansion is off here, so "!" in a path survives; a "%"
+rem in a path is not expanded again (a variable's value is taken as it
+rem is). Each path sits inside its own quotes on every line that parses
+rem it, so "&", "^" and ")" in it are text: the two path lines below, and
+rem MAIN's carry across the endlocal, set the variable WITHOUT quotes
+rem round the whole assignment (the readable "set "var=... "path""" form
+rem would end its quoting at the path's first quote and leave the path
+rem bare: round 14.4, a "&" ran the rest of the name as a command and a
+rem "^" was dropped); each line ends at the path's closing quote, so no
+rem trailing space is taken. /update itself is left out: the updated
+rem script runs the mode, not another update.
+set "update_arguments="
+if "%run_mode%"=="nonforensic" set "update_arguments=%update_arguments% /nonforensic"
+if not "%run_kind%"=="copy" set "update_arguments=%update_arguments% %run_kind_switch%"
+if defined argument_yes_to_all set "update_arguments=%update_arguments% /yes-to-all"
+if defined argument_nopause set "update_arguments=%update_arguments% /nopause"
+if defined argument_redraw_seconds set "update_arguments=%update_arguments% /redraw %argument_redraw_seconds%"
+if defined argument_source set update_arguments=%update_arguments% /source "%argument_source%"
+if defined argument_destination set update_arguments=%update_arguments% /destination "%argument_destination%"
+exit /b 0
 
 :switch_console_to_utf8
 rem Every record is UTF-8: switch the console to code page 65001 for the run.
@@ -1299,7 +1419,7 @@ if not "%update_download_version%"=="%latest_release_version%" (
 )
 set "msg=Downloaded and checked: its SHA-256 is the published one (%update_published_sha256%) and its version line reads %latest_release_version%."
 call :show msg
-set "msg=Replacing %script_path% and starting the updated script; its output follows."
+set "msg=Replacing %script_path% and starting the updated script with this run's mode and options; its output follows."
 call :show msg
 echo.
 set "update_ready=1"
@@ -1351,6 +1471,7 @@ if defined is_elevated (
     set "elevated_summary=no"
     set "msg=[INFO] Not running as administrator: files your account can't read will fail to copy."
 )
+set "elevation_noted=1"
 call :show msg
 echo.
 exit /b 0
@@ -1381,7 +1502,7 @@ set "robocopy_console_redirection="
 set "header_progress=log file (/np /tee)"
 if not "%dashboard_mode%"=="live" exit /b 0
 set "robocopy_console_redirection=>nul"
-set "header_progress=log file (/np /tee, the console copy discarded); a live display on the console, not in the log"
+set "header_progress=log file (/np /tee, the console copy discarded); a live display on the console (redrawn every %redraw_interval_seconds% s), not in the log"
 call :describe_percentage_passes
 if defined percentage_pass_labels set "header_progress=%header_progress%; %percentage_pass_labels% copied without /np: the percentage within each file shown live, left out of the log"
 exit /b 0
@@ -1398,9 +1519,9 @@ exit /b 0
 
 :confirm_nonforensic
 rem /nonforensic is for non-evidence copies; choosing it must be confirmed.
-echo NON-FORENSIC MODE: a plain copy with ETA progress. No log and no records
-echo   are kept, and custody files and histories are copied like any other
-echo   file: not for evidence.
+echo NON-FORENSIC MODE: a plain copy with its progress on screen. No log and
+echo   no records are kept, and custody files and histories are copied like
+echo   any other file: not for evidence.
 echo 1. Continue with a non-forensic copy
 echo 2. Stop
 call :ask_choice nonforensic_answer "1 2" || exit /b 1
@@ -1413,11 +1534,26 @@ echo.
 exit /b 0
 
 :use_eta_mode
-rem Show ETA and percentage (/eta) and keep no log file: not a custody record.
+rem Non-forensic run: no log file is kept (not a custody record). With the
+rem plain output robocopy shows its ETA and percentage (/eta) on the
+rem console. With the live display (2.7.0) robocopy writes its output to
+rem the run's temporary file in TEMP instead (/unilog, as a forensic run's
+rem passes do: :run_copy_pass), which the display helper reads for the
+rem copy's progress and :cleanup_temp deletes at the end (the watchdog
+rem after a Ctrl+C); its console output goes to nul (it would paint over
+rem the display) and /np leaves out the percentages the display shows
+rem itself (a pass marked PASS_<id>_PERCENTAGES runs without it, as in a
+rem forensic run). Nothing of it is kept.
 set "log_enabled=0"
 set "robocopy_progress_flags=/eta"
 set "robocopy_console_redirection="
 set "header_progress=ETA and percentage, no log file (/eta): not a custody record"
+if not "%dashboard_mode%"=="live" exit /b 0
+set "robocopy_progress_flags=/np"
+set "robocopy_console_redirection=>nul"
+set "header_progress=a live display on the console (redrawn every %redraw_interval_seconds% s), its copy progress read from a temporary file in TEMP that is deleted at the end; no log file: not a custody record"
+call :describe_percentage_passes
+if defined percentage_pass_labels set "header_progress=%header_progress%; %percentage_pass_labels% copied without /np: the percentage within each file shown live"
 exit /b 0
 
 rem -- Set and evidence directories --------------------------------------------
@@ -2930,10 +3066,12 @@ if "%source_volume_serial%"=="unknown" set "serials_comparable="
 if "%source_volume_serial%"=="unknown" (
     set "msg=Location: the source volume's serial couldn't be read, so it isn't compared with where the run that made the set (%source_last_run%) copied it."
     call :add_warning msg
+    set "location_serial_warned=1"
 )
 if defined serials_comparable if /i not "%source_last_destination_serial%"=="%source_volume_serial%" (
     set "msg=Location: the source set is on volume serial %source_volume_serial%, but the run that made it (%source_last_run%) copied it to volume serial %source_last_destination_serial%: it reached this volume by other means since."
     call :add_warning msg
+    set "location_serial_warned=1"
 )
 set "location_now=%source_set_path%"
 if "%location_now:~1,1%"==":" set "location_now=%location_now:~2%"
@@ -2942,6 +3080,7 @@ if "%location_then:~1,1%"==":" set "location_then=%location_then:~2%"
 if /i not "%location_now%"=="%location_then%" (
     set "msg=Location: the source set directory is %source_set_path%, but the run that made it (%source_last_run%) copied it to %source_last_destination% (drive letters aside): it was moved or copied by other means since."
     call :add_warning msg
+    set "location_path_warned=1"
 )
 exit /b 0
 
@@ -3295,20 +3434,25 @@ for /l %%S in (1,1,200) do if defined wrap_text (
 )
 exit /b 0
 
-:write_header_plain_directories
-rem Non-forensic run: the two directories robocopy copies between.
-set "msg=" & call :show_and_log msg
-set "msg=Source" & call :show_and_log msg
-call :log_field "Contents of" source_with_backslash
-call :log_field "Volume" header_source_volume
-call :log_housekeeping source "Skipped at root"
-set "msg=" & call :show_and_log msg
-set "msg=Destination" & call :show_and_log msg
-call :log_field "Copied into" destination_with_backslash
-call :log_field "Was" destination_state_text
-call :log_field "Volume" header_destination_volume
-call :log_housekeeping destination "Left alone at root"
-exit /b 0
+:write_header_plain_directories  [target]
+rem Non-forensic run: the two directories robocopy copies between. target:
+rem console, log or both (the default); the display's columns take them
+rem as a file (:dashboard_emit_fields).
+setlocal
+set "plain_directories_target=%~1"
+if not defined plain_directories_target set "plain_directories_target=both"
+set "msg=" & call :emit_free_text msg %plain_directories_target%
+set "msg=Source" & call :emit_free_text msg %plain_directories_target%
+call :log_field "Contents of" source_with_backslash %plain_directories_target%
+call :log_field "Volume" header_source_volume %plain_directories_target%
+call :log_housekeeping source "Skipped at root" %plain_directories_target%
+set "msg=" & call :emit_free_text msg %plain_directories_target%
+set "msg=Destination" & call :emit_free_text msg %plain_directories_target%
+call :log_field "Copied into" destination_with_backslash %plain_directories_target%
+call :log_field "Was" destination_state_text %plain_directories_target%
+call :log_field "Volume" header_destination_volume %plain_directories_target%
+call :log_housekeeping destination "Left alone at root" %plain_directories_target%
+endlocal & exit /b 0
 
 :check_environment
 rem Run every check an analyst should know about before relying on the copy,
@@ -3328,6 +3472,7 @@ if not "%console_code_page%"=="65001" (
 )
 if "%utc_clock_failed%"=="1" (
     set "msg=No UTC time source worked: times are unknown."
+    set "clock_warned=1"
     call :add_warning msg
 )
 if defined destination_filesystem if defined FILESYSTEM_WARNING_%destination_filesystem% call :warn_destination_filesystem
@@ -3340,6 +3485,7 @@ call :find_drive_root_housekeeping destination yes
 if "%run_mode%"=="forensic" if not defined history_base_path if not defined history_base_missing (
     set "msg=No history or reference record was found in the source: the source is hashed now and becomes the reference record, so this copy is not checked against any earlier record."
     call :add_warning msg
+    set "reference_missing_warned=1"
 )
 rem A forensic rerun or update was confirmed at the prompt, and the header
 rem says so ("Was"): no warning (owner, 2026-10-16). In /nonforensic the
@@ -3347,6 +3493,7 @@ rem destination was any non-empty directory.
 if "%run_mode%"=="nonforensic" if not "%destination_was_empty%"=="1" (
     set "msg=The destination was not empty (you chose to continue): robocopy overwrites same-named files that differ."
     call :add_warning msg
+    set "destination_not_empty_warned=1"
 )
 exit /b 0
 
@@ -3369,6 +3516,7 @@ call :each_item DRIVE_ROOT_RECOVERED_DIRS find_recovered_dirs
 if not defined recovered_dirs_found exit /b 0
 set "msg=The %~2 drive holds directories of fragments recovered by file-system repairs (%recovered_dirs_found%): the drive may have been damaged. They are copied as contents."
 call :add_warning msg
+if "%~2"=="source" set "recovered_warned_source=1"
 exit /b 0
 
 :check_write_mode
@@ -3643,6 +3791,7 @@ if errorlevel 1 (
     set "time_source_summary=unavailable"
     set "msg=The clock's synchronisation could not be checked (w32tm failed): times in this record rely on this machine's clock."
     call :add_warning msg
+    set "clock_warned=1"
     exit /b 0
 )
 set "clock_line_number=0"
@@ -3661,6 +3810,7 @@ if not defined clock_unsynced_reason findstr /i /c:"Local CMOS Clock" /c:"Free-r
 if defined clock_unsynced_reason (
     set "msg=The clock's accuracy can't be confirmed (%clock_unsynced_reason%): times in this record rely on this machine's own clock."
     call :add_warning msg
+    set "clock_warned=1"
 )
 exit /b 0
 
@@ -3755,6 +3905,7 @@ rem current power plan (SLEEP_SETTINGS, lid action). Pure batch can't read
 rem whether the machine is on mains or battery right now, so the warnings
 rem cover both. Sets header_sleep for the log header.
 setlocal EnableDelayedExpansion
+set "power_warned="
 set "settings_readable=1"
 set "sleep_seconds_mains=0"
 set "sleep_seconds_battery=0"
@@ -3785,14 +3936,17 @@ if not defined sleep_text set "sleep_text=after !minutes_mains! min on mains; af
 if not defined settings_readable (
     set "msg=The power settings could not be read: make sure this machine won't sleep or hibernate during the copy."
     call :add_warning msg
+    set "power_warned=1"
 )
 if defined settings_readable if !sleep_seconds_mains! gtr 0 (
     set "msg=This machine sleeps or hibernates after !minutes_mains! min idle, even on mains power: Windows may treat a long copy as idle and stop it part-way. Set sleep and hibernate to Never (Settings, System, Power)."
     call :add_warning msg
+    set "power_warned=1"
 )
 if defined settings_readable if !sleep_seconds_mains! equ 0 if !sleep_seconds_battery! gtr 0 (
     set "msg=On battery this machine sleeps after !minutes_battery! min idle: keep it plugged in for the whole copy."
     call :add_warning msg
+    set "power_warned=1"
 )
 call :read_power_values SUB_BUTTONS LIDACTION lid_action
 set "lid_sleeps="
@@ -3801,8 +3955,9 @@ if defined lid_action_DC if !lid_action_DC! neq 0 set "lid_sleeps=1"
 if defined lid_sleeps (
     set "msg=If this is a laptop, keep the lid open: closing it sleeps, hibernates or shuts it down."
     call :add_warning msg
+    set "power_warned=1"
 )
-endlocal & set "header_sleep=%sleep_text%" & set "sleep_summary=%sleep_summary%"
+endlocal & set "header_sleep=%sleep_text%" & set "sleep_summary=%sleep_summary%" & set "power_warned=%power_warned%"
 exit /b 0
 
 :read_power_values  subgroup  setting  prefix
@@ -3942,6 +4097,7 @@ set "msg=The %~1 volume's file system (%~2) couldn't be read"
 if not defined is_elevated set "msg=%msg% (not elevated: fsutil and chkntfs can't read some volumes, such as the system volume)"
 set "msg=%msg%: if it is FAT or exFAT, last-modified times compared exactly can differ by up to 2 s and fail the metadata check."
 call :add_warning msg
+set "filesystem_warned_%~1=1"
 exit /b 0
 
 :warn_destination_filesystem
@@ -3950,7 +4106,7 @@ rem A warning only: robocopy fails any file that doesn't fit.
 setlocal EnableDelayedExpansion
 set "msg=The destination file system is !destination_filesystem!: !FILESYSTEM_WARNING_%destination_filesystem%!"
 call :add_warning msg
-endlocal & exit /b 0
+endlocal & set "filesystem_warned_destination=1" & exit /b 0
 
 rem -- Copy -------------------------------------------------------------------
 
@@ -4061,6 +4217,9 @@ if defined dashboard_active call :dashboard_read_clock pass_started_clock
 if defined dashboard_active (> "!temp_dashboard_pass!" echo %~1 running !pass_started_clock!) 2>nul
 set "log_option="
 if "!log_enabled!"=="1" set log_option=/unilog:"!temp_robocopy_unicode_output!"
+rem A non-forensic run with the display (2.7.0): the same file, for the
+rem display helper alone; nothing of it is kept (:use_eta_mode).
+if defined dashboard_active set log_option=/unilog:"!temp_robocopy_unicode_output!"
 robocopy "!source_path! " "!destination_path! " *.* !COPY_FLAGS! !PASS_%~1_FILTER! !PASS_%~1_FLAGS! /mt:!threads! /r:!RETRY_COUNT! /w:!RETRY_WAIT_SECONDS! !pass_progress_flags! !backup_flag! !exclusion_args! !log_option! %robocopy_console_redirection%
 set "pass_exit_code=!errorlevel!"
 if defined dashboard_active (> "!temp_dashboard_pass!" echo %~1 copied) 2>nul
@@ -4286,12 +4445,19 @@ where /q certutil.exe || (
     exit /b 1
 )
 set "heading=Hash (SHA-256): hashing the source" & call :write_section_heading heading console
+set "dashboard_hash_detail=hashing the source"
+call :dashboard_stage_bar hash hashed_units_source listing_units_total
 call :hash_directory source || set "hash_check_incomplete=1"
 call :write_hash_csv source || set "hash_check_incomplete=1"
 set "heading=Hash (SHA-256): hashing the destination" & call :write_section_heading heading console
+set "dashboard_hash_detail=hashing the destination"
+call :dashboard_stage_bar hash hashed_units_destination listing_units_total
 call :hash_directory destination || set "hash_check_incomplete=1"
 call :write_hash_csv destination || set "hash_check_incomplete=1"
 set "reference_csv_path=%staged_hash_csv_source%"
+set "compare_lines_done=0"
+set "dashboard_hash_detail=comparing the destination with the source's hashes"
+call :dashboard_stage_bar hash compare_lines_done compare_line_count
 call :compare_with_reference
 exit /b 0
 
@@ -7232,7 +7398,10 @@ if not defined argument_nopause pause
 exit /b %EXIT_CODE_FAIL%
 
 rem -- Live display (the dashboard) -------------------------------------------
-rem Console only, forensic runs. From :dashboard_start (after the header) to
+rem Console only; forensic runs, and non-forensic runs since 2.7.0 (the
+rem same screen; the rows a non-forensic run has nothing for read NONE:
+rem :dashboard_set_rows_without_records). From :dashboard_start (after
+rem the header) to
 rem :dashboard_finish (before the summary) the console is switched to its
 rem alternate screen (2.6.0; the header stays on the normal screen, where
 rem the summary follows it after the switch back) and the whole screen is
@@ -7272,6 +7441,17 @@ set "dashboard_static_columns="
 set "dashboard_environment_lines=0"
 set "dashboard_header_sections_lines=0"
 set "dashboard_stop_state_text="
+set "dashboard_stop_record_text="
+set "dashboard_title_text=Progress (console only: the log and the records are written as before)"
+if "%run_mode%"=="nonforensic" set "dashboard_title_text=Progress (console only; no log and no records: /nonforensic)"
+rem The redraw interval (2.7.0): CONFIG's, or /redraw's for this run; the
+rem loops' redraws (:dashboard_tick) and the copy helper's reads of
+rem robocopy's log (:dashboard_helper_main) follow it; the header's
+rem Progress field states it.
+set "redraw_interval_centiseconds=%DASHBOARD_REDRAW_CENTISECONDS%"
+set "copy_progress_poll_seconds=%DASHBOARD_POLL_SECONDS%"
+if defined argument_redraw_seconds set /a "redraw_interval_centiseconds=argument_redraw_seconds * 100, copy_progress_poll_seconds=argument_redraw_seconds"
+set /a "redraw_interval_seconds=redraw_interval_centiseconds / 100"
 rem The bar and rule strings for the widest window (2.6.0: a bar and a rule
 rem fill the row's width): the CONFIG strings doubled five and three times
 rem (1,088 and 632 columns), cut to the width at each layout.
@@ -7282,7 +7462,6 @@ set "rule=%RULE_LIGHT%"
 for /l %%I in (1,1,5) do set "bar_full=!bar_full!!bar_full!" & set "bar_empty=!bar_empty!!bar_empty!"
 for /l %%I in (1,1,3) do set "rule=!rule!!rule!"
 endlocal & set "dashboard_bar_full_text=%bar_full%" & set "dashboard_bar_empty_text=%bar_empty%" & set "dashboard_rule_text=%rule%"
-if not "%run_mode%"=="forensic" exit /b 0
 if not defined console_vt exit /b 0
 if defined EVIDENCE_ROBOCOPY_PLAIN exit /b 0
 call :read_console_window_size
@@ -7351,6 +7530,8 @@ set "dashboard_static_columns="
 set "dashboard_stop_state_text=What was copied before the stop is in the destination, unverified: %destination_with_backslash%"
 if "%run_kind%"=="check" set "dashboard_stop_state_text=Nothing in the set was changed."
 if "%run_kind%"=="relocate" set "dashboard_stop_state_text=The set was moved to %relocate_target_path% before the stop and is unverified there."
+set "dashboard_stop_record_text=No run record was written. %dashboard_stop_state_text% The log as far as it got is kept here: %log_staged_path%"
+if "%run_mode%"=="nonforensic" set "dashboard_stop_record_text=%dashboard_stop_state_text% Nothing is kept (no log and no records: /nonforensic); the run's working files in TEMP are removed."
 del "%temp_dashboard_watch_end%" >nul 2>&1
 set "evidence_robocopy_display_watchdog=%temp_path_prefix%"
 set "evidence_robocopy_display_watchdog_script=%script_path%"
@@ -7369,8 +7550,43 @@ if not "%run_kind%"=="copy" (
     set "dashboard_copy_text=%result_copy%"
     set "dashboard_metadata_text=%result_metadata%"
 )
+rem A non-forensic run (2.7.0) has no script check, no run records and no
+rem record to write, and verifies only when asked: those rows say so from
+rem the first frame.
+if "%run_mode%"=="nonforensic" call :dashboard_set_rows_without_records
+call :dashboard_set_highlights
 <nul set /p "=%escape_character%[?1049h%escape_character%[?25l"
 call :dashboard_redraw
+exit /b 0
+
+:dashboard_set_highlights
+rem (:dashboard_start) The values the display colours (DASHBOARD_HIGHLIGHTS,
+rem 2.7.0): for each item whose raised variable is defined, the colour
+rem sequence into dashboard_colour_<shown variable>, read by the cell and
+rem column builders (:dashboard_build_environment,
+rem :dashboard_emit_field_pair). None without colour (NO_COLOR, no VT).
+rem Warnings are raised before the display starts (the header's Warnings),
+rem so this runs once.
+set "dashboard_colour_warn_start=%escape_character%[%COLOUR_WARN%m"
+set "dashboard_colour_info_start=%escape_character%[%COLOUR_INFO%m"
+if not defined console_colour exit /b 0
+for %%H in (%DASHBOARD_HIGHLIGHTS%) do for /f "tokens=1-3 delims=:" %%A in ("%%H") do if defined %%A (
+    if "%%C"=="warn" set "dashboard_colour_%%B=%escape_character%[%COLOUR_WARN%m"
+    if "%%C"=="info" set "dashboard_colour_%%B=%escape_character%[%COLOUR_INFO%m"
+)
+exit /b 0
+
+:dashboard_set_rows_without_records
+rem (:dashboard_start, :dashboard_finish) A non-forensic run's rows that
+rem have nothing to show (2.7.0): no script check (no earlier record to
+rem check against), no run records, no record written; and the Metadata
+rem and Hash rows as the result block words them when verification wasn't
+rem chosen (:work_out_result: NOT RUN).
+set "dashboard_script_text=NONE: nothing to check against (/nonforensic)"
+set "dashboard_run_records_text=NONE: no run records (/nonforensic)"
+set "dashboard_record_written_text=NONE: no record written (/nonforensic)"
+if not "%verification_enabled%"=="1" set "dashboard_metadata_text=NOT RUN: verification was not requested"
+if not "%verification_enabled%"=="1" set "dashboard_hash_text=NOT RUN: verification was not requested"
 exit /b 0
 
 :dashboard_stage  stage  textVar
@@ -7423,6 +7639,7 @@ set "dashboard_metadata_text=%result_metadata%"
 set "dashboard_run_records_text=%result_run_records%"
 set "dashboard_hash_text=%result_hash%"
 set "dashboard_record_written_text=after the summary, below"
+if "%run_mode%"=="nonforensic" call :dashboard_set_rows_without_records
 for %%S in (%DASHBOARD_STAGES%) do call :dashboard_clear_details %%S
 call :dashboard_redraw
 call :dashboard_leave_screen
@@ -7448,7 +7665,7 @@ exit /b 0
 :dashboard_tick  [detailVar]
 rem Every DASHBOARD_TICK_EVERY_ITEMS items of a loop (:hash_listed_file,
 rem :pair_compare_line; once per record in :check_run_record): read the
-rem clock and redraw when DASHBOARD_REDRAW_CENTISECONDS have passed since the
+rem clock and redraw when redraw_interval_centiseconds have passed since the
 rem last redraw, with detailVar's text (the item in hand) as the Hash
 rem detail. The loops keep two lines per item (a count and this call): cmd
 rem parses a function's lines on every call, so a clock read inline would
@@ -7461,7 +7678,7 @@ set "dashboard_since=0"
 set "dashboard_clock=!time: =0!"
 for /f "tokens=1-4 delims=:.," %%A in ("!dashboard_clock!") do set /a "dashboard_since=((1%%A %% 100) * 60 + (1%%B %% 100)) * 6000 + (1%%C %% 100) * 100 + (1%%D %% 100) - dashboard_last_redraw" 2>nul
 if !dashboard_since! lss 0 set /a "dashboard_since+=8640000"
-if !dashboard_since! geq %DASHBOARD_REDRAW_CENTISECONDS% (
+if !dashboard_since! geq %redraw_interval_centiseconds% (
     if not "%~1"=="" set "dashboard_hash_detail=!%~1!"
     call :dashboard_redraw
 )
@@ -7577,7 +7794,7 @@ if defined dashboard_small_text (
 if defined dashboard_show_environment type "!temp_dashboard_environment!"
 if defined dashboard_show_header_sections type "!temp_dashboard_header_sections!"
 echo(!dashboard_erase!!dashboard_rule!
-set "dashboard_line=Progress (console only: the log and the records are written as before)"
+set "dashboard_line=!dashboard_title_text!"
 if not "!dashboard_line:~%dashboard_line_room%!"=="" set "dashboard_line=!dashboard_line:~0,%dashboard_cut_length%!..."
 echo(!dashboard_erase!!dashboard_line!
 for %%S in (%DASHBOARD_STAGES%) do (
@@ -7616,7 +7833,10 @@ rem may act on). Each list's last lines are held, up to
 rem DASHBOARD_LIST_ROWS_MAX (dashboard_list_F1.., _W1..), the newest last.
 rem Side by side (dashboard_lists_side_by_side): Failures on the left,
 rem Warnings on the right, one heading row and then the rows, each list
-rem the full height. One above the other: both headings with their counts
+rem the full height, its lines from the top under its heading and the
+rem spare rows blank at the bottom (owner, 2026-10-21, round 14.3: before,
+rem one line sat at the bottom of its column). One above the other: both
+rem headings with their counts
 rem always; everything when it fits; else two failure rows for each
 rem warning row, the warnings keeping at least one line while there are
 rem three rows or more (fewer: failures first), a list needing less than
@@ -7655,13 +7875,15 @@ exit /b 0
 set "dashboard_line=  Failures: !dashboard_list_FC!!BLANKS!!BLANKS!!BLANKS!!BLANKS!!BLANKS!"
 echo(!dashboard_erase!!dashboard_line:~0,%dashboard_list_column_width%!   Warnings: !dashboard_list_WC!
 set /a "dashboard_failures_first=dashboard_failures_held - dashboard_list_rows, dashboard_warnings_first=dashboard_warnings_held - dashboard_list_rows"
+if !dashboard_failures_first! lss 0 set "dashboard_failures_first=0"
+if !dashboard_warnings_first! lss 0 set "dashboard_warnings_first=0"
 for /l %%N in (1,1,!dashboard_list_rows!) do (
     set "dashboard_left="
     set "dashboard_right="
     set /a "dashboard_list_slot=dashboard_failures_first + %%N"
-    if !dashboard_list_slot! geq 1 for %%T in (!dashboard_list_slot!) do set "dashboard_left=    !dashboard_list_F%%T!"
+    if !dashboard_list_slot! leq !dashboard_failures_held! for %%T in (!dashboard_list_slot!) do set "dashboard_left=    !dashboard_list_F%%T!"
     set /a "dashboard_list_slot=dashboard_warnings_first + %%N"
-    if !dashboard_list_slot! geq 1 for %%T in (!dashboard_list_slot!) do set "dashboard_right=    !dashboard_list_W%%T!"
+    if !dashboard_list_slot! leq !dashboard_warnings_held! for %%T in (!dashboard_list_slot!) do set "dashboard_right=    !dashboard_list_W%%T!"
     call :dashboard_echo_list_pair
 )
 exit /b 0
@@ -7817,7 +8039,10 @@ rem then "Label: value" cells, as many across as the width takes (one, as
 rem wide as the window, when it takes fewer than two), the fields of
 rem DASHBOARD_ENVIRONMENT_FIELDS in order, each with its short value
 rem (written for the cell; the header and the log hold the full text);
-rem then a blank line. A cell is DASHBOARD_CELL_WIDTH wide, or wider when
+rem then a blank line. A value DASHBOARD_HIGHLIGHTS names is coloured as
+rem its tag (dashboard_colour_<var>, :dashboard_set_highlights), after the
+rem cell is cut and padded, so the colour takes no columns (2.7.0). A cell
+rem is DASHBOARD_CELL_WIDTH wide, or wider when
 rem the longest "Label: value" needs it (owner, 2026-10-21: nothing cut,
 rem round 14), so a value is cut with "..." only in a window too narrow
 rem for one cell. A row is at most one column less than the window (two
@@ -7850,6 +8075,12 @@ for %%F in (%DASHBOARD_ENVIRONMENT_FIELDS%) do (
         if not "!cell:~%%W!"=="" set "cell=!cell:~0,%%C!..."
         set "cell=!cell!!BLANKS!!BLANKS!!BLANKS!"
         set "cell=!cell:~0,%%W! "
+    )
+    for %%V in (!DASHBOARD_FIELD_%%F_VAR!) do if defined dashboard_colour_%%V (
+        set "cell_prefix=!DASHBOARD_FIELD_%%F_LABEL!: "
+        set "cell_prefix_length=0"
+        for /l %%I in (0,1,%OUTPUT_WIDTH%) do if not "!cell_prefix:~%%I,1!"=="" set /a "cell_prefix_length=%%I + 1"
+        for %%P in (!cell_prefix_length!) do set "cell=!cell:~0,%%P!!dashboard_colour_%%V!!cell:~%%P!!colour_end!"
     )
     set "row_text=!row_text!!cell!"
     set /a "cells_in_row+=1"
@@ -7904,10 +8135,18 @@ exit /b 0
 :dashboard_keep_static_line
 rem (:dashboard_build_header_sections) dashboard_static_line, erased-and-
 rem written and cut to the width, appended to temp_dashboard_header_sections;
-rem counted.
+rem counted. Its length is measured without the highlights' colour
+rem sequences (2.7.0: ESC can't be in a path, so only they hold one); a
+rem line too long is cut from its plain text, so a cut line has no colour.
 setlocal EnableDelayedExpansion
 set "line=!dashboard_static_line!"
-for %%W in (!dashboard_line_room_static!) do for %%C in (!dashboard_cut_length_static!) do if defined line if not "!line:~%%W!"=="" set "line=!line:~0,%%C!..."
+set "plain_line=!line!"
+if defined plain_line if defined console_colour (
+    set "plain_line=!plain_line:%dashboard_colour_warn_start%=!"
+    set "plain_line=!plain_line:%dashboard_colour_info_start%=!"
+    set "plain_line=!plain_line:%colour_end%=!"
+)
+for %%W in (!dashboard_line_room_static!) do for %%C in (!dashboard_cut_length_static!) do if defined plain_line if not "!plain_line:~%%W!"=="" set "line=!plain_line:~0,%%C!..."
 >> "!temp_dashboard_header_sections!" echo(!escape_character![2K!line!
 endlocal & set /a "dashboard_header_sections_lines+=1"
 exit /b 0
@@ -7915,10 +8154,18 @@ exit /b 0
 :dashboard_emit_pairs
 rem (:dashboard_build_header_sections) The sections side by side, as the
 rem console header shows them (:write_header_set_pairs), into the raw
-rem file: the pair widths from the window's columns.
+rem file: the pair widths from the window's columns. A non-forensic run's
+rem (2.7.0): the two directories robocopy copies between
+rem (:write_header_plain_directories), its own three rows.
 set "pair_source_root_text="
 call :describe_housekeeping_for_pair source pair_source_root_text
 call :dashboard_emit_pair_titles Source Destination
+if "%run_mode%"=="nonforensic" (
+    call :dashboard_emit_field_pair "Contents" source_with_backslash "Into" destination_with_backslash
+    call :dashboard_emit_field_pair "Volume" header_source_volume "Volume" header_destination_volume
+    call :dashboard_emit_field_pair "At root" pair_source_root_text "Was" destination_state_text
+    exit /b 0
+)
 call :dashboard_emit_field_pair "Set dir" header_source_set "Set dir" destination_set_with_backslash
 call :dashboard_emit_field_pair "Evidence" header_source_evidence "Evidence" destination_with_backslash
 call :dashboard_emit_field_pair "Chosen" source_set_rule "Chosen" destination_set_rule
@@ -7934,9 +8181,13 @@ exit /b 0
 
 :dashboard_emit_pair_titles  leftTitle  rightTitle
 rem (:dashboard_emit_pairs) As :emit_pair_titles, into the raw file, the
-rem column width from dashboard_build_columns.
+rem column width from dashboard_build_columns: (C - 2) / 2 a side, so a
+rem row of the pairs (left, a space, right) is at most C - 1 columns at an
+rem odd width too (round 14.3: at 209 the right column's full rows reached
+rem the window's width and were cut; the normal screen's header keeps
+rem (C - 1) / 2, which the console wraps rather than cuts).
 setlocal EnableDelayedExpansion
-set /a "pair_column_width=(dashboard_build_columns - 1) / 2"
+set /a "pair_column_width=(dashboard_build_columns - 2) / 2"
 set "pair_row=%~1!BLANKS!!BLANKS!!BLANKS!"
 set "pair_row=!pair_row:~0,%pair_column_width%! %~2"
 call :emit_line pair_row file
@@ -7944,9 +8195,17 @@ endlocal & exit /b 0
 
 :dashboard_emit_field_pair  leftLabel  leftVar  rightLabel  rightVar
 rem (:dashboard_emit_pairs) As :emit_field_pair, into the raw file, the
-rem column width from dashboard_build_columns.
+rem column width from dashboard_build_columns ((C - 2) / 2 a side:
+rem :dashboard_emit_pair_titles). A value DASHBOARD_HIGHLIGHTS names
+rem (dashboard_colour_<var>) is coloured from its value column (the label,
+rem HEADER_PAIR_LABEL_WIDTH, and four columns) to the side's end, after
+rem the side is cut and padded, so the colour takes no columns (2.7.0);
+rem :dashboard_keep_static_line measures the line without it.
 setlocal EnableDelayedExpansion
-set /a "pair_column_width=(dashboard_build_columns - 1) / 2, pair_value_width=(dashboard_build_columns - 1) / 2 - 4 - HEADER_PAIR_LABEL_WIDTH"
+set /a "pair_column_width=(dashboard_build_columns - 2) / 2, pair_value_width=(dashboard_build_columns - 2) / 2 - 4 - HEADER_PAIR_LABEL_WIDTH"
+set /a "pair_value_start=4 + HEADER_PAIR_LABEL_WIDTH"
+set "pair_left_colour=!dashboard_colour_%~2!"
+set "pair_right_colour=!dashboard_colour_%~4!"
 call :wrap_field_into_column "%~1" %~2 left
 call :wrap_field_into_column "%~3" %~4 right
 set "pair_rows=!left_count!"
@@ -7957,7 +8216,10 @@ for /l %%R in (1,1,!pair_rows!) do (
     if %%R leq !left_count! set "pair_left=!left_%%R!"
     if %%R leq !right_count! set "pair_right=!right_%%R!"
     set "pair_left=!pair_left!!BLANKS!!BLANKS!!BLANKS!"
-    set "pair_row=!pair_left:~0,%pair_column_width%! !pair_right!"
+    set "pair_left=!pair_left:~0,%pair_column_width%!"
+    if defined pair_left_colour set "pair_left=!pair_left:~0,%pair_value_start%!!pair_left_colour!!pair_left:~%pair_value_start%!!colour_end!"
+    if defined pair_right_colour if defined pair_right set "pair_right=!pair_right:~0,%pair_value_start%!!pair_right_colour!!pair_right:~%pair_value_start%!!colour_end!"
+    set "pair_row=!pair_left! !pair_right!"
     call :emit_line pair_row file
 )
 endlocal & exit /b 0
@@ -7970,7 +8232,7 @@ rem the window's width when that is narrower (the scope ends with this
 rem helper; the lines are in the raw file).
 setlocal
 if %dashboard_build_columns% leq %OUTPUT_WIDTH% set /a "OUTPUT_WIDTH=dashboard_build_columns - 1"
-call :write_header_set_fields file
+if "%run_mode%"=="forensic" (call :write_header_set_fields file) else call :write_header_plain_directories file
 endlocal
 exit /b 0
 
@@ -7986,12 +8248,29 @@ rem the alternate screen (Ctrl+C answered with Y, a crash): it switches the
 rem console back to the normal screen with the cursor shown, restores the
 rem code page and says what the stop left (dashboard_stop_state_text, by
 rem kind: the files copied so far, unverified; nothing changed in a checked
-rem set; a moved set unverified at its new place) and where the log is.
-rem Batch can't trap Ctrl+C; this needs no trap (workshop, 2026-10-20). A
-rem killed process tree takes the watchdog with it: the console then stays
-rem in the alternate screen until the window is closed or the script runs
-rem again (a stated limitation). It writes nothing else: no log (log_ready
-rem is cleared here, so :show can't reach it), no record.
+rem set; a moved set unverified at its new place) and what is kept
+rem (dashboard_stop_record_text: a forensic run's log in TEMP; a
+rem non-forensic run keeps nothing, and its working files are removed
+rem here). Batch can't trap Ctrl+C; this needs no trap (workshop,
+rem 2026-10-20). A killed process tree takes the watchdog with it: the
+rem console then stays in the alternate screen until the window is closed
+rem or the script runs again (a stated limitation). It writes nothing
+rem else: no log (log_ready is cleared here, so :show can't reach it), no
+rem record. By host (2.7.0, owner 2026-10-21, rounds 14.1-14.2): in
+rem Windows Terminal (WT_SESSION is set in its tabs) the console goes back
+rem to the normal screen, where the header is, and cmd's prompt works on;
+rem the classic console (conhost) destroys the alternate screen on the
+rem switch back while cmd's prompt read is pending there, and the window
+rem then closed at the first key pressed (round 14.2: d2 and d5 closed, d4
+rem kept it), so without WT_SESSION the console stays on the display's
+rem screen, the cursor shown, and the [WARN] says where the header is (it
+rem comes back when a run with the display next ends in that window). A
+rem conhost started from a Windows Terminal tab inherits WT_SESSION and
+rem gets the switch back (2.6.0's behaviour); either way the [WARN] is
+rem shown and the code page restored. A script Windows opens in Windows
+rem Terminal as the default terminal has no WT_SESSION (round 14.5): it
+rem stays on the display's screen there too (the window is kept), so the
+rem [WARN] for that branch names no console.
 set "dashboard_active="
 set "log_ready="
 set "dashboard_watch_waits=0"
@@ -8006,11 +8285,33 @@ ping -n 2 127.0.0.1 >nul
 if not exist "%temp_dashboard_watch_lock%" exit /b 0
 ((call ) 8>>"%temp_dashboard_watch_lock%") 2>nul || goto dashboard_watchdog_loop
 if exist "%temp_dashboard_watch_end%" exit /b 0
-<nul set /p "=%escape_character%[?25h%escape_character%[?1049l"
+if defined WT_SESSION (
+    <nul set /p "=%escape_character%[?25h%escape_character%[?1049l"
+    set "dashboard_stop_screen_text=The display was closed; the output before it is above."
+) else (
+    <nul set /p "=%escape_character%[?25h"
+    set "dashboard_stop_screen_text=The display's last screen is left above; the output before it is on the normal screen, which comes back when a run with the live display next ends in this window. The prompt above this warning takes commands."
+)
 set "msg=" & call :show msg
-set "msg=[WARN] The run stopped while its live display was on. The display was closed; the output before it is above. No run record was written. %dashboard_stop_state_text% The log as far as it got is kept here: %log_staged_path%"
+set "msg=[WARN] The run stopped while its live display was on. %dashboard_stop_screen_text% %dashboard_stop_record_text%"
 call :show msg
 call :restore_console_code_page
+if "%run_mode%"=="nonforensic" call :dashboard_remove_plain_working_files
+exit /b 0
+
+:dashboard_remove_plain_working_files
+rem (:dashboard_watchdog_main) A non-forensic run keeps nothing: its
+rem working files in TEMP (the robocopy output the display read, the hash
+rem records of a verification) are removed once robocopy, which finishes
+rem the files in flight after the Ctrl+C, has let go of its output file:
+rem tried every second for DASHBOARD_HELPER_WAIT_SECONDS at most.
+set "dashboard_remove_waits=0"
+:dashboard_remove_plain_working_files_wait
+ping -n 2 127.0.0.1 >nul
+call :cleanup_temp
+if not exist "%temp_robocopy_unicode_output%" exit /b 0
+set /a "dashboard_remove_waits+=1"
+if %dashboard_remove_waits% lss %DASHBOARD_HELPER_WAIT_SECONDS% goto dashboard_remove_plain_working_files_wait
 exit /b 0
 
 :dashboard_read_lists
@@ -8182,8 +8483,9 @@ rem moment it starts this second instance), in the same console, while the
 rem first instance runs robocopy. Every second it tests the lock file the
 rem first instance holds open around the copy passes: once that can be
 rem opened for writing, the passes are over (or the run died) and the
-rem helper ends, leaving its done marker. Every DASHBOARD_POLL_SECONDS it
-rem reads the pass's progress from robocopy's log and redraws the block. It
+rem helper ends, leaving its done marker. Every copy_progress_poll_seconds
+rem (CONFIG's DASHBOARD_POLL_SECONDS, or /redraw's) it reads the pass's
+rem progress from robocopy's log and redraws the block. It
 rem writes nothing else: no log, no record, no console line of its own; it
 rem never reads input, changes the code page or pauses.
 set "dashboard_helper_waits=0"
@@ -8201,7 +8503,7 @@ rem the file. cmd reports a failed redirection outside the command's own
 rem 2>nul, so the test is wrapped in a block whose 2>nul takes the message
 rem (round 12.2: once a second on the console, moving the block down).
 ((call ) 9>>"%temp_dashboard_lock%") 2>nul && goto dashboard_helper_end
-set /a "dashboard_helper_poll=dashboard_helper_waits %% DASHBOARD_POLL_SECONDS"
+set /a "dashboard_helper_poll=dashboard_helper_waits %% copy_progress_poll_seconds"
 if %dashboard_helper_poll% neq 0 goto dashboard_helper_loop
 call :dashboard_read_copy_progress
 call :dashboard_redraw
