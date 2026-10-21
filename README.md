@@ -19,6 +19,21 @@ scripts are restricted, so it can travel with the evidence too.
 A forensic copy to a USB drive, with the live display. The copy is sped up
 ten times; the prompts, the checks and the result block play at real speed.
 
+## Table of contents
+
+- [What it does](#what-it-does)
+- [Install](#install)
+- [Usage](#usage)
+- [Set and evidence directories](#set-and-evidence-directories)
+- [History and run records](#history-and-run-records)
+- [Checks between copies](#checks-between-copies)
+- [Verifying a set in place, and moving one](#verifying-a-set-in-place-and-moving-one)
+- [Non-forensic mode](#non-forensic-mode)
+- [What the records prove](#what-the-records-prove)
+- [What it does not do](#what-it-does-not-do)
+- [Contributing](#contributing)
+- [Licence](#licence)
+
 ## What it does
 
 - **Forensic by default.** Every run keeps a log, verifies every file and
@@ -156,6 +171,63 @@ ten times; the prompts, the checks and the result block play at real speed.
   once after 2 s before it is recorded as UNREADABLE.
 - **Records are UTF-8** with CRLF line endings, and every CSV cell is
   quoted.
+
+## Install
+
+Download `evidence-robocopy.bat` and `evidence-robocopy.bat.sha256` from the
+[latest release](https://github.com/rbqbjyur/evidence-robocopy/releases/latest)
+and check that the script's SHA-256 matches the one in the `.sha256` file:
+
+```
+certutil -hashfile evidence-robocopy.bat SHA256
+type evidence-robocopy.bat.sha256
+```
+
+Nothing else is installed: the script is one batch file, run from wherever
+it is, and every forensic run puts a copy of it in the set it writes.
+`/update` replaces it with the latest release later (see [Usage](#usage)).
+
+### Requirements
+
+- Windows with `robocopy` and `certutil` (both built in). Tested on
+  Microsoft Windows 11 Pro 25H2. Copying directory attributes (`/dcopy:DAT`)
+  needs a recent robocopy; Windows 7's only supports `/dcopy:T`. Older
+  versions are untested.
+- For the UTC time it uses robocopy's clock plus the registry time-zone bias
+  (`ActiveTimeBias`), falling back to `wmic` where present. A forensic run
+  stops if neither works.
+- Administrator rights are optional; they enable backup mode and, on some
+  systems, reading the file system of system volumes and the time-service
+  status.
+- The live display and the console colours need a console that takes VT
+  sequences: Windows 10 or later, not the legacy console. Elsewhere the
+  output is plain.
+- The update check and `/update` use `curl.exe` (built into Windows since
+  10 1803). Without it, or offline, the check reports "not checked" and
+  the run goes on.
+
+## Usage
+
+```
+evidence-robocopy.bat                 forensic mode (default)
+evidence-robocopy.bat /check          verify a set in place, no copy; a run
+                                      record and a history row into the set
+evidence-robocopy.bat /relocate       move a set within its volume, verify it
+                                      there and record the move
+evidence-robocopy.bat /update         replace this file with the latest release
+                                      if it is newer, then a forensic run
+evidence-robocopy.bat /nonforensic    plain copy utility, no log or records
+evidence-robocopy.bat /?              help
+```
+
+Run as administrator for backup mode. Any other argument stops the run.
+`EVIDENCE_ROBOCOPY_PLAIN=1` in the environment gives the plain console output
+instead of the live display; `NO_COLOR=1` turns colour off. Neither changes
+the log or the records.
+
+<img src="docs/images/destination-prompt.webp" alt="Console: the banner, the source directory G:\Export\EV03 and the destination directory H:\Review\EV03 typed at the prompts">
+
+*Source and destination, typed at the prompts.*
 
 ## Set and evidence directories
 
@@ -388,48 +460,6 @@ by SHA-256 and metadata against its source, with the result on screen only.
 A later forensic run on its output treats it like any other copy made
 without the script.
 
-## Requirements
-
-- Windows with `robocopy` and `certutil` (both built in). Tested on
-  Microsoft Windows 11 Pro 25H2. Copying directory attributes (`/dcopy:DAT`)
-  needs a recent robocopy; Windows 7's only supports `/dcopy:T`. Older
-  versions are untested.
-- For the UTC time it uses robocopy's clock plus the registry time-zone bias
-  (`ActiveTimeBias`), falling back to `wmic` where present. A forensic run
-  stops if neither works.
-- Administrator rights are optional; they enable backup mode and, on some
-  systems, reading the file system of system volumes and the time-service
-  status.
-- The live display and the console colours need a console that takes VT
-  sequences: Windows 10 or later, not the legacy console. Elsewhere the
-  output is plain.
-- The update check and `/update` use `curl.exe` (built into Windows since
-  10 1803). Without it, or offline, the check reports "not checked" and
-  the run goes on.
-
-## Usage
-
-```
-evidence-robocopy.bat                 forensic mode (default)
-evidence-robocopy.bat /check          verify a set in place, no copy; a run
-                                      record and a history row into the set
-evidence-robocopy.bat /relocate       move a set within its volume, verify it
-                                      there and record the move
-evidence-robocopy.bat /update         replace this file with the latest release
-                                      if it is newer, then a forensic run
-evidence-robocopy.bat /nonforensic    plain copy utility, no log or records
-evidence-robocopy.bat /?              help
-```
-
-Run as administrator for backup mode. Any other argument stops the run.
-`EVIDENCE_ROBOCOPY_PLAIN=1` in the environment gives the plain console output
-instead of the live display; `NO_COLOR=1` turns colour off. Neither changes
-the log or the records.
-
-<img src="docs/images/destination-prompt.webp" alt="Console: the banner, the source directory G:\Export\EV03 and the destination directory H:\Review\EV03 typed at the prompts">
-
-*Source and destination, typed at the prompts.*
-
 ## What the records prove
 
 - Each run record shows what that run did and found: when (UTC, with the
@@ -510,7 +540,11 @@ Opening the CSVs in Excel can evaluate cells that start with `=`; open them
 as text, imported as UTF-8. Seals have CRLF line endings: convert them before
 `sha256sum -c`.
 
-## Extending
+## Contributing
+
+Questions and bug reports:
+[GitHub issues](https://github.com/rbqbjyur/evidence-robocopy/issues).
+Pull requests are welcome.
 
 Behaviour is set by tables in the CONFIG section at the top of the script,
 each documented beside it, so most changes are a new row rather than code:
@@ -545,4 +579,6 @@ the log.
 
 ## Licence
 
-0BSD. See [LICENSE](LICENSE).
+[0BSD](LICENSE) (Zero-Clause BSD). Copyright (C) 2024 by outis.
+Use it for anything, with no attribution required; provided as is, with no
+warranty.
