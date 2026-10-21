@@ -14,10 +14,11 @@ It is a batch file on purpose: it uses only tools built into Windows and runs
 wherever robocopy does, including workstations where PowerShell or `.ps1`
 scripts are restricted, so it can travel with the evidence too.
 
-<img src="docs/images/demo.webp" alt="Console: a forensic copy of an EWF image set from W:\Processing\EV03 to a working copy on a USB drive: the source and destination typed at the prompts, the header, then the live display with each check's status, the copy's bar moving through three segments, the checks passing one by one, and the result block, RESULT: PASS (exit code 0)">
+<img src="docs/images/demo.webp" alt="Windows Terminal, maximised: a forensic copy of an EWF image set from W:\Processing\EV03 to a working copy on a USB drive: the source and destination typed at the prompts, the header, then the live display on its own screen across the window (the Source and Destination columns, each check's status, the copy's bar moving through three segments, the warnings list), the checks passing one by one, and back on the normal screen the summary and the result block, RESULT: PASS (exit code 0)">
 
-A forensic copy to a USB drive, with the live display. The copy is sped up
-ten times; the prompts, the checks and the result block play at real speed.
+A forensic copy to a USB drive in a maximised Windows Terminal window, with
+the live display. The copy is sped up ten times; the prompts, the checks and
+the result block play at real speed.
 
 ## Table of contents
 
