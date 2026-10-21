@@ -150,6 +150,10 @@ the result block play at real speed.
   e.g. when the output is captured. On a console 100 columns or wider the
   header's Source and Destination sections sit side by side; the log
   keeps one column.
+
+  <img src="docs/images/live-display.webp" alt="Windows Terminal, maximised: the live display after the copy: the environment cells, the Source and Destination columns with the destination's FAT32 volume in yellow, the Script, Copy, Metadata and Run records checks each PASS, the Hash (SHA-256) bar starting on the destination, Record written waiting, no failures and the FAT32 warning">
+
+  *The live display as hashing starts, after the copy.*
 - **Update check.** Every run asks github.com once which release is the
   latest (a header-only request to the releases page, with a 3 s limit)
   and warns when this script is older, or newer than any release; it never
