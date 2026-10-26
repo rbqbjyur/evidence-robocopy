@@ -5,6 +5,103 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.8.0 - 2026-10-26
+
+### Added
+- `/no-update-check`: no request to github.com for the latest release; the
+  header's Latest release field says so, with no warning. Not with
+  `/update`.
+- Free space is checked before the copy: the bytes the passes will copy
+  (from the listing made before them), plus a margin of 1 % and 64 MB for
+  the run record and the file system, against the destination volume's
+  free bytes (`fsutil volume diskfree`, else `dir`). Too little stops the
+  run before anything is copied, with both numbers; free space that can't
+  be read is a warning, and the copy goes on. A FAT32 or FAT destination
+  with a source file of 4 GiB (FAT: 2 GiB) or more stops the run too,
+  naming the file: the copy would have failed part-way.
+
+### Fixed
+- A directory that couldn't be listed (access denied, missing, or the
+  device not readable) read as empty: a run record directory that denied
+  listing passed its seal check with an unsealed file in it, the records
+  directory of a set read as holding no earlier runs, and a destination
+  that couldn't be listed was taken as empty and copied into. Every
+  listing now confirms the directory was read: DIR's own exit code, and
+  where DIR finds nothing a list-only robocopy whose counts must be
+  nothing too (elevated, robocopy reads a directory that denies listing;
+  DIR never does). One that can't be is a Run records failure, or a
+  refusal of the directory at the prompt. A history, seal or log that
+  can't be read is reported as such, never as empty or "doesn't match".
+- The one-line notice for a window too small for the live display fits
+  80 columns; at 80 columns, the width it names, the console split it
+  mid-word.
+- `/update` given alone (no mode or option) replaced the file and then
+  started the updated script with the text `%update_arguments%` as its
+  argument, which the updated script refused as an unknown option (exit
+  1, nothing copied; the file had been updated). The released 2.7.0 does
+  the same, so its `/update` alone ends that way once; the updated script
+  then runs as usual. From 2.7.0, `/update` with any option hands over as
+  it should, e.g. `/update /redraw 5` (5 s is the default interval).
+- The help, the log header's Writes field and the README claimed that
+  hashing can't be served from Windows' file cache because the copy is
+  unbuffered (`robocopy /j`). That holds only when the run isn't
+  elevated: backup mode (`/b`, every elevated run) leaves the evidence and
+  custody files it copies in the cache, and the hash may read them from
+  there. Each now says so by elevation. The run's own record is written
+  back without backup mode and read from the drive either way.
+
+### Changed
+- The live display stands in for the console output where it runs: it
+  starts before the header, so the header and the summary go to the log
+  alone; its progress block has a RESULT row (pending until the verdict);
+  at the end it shows the final result, the Record written row, the
+  seal's SHA-256 and the log's location, and waits there at the pause;
+  the console then goes back to the normal screen, where the result block
+  and those lines are printed (a scrollback). The lists' headings say how
+  many lines aren't shown. The display needs 80 x 24 (before: 80 x 23).
+  The header's side-by-side form on the normal screen is gone (the
+  display draws its own columns). A Ctrl+C at the closing pause prints
+  what the display showed last and removes the run's working files from
+  TEMP. The plain output is unchanged.
+- A History row, under the Source and Destination sections: the runs of
+  the history this run continues, oldest first, then "current"
+  ("current (first copy)" on a first copy); a /check's row is left out
+  unless it failed; on a console a run whose result wasn't PASS is red,
+  and "current" once this run has failed. One line under the display's
+  columns (the newest runs that fit, "..... -> " first when any is left
+  out; at most 9), one run per line in the log, the plain output and the
+  display's one-column form.
+- The update check runs in the background while the prompts are answered
+  (a second instance of the script asks github.com); its answer is read
+  when the header is written, waiting up to 5 s for it, and a warning
+  appears there and in the live display rather than before the prompts.
+  `/update` still asks before the prompts, as it needs the answer first.
+- The Copy row describes the copy from robocopy's own summary counts over
+  the passes: "3 files copied, none failed", "nothing needed copying, 3
+  files already there", "1 file couldn't be copied", with the exit codes
+  in brackets. When a pass's summary couldn't be read, the row keeps the
+  exit codes alone, as before.
+- The listing made before the copy passes is of the source against the
+  destination as it is, so the passes' totals, and the live display's
+  "File n of m", count the files still to copy (before: every file of the
+  source), and the listing runs before the header rather than under the
+  display.
+- Every program the script runs (robocopy, certutil, findstr, find, sort,
+  fc, more, mode, attrib, chcp, ping, reg and the optional ones) is called
+  by its full path under the Windows directory, resolved once at the
+  start; a required one missing stops the run before anything is written
+  ("Not found in the Windows directory ..."). Before, a bare name was
+  looked up in the current directory and PATH, so a file of that name
+  beside the script or on PATH would have run instead. The header's
+  robocopy and certutil lines show the paths used, as before.
+- Before a run record is sealed, every file the run must have written
+  (the log, the hash records, the history; the source record on a first
+  copy or restart; the relocation file on a move) is checked to be there
+  with at least one line, and nothing else may be in the staged record
+  (junk names aside). A missing, empty or unexpected file is a [FAIL] by
+  name, the seal is incomplete and the record isn't written (staging
+  kept), as when a record file can't be hashed.
+
 ## 2.7.0 - 2026-10-21
 
 ### Added

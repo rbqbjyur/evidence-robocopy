@@ -57,10 +57,13 @@ the result block play at real speed.
   the row-by-row comparison is skipped; any difference, an unreadable file
   in the reference, or a reference whose run record failed its seal, runs
   the full comparison.
-- **Verified from the drive, not from memory.** Every copy pass and the
-  run's own record are written unbuffered (`robocopy /j`), so hashing reads
+- **Written unbuffered.** Every copy pass and the run's own record are
+  written unbuffered (`robocopy /j`). Not elevated, hashing then reads
   file contents back from the destination drive rather than from the
-  Windows cache.
+  Windows cache. Elevated, backup mode (`/b`) leaves the evidence and
+  custody files it copies in that cache, and hashing may read them from
+  there; the run's own record is read back from the drive either way.
+  The log's Writes field says which.
 - **Metadata check.** After the copy, robocopy compares every source file
   with its copy in list-only mode: any file whose size or last-modified
   time differs, or that wasn't copied, fails the run. Times are compared
@@ -125,40 +128,53 @@ the result block play at real speed.
   means; the console couldn't be switched to UTF-8. Links in the source
   that weren't copied are found after the copy, so they are listed with the
   summary's warnings.
-- **Live display.** While a run works, the console shows its progress
-  on a second screen, laid out for the window at each redraw:
-  make the window larger at any time, maximise it, or make it smaller
-  again. The progress block is always there: each check of the result
-  block with its status or a progress bar with an estimate of the time
-  left (from the average rate since that stage began; the hashing bars
-  count bytes, with a fixed share per file), the file being copied (with
-  robocopy's percentage within each large file) or hashed, and the last
-  failures and warnings (side by side from 160 columns). With rows to
-  spare, the Source and Destination sections come above it, and then the
-  environment in cells across the screen; a value a warning is about is
-  coloured as its tag there (the destination's FAT32 file system, a clock
-  not synchronised, an older script: yellow; the elevation notice: cyan).
-  A window under 80 x 23 shows one
-  line asking for a larger one, and the display returns once it has it.
-  The header, the summary and the result block stay on the normal screen,
-  where the display leaves no trace. Redrawn every 5 s (`/redraw
-  <seconds>` sets 1 to 60). Console only: the log and the records are
-  written as before, and a `/nonforensic` run gets the same display with
-  its rows that have nothing to show reading NONE. Windows 10 or later,
-  not the legacy console; `EVIDENCE_ROBOCOPY_PLAIN=1` gives the plain
-  output instead (robocopy's per-file lines, a line per hashed file),
-  e.g. when the output is captured. On a console 100 columns or wider the
-  header's Source and Destination sections sit side by side; the log
-  keeps one column.
+- **Free space before the copy.** The files still to copy are listed
+  before the copy, and their bytes, plus a margin of 1 % and 64 MB for the
+  run record and the file system, are compared with the destination
+  volume's free space: too little stops the run before anything is
+  copied, with both numbers. A FAT32 (or FAT) destination with a source
+  file of 4 GiB (2 GiB) or more stops it too, naming the file. Free space
+  that can't be read is a warning, and the copy goes on.
+- **Live display.** Where the console takes it (Windows 10 or later, not
+  the legacy console), the display stands in for the console output: once
+  the prompts are answered it takes a second screen, laid out for the
+  window at each redraw (make the window larger at any time, maximise it,
+  or make it smaller again), and the header and the summary go to the log.
+  The progress block is always there: the RESULT (pending until the
+  verdict), each check of the result block with its status or a progress
+  bar with an estimate of the time left (from the average rate since that
+  stage began; the hashing bars count bytes, with a fixed share per file),
+  the file being copied (with robocopy's percentage within each large
+  file) or hashed, and the last failures and warnings (side by side from
+  160 columns; the headings say how many more are in the log). With rows
+  to spare, the Source and Destination sections come above it with the
+  History row (the set's earlier runs, oldest first, then `current`; a run
+  that didn't pass in red), and then the environment in cells across the
+  screen; a value a warning is about is coloured as its tag there (the
+  destination's FAT32 file system, a clock not synchronised, an older
+  script: yellow; the elevation notice: cyan). At the end the display
+  shows the final result, the seal's SHA-256 and the log's location and
+  waits there at the pause; the console then goes back to the normal
+  screen, where the result block and those lines are printed, so they are
+  in the scrollback. A window under 80 x 24 shows one line asking for a
+  larger one, and the display returns once it has it. Redrawn every 5 s
+  (`/redraw <seconds>` sets 1 to 60). The log and the records are written
+  as before, and a `/nonforensic` run gets the same display with its rows
+  that have nothing to show reading NONE, its summary printed after.
+  `EVIDENCE_ROBOCOPY_PLAIN=1` gives the plain output instead (the header,
+  robocopy's per-file lines, a line per hashed file, the summary), e.g.
+  when the output is captured.
 
   <img src="docs/images/live-display.webp" alt="Windows Terminal, maximised: the live display after the copy: the environment cells, the Source and Destination columns with the destination's FAT32 volume in yellow, the Script, Copy, Metadata and Run records checks each PASS, the Hash (SHA-256) bar starting on the destination, Record written waiting, no failures and the FAT32 warning">
 
   *The live display as hashing starts, after the copy.*
 - **Update check.** Every run asks github.com once which release is the
-  latest (a header-only request to the releases page, with a 3 s limit)
-  and warns when this script is older, or newer than any release; it never
-  updates itself. Offline, behind a proxy, or without `curl.exe`, the run
-  goes on with a warning that it couldn't check. `/update` downloads the
+  latest (a header-only request to the releases page, with a 3 s limit,
+  made in the background while the prompts are answered) and warns, in
+  the header and the live display, when this script is older, or newer
+  than any release; it never updates itself. Offline, behind a proxy, or
+  without `curl.exe`, the run goes on with a warning that it couldn't
+  check; `/no-update-check` makes no request at all. `/update` downloads the
   latest release and its `evidence-robocopy.bat.sha256`, checks the
   download's SHA-256 against it and its version line, replaces this file
   and starts the updated script with the mode and options this run was
@@ -211,7 +227,10 @@ it is, and every forensic run puts a copy of it in the set it writes.
 
 ### Requirements
 
-- Windows with `robocopy` and `certutil` (both built in). Tested on
+- Windows with `robocopy` and `certutil` (both built in). Every program
+  the script runs is taken from the Windows directory by its full path,
+  never from the current directory or PATH; a required one missing stops
+  the run before anything is written. Tested on
   Microsoft Windows 11 Pro 25H2. Copying directory attributes (`/dcopy:DAT`)
   needs a recent robocopy; Windows 7's only supports `/dcopy:T`. Older
   versions are untested.
@@ -253,6 +272,8 @@ Options, in any order with the modes:
   /nopause                no "Press any key" at the end
   /redraw <seconds>       the live display's redraw interval, 1 to 60
                           (default 5); no effect with the plain output
+  /no-update-check        no request to github.com for the latest release
+                          (the header says so); not with /update
 ```
 
 Run as administrator for backup mode. Any other argument stops the run.
@@ -301,7 +322,9 @@ copied or hashed. Inside the evidence directory they are evidence.
 
 A set directory that holds more than one directory besides the custody files, or
 anything else unexpected, is refused, as is a directory that holds custody
-files when its parent does too.
+files when its parent does too. A directory that can't be listed (access
+denied, or a device that isn't readable) is refused as well, as source or
+destination: what it holds can't be told.
 
 **Destination: where does the set go?** The destination must be an
 existing directory. Names are compared exactly (ignoring case, as Windows
@@ -411,7 +434,10 @@ continues:
   file;
 - no run record or file in the records directory is outside the history.
 
-Any of these failing fails the run. The same checks run before copying,
+Any of these failing fails the run, and so does anything the check can't
+read: a records directory or run record that can't be listed, a history,
+seal or log that can't be read (each named, with the reason, never taken
+as empty). The same checks run before copying,
 on the set whose history the copy continues, every run record against its
 seal included: anything they find is listed in the header's Warnings, so it
 is seen before the copy starts; the result comes from the check of the
@@ -581,7 +607,8 @@ robocopy's own ETA lines with the plain output.
   (Linux stops at 4,096 bytes, macOS at 1,024).
 - Flush file-system metadata or a drive's own write cache: file contents
   are written unbuffered, but only ejecting or dismounting the drive
-  flushes the rest.
+  flushes the rest. Elevated, Windows' file cache holds the copied files
+  too (backup mode), so hashing may not reach the drive at all.
 - Recognise a mapped drive and its UNC path as the same place (in the
   check that source and destination don't overlap).
 - Copy files named like DOS devices (`nul`, `aux` and the like) to a network
@@ -601,13 +628,16 @@ robocopy's own ETA lines with the plain output.
   live display is on. After Ctrl+C (answered with Y) a watchdog says what
   the stop left and where the log is (a `/nonforensic` run: that nothing
   is kept), and restores the code page; robocopy first finishes the files
-  in flight. In a Windows Terminal tab (`WT_SESSION` set) it switches the
-  console back to the normal screen, where the header is. Otherwise (the
-  classic console, and a script Windows opens in Windows Terminal as the
-  default terminal, which has no `WT_SESSION`) it leaves the display's
+  in flight. A Ctrl+C at the closing pause, after the run has finished,
+  prints what the display showed last (the result block, the seal and the
+  log) instead, and removes the run's working files from TEMP. In a
+  Windows Terminal tab (`WT_SESSION` set) it switches the console back to
+  the normal screen, where the output before the display is. Otherwise
+  (the classic console, and a script Windows opens in Windows Terminal as
+  the default terminal, which has no `WT_SESSION`) it leaves the display's
   last screen, with the warning and the prompt under it, because leaving
-  that screen closes a classic console window at the next key: the
-  header comes back when a run with the live display next ends in that
+  that screen closes a classic console window at the next key: the normal
+  screen comes back when a run with the live display next ends in that
   window. A process tree killed by another tool takes the watchdog with
   it, and the console stays on the display's screen until the window is
   closed or the script is run again. Nothing of the display is in the log
