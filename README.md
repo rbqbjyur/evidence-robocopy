@@ -14,7 +14,7 @@ It is a batch file on purpose: it uses only tools built into Windows and runs
 wherever robocopy does, including workstations where PowerShell or `.ps1`
 scripts are restricted, so it can travel with the evidence too.
 
-<img src="docs/images/demo.webp" alt="Windows Terminal, maximised: a forensic copy of an EWF image set from W:\Processing\EV03 to a working copy on a USB drive: the source and destination typed at the prompts, the header, then the live display on its own screen across the window (the environment, the Source and Destination columns with the destination's FAT32 volume in yellow, each check's status, the copy's bar moving through three segments, the failures and warnings lists side by side), the checks passing one by one, and back on the normal screen the summary and the result block, RESULT: PASS (exit code 0)">
+<img src="docs/images/demo.webp" alt="Windows Terminal, maximised: a forensic copy of an EWF image set from W:\Processing\EV03 to a working copy on a USB drive: the source and destination typed at the prompts, then the live display on its own screen across the window (the environment, the Source and Destination columns with the destination's FAT32 volume in yellow, the run history, the RESULT row pending, each check's status, the copy's bar moving through three segments, the failures and warnings lists side by side), the checks passing one by one, the hash bar moving segment by segment, the last frame with RESULT: PASS (exit code 0), the seal and the log, and after a key the result block on the normal screen">
 
 A forensic copy to a USB drive in a maximised Windows Terminal window, with
 the live display. The copy is sped up ten times; the prompts, the checks and
@@ -165,9 +165,9 @@ the result block play at real speed.
   robocopy's per-file lines, a line per hashed file, the summary), e.g.
   when the output is captured.
 
-  <img src="docs/images/live-display.webp" alt="Windows Terminal, maximised: the live display after the copy: the environment cells, the Source and Destination columns with the destination's FAT32 volume in yellow, the Script, Copy, Metadata and Run records checks each PASS, the Hash (SHA-256) bar starting on the destination, Record written waiting, no failures and the FAT32 warning">
+  <img src="docs/images/live-display.webp" alt="Windows Terminal, maximised: the live display after the copy: the environment cells, the Source and Destination columns with the destination's FAT32 volume in yellow, the run history, the RESULT row pending, the Script, Copy, Metadata and Run records checks each PASS, the Hash (SHA-256) bar at 68 % on the destination's last segment, Record written waiting, no failures and the FAT32 warning">
 
-  *The live display as hashing starts, after the copy.*
+  *The live display part-way through hashing, after the copy.*
 - **Update check.** Every run asks github.com once which release is the
   latest (a header-only request to the releases page, with a 3 s limit,
   made in the background while the prompts are answered) and warns, in
