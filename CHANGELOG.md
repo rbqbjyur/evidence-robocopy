@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.8.1 - 2026-10-26
+
+### Fixed
+- In the live display, the Hash (SHA-256) bar didn't move while a few
+  large files were hashed: the display redrew during hashing only every
+  25 files, so a set of four segments showed 0 % until the stage was
+  over, and a set of 25 large segments would have shown no progress for
+  minutes. It now also redraws once 100 MB of file contents have been
+  hashed since it last checked, at most every redraw interval. A single
+  file still counts as one step: the bar moves between files.
+- After a forensic run with the live display, the result block printed
+  on the normal screen said the warnings and failures were "listed
+  above", where nothing is listed since 2.8.0 (the summary goes to the
+  log). It now says "listed in the log"; the log's own block, the plain
+  output and `/nonforensic` keep "listed above".
+
 ## 2.8.0 - 2026-10-26
 
 ### Added

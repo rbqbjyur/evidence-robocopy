@@ -64,7 +64,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.8.0"
+set "TOOL_VERSION=2.8.1"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -616,6 +616,13 @@ rem                                  run's (redraw_interval_centiseconds,
 rem                                  :init_dashboard)
 rem   DASHBOARD_TICK_EVERY_ITEMS     the loops read the clock every this many
 rem                                  items (:dashboard_tick)
+rem   DASHBOARD_TICK_EVERY_CONTENT_UNITS  the hash loop also reads it once
+rem                                  this much file content has been hashed
+rem                                  since it last did, in the Hash bars'
+rem                                  units (HASH_PROGRESS_UNIT_DIGITS: 1000
+rem                                  is 100 MB) without the per-file share
+rem                                  (2.8.1: a few large files, an E01
+rem                                  set's segments, never reached 25)
 rem   DASHBOARD_POLL_SECONDS         how often the display helper reads the
 rem                                  copy's progress from robocopy's log;
 rem                                  the default, /redraw sets a run's
@@ -689,6 +696,7 @@ rem   DASHBOARD_STAGES               the result block's checks, in its order;
 rem                                  DASHBOARD_STAGE_<stage>_LABEL its label
 set "DASHBOARD_REDRAW_CENTISECONDS=500"
 set "DASHBOARD_TICK_EVERY_ITEMS=25"
+set "DASHBOARD_TICK_EVERY_CONTENT_UNITS=1000"
 set "DASHBOARD_POLL_SECONDS=5"
 set "DASHBOARD_REDRAW_MAX_SECONDS=60"
 set "DASHBOARD_HELPER_WAIT_SECONDS=10"
@@ -5434,15 +5442,23 @@ call :relative_path full_path !base_var! file_relative_path || (
 )
 set /a "sequence_number=hashed_count_%~2 + 1"
 rem The progress line, once per file: with the live display it is the Hash
-rem detail line, shown at the next redraw (the two lines of the tick are
-rem all the loop carries per file: cmd parses a function's lines on every
+rem detail line, shown at the next redraw (the tick's few lines are all
+rem the loop carries per file: cmd parses a function's lines on every
 rem call); otherwise it is written directly when it fits (going through
 rem :show costs about 6 ms per file: test round 11), and a longer one goes
-rem through :show to be wrapped.
+rem through :show to be wrapped. The tick comes every
+rem DASHBOARD_TICK_EVERY_ITEMS files, or sooner once the files hashed
+rem since the last one hold DASHBOARD_TICK_EVERY_CONTENT_UNITS of content
+rem (2.8.1, round 15.3: four 128 MiB segments never reached 25 files, so
+rem the Hash bar stood at 0 % until the stage was over).
 set "msg=[!sequence_number!/!%~3!] Hashing !item_label!: !file_relative_path!"
 if defined dashboard_active (
     set /a "dashboard_tick_count+=1"
-    if !dashboard_tick_count! geq %DASHBOARD_TICK_EVERY_ITEMS% call :dashboard_tick msg
+    if !dashboard_tick_count! geq %DASHBOARD_TICK_EVERY_ITEMS% (
+        call :dashboard_tick msg
+    ) else if !dashboard_tick_content_units! geq %DASHBOARD_TICK_EVERY_CONTENT_UNITS% (
+        call :dashboard_tick msg
+    )
 ) else if "!msg:~%OUTPUT_WIDTH%!"=="" (
     echo(!msg!
 ) else (
@@ -5454,11 +5470,13 @@ if not defined file_sha256 set "file_sha256=UNREADABLE"
 >>"!temp_hash_rows_%~2!" echo("!file_relative_path!","!file_sha256!"
 if "%~2"=="destination" >>"!temp_compare_lines!" echo(!file_relative_path!*!file_sha256!*DST
 rem The file's units for the Hash bar (listed_size: the caller's, from the
-rem listing's size column).
+rem listing's size column): its content, which also counts towards the
+rem next tick, then the per-file share, which doesn't.
 set "file_units=!listed_size:~0,-%HASH_PROGRESS_UNIT_DIGITS%!"
 if not defined file_units set "file_units=0"
+set /a "dashboard_tick_content_units+=file_units"
 set /a "file_units+=HASH_WEIGHT_PER_FILE_UNITS"
-endlocal & set /a "hashed_count_%~2+=1, hashed_units_%~2+=%file_units%" & set "dashboard_tick_count=%dashboard_tick_count%" & set "dashboard_last_redraw=%dashboard_last_redraw%" & set "listing_last_line_number=%listed_line_number%" & set "listing_refused_count=%listing_refused_count%" & exit /b 0
+endlocal & set /a "hashed_count_%~2+=1, hashed_units_%~2+=%file_units%" & set "dashboard_tick_count=%dashboard_tick_count%" & set "dashboard_tick_content_units=%dashboard_tick_content_units%" & set "dashboard_last_redraw=%dashboard_last_redraw%" & set "listing_last_line_number=%listed_line_number%" & set "listing_refused_count=%listing_refused_count%" & exit /b 0
 :hash_listed_file_skipped
 endlocal & set "listing_last_line_number=%listed_line_number%" & set "listing_refused_count=%listing_refused_count%" & exit /b 0
 
@@ -8173,7 +8191,13 @@ set "block_warnings=%block_warning_count%"
 set "block_failures=%block_failure_count%"
 if %block_warning_count% equ 0 set "block_warnings=none"
 if %block_failure_count% equ 0 set "block_failures=none"
-set "block_line=  Warnings: %block_warnings%, Failures: %block_failures% (listed above)"
+rem Where the lists are: above the block in the log, the plain output and
+rem a non-forensic run; in the log alone after a forensic run's display
+rem (2.8.1, round 15.3: since 2.8.0 its summary goes to the log only, so
+rem the normal screen and the watchdog's end-state file have none above).
+set "block_lists_place=listed above"
+if not "%block_target%"=="log" if "%run_mode%"=="forensic" if "%dashboard_mode%"=="live" set "block_lists_place=listed in the log"
+set "block_line=  Warnings: %block_warnings%, Failures: %block_failures% (%block_lists_place%)"
 if %block_warning_count% equ 0 if %block_failure_count% equ 0 set "block_line=  Warnings: none, Failures: none"
 call :emit_line block_line %block_target%
 set "block_line=%RULE_HEAVY%" & call :emit_line block_line %block_target%
@@ -8503,7 +8527,8 @@ rem (:dashboard_watchdog_main). The section sits at the end of the file on
 rem purpose: cmd finds a label by scanning forward from the caller and
 rem wrapping, so helpers placed above the per-file loops would slow every
 rem call those loops make (workshop, 2026-10-18); the loops call only
-rem :dashboard_tick, every DASHBOARD_TICK_EVERY_ITEMS items.
+rem :dashboard_tick, every DASHBOARD_TICK_EVERY_ITEMS items (the hash
+rem loop also every DASHBOARD_TICK_EVERY_CONTENT_UNITS of content).
 
 :init_dashboard
 rem Decide the mode and give every display variable its starting value.
@@ -8511,6 +8536,7 @@ set "dashboard_mode=off"
 set "dashboard_active="
 set "dashboard_last_redraw=0"
 set "dashboard_tick_count=0"
+set "dashboard_tick_content_units=0"
 set "dashboard_copy_detail="
 set "dashboard_copy_error_text="
 set "dashboard_hash_detail="
@@ -8779,14 +8805,16 @@ exit /b 0
 
 :dashboard_tick  [detailVar]
 rem Every DASHBOARD_TICK_EVERY_ITEMS items of a loop (:hash_listed_file,
-rem :pair_compare_line; once per record in :check_run_record): read the
+rem :pair_compare_line; once per record in :check_run_record; in
+rem :hash_listed_file also once DASHBOARD_TICK_EVERY_CONTENT_UNITS of
+rem content have been hashed since the last tick): read the
 rem clock and redraw when redraw_interval_centiseconds have passed since the
 rem last redraw, with detailVar's text (the item in hand) as the Hash
 rem detail. The loops keep two lines per item (a count and this call): cmd
 rem parses a function's lines on every call, so a clock read inline would
-rem cost 2-4 ms per item (workshop, 2026-10-18). Sets dashboard_tick_count
-rem and dashboard_last_redraw in the caller, whichever its delayed
-rem expansion state.
+rem cost 2-4 ms per item (workshop, 2026-10-18). Sets dashboard_tick_count,
+rem dashboard_tick_content_units and dashboard_last_redraw in the caller,
+rem whichever its delayed expansion state.
 if not defined dashboard_active exit /b 0
 setlocal EnableDelayedExpansion
 set "dashboard_since=0"
@@ -8797,7 +8825,7 @@ if !dashboard_since! geq %redraw_interval_centiseconds% (
     if not "%~1"=="" set "dashboard_hash_detail=!%~1!"
     call :dashboard_redraw
 )
-endlocal & set "dashboard_tick_count=0" & set "dashboard_last_redraw=%dashboard_last_redraw%" & set "dashboard_static_columns=%dashboard_static_columns%" & set "dashboard_environment_lines=%dashboard_environment_lines%" & set "dashboard_header_sections_lines=%dashboard_header_sections_lines%"
+endlocal & set "dashboard_tick_count=0" & set "dashboard_tick_content_units=0" & set "dashboard_last_redraw=%dashboard_last_redraw%" & set "dashboard_static_columns=%dashboard_static_columns%" & set "dashboard_environment_lines=%dashboard_environment_lines%" & set "dashboard_header_sections_lines=%dashboard_header_sections_lines%"
 exit /b 0
 
 :dashboard_read_clock  outVar
@@ -8944,7 +8972,7 @@ if !dashboard_closing_lines! gtr 0 type "!temp_dashboard_closing!"
 :dashboard_draw_screen_end
 <nul set /p "=!escape_character![J"
 endlocal
-endlocal & set "dashboard_last_redraw=%dashboard_redraw_clock%" & set "dashboard_tick_count=0"
+endlocal & set "dashboard_last_redraw=%dashboard_redraw_clock%" & set "dashboard_tick_count=0" & set "dashboard_tick_content_units=0"
 exit /b 0
 
 :dashboard_draw_lists
