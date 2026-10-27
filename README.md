@@ -387,7 +387,8 @@ with every file named `evidence-robocopy_<run UTC>…`:
   file, sorted by relative path within the evidence directory, so they can be
   compared row for row. A file that could not be hashed has `UNREADABLE` in
   place of a hash; zero-byte files get the SHA-256 of empty input
-  (`certutil` can't hash them).
+  (`certutil` can't hash them) once they have been opened and read with
+  nothing in them.
 - `…_hashes_custody.csv`: the custody files in the destination set before
   this run's record was added (earlier run records, script copies, the
   history), same columns.

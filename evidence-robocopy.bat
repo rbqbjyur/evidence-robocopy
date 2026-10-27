@@ -64,7 +64,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.8.1"
+set "TOOL_VERSION=2.8.2"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -1205,6 +1205,8 @@ set "original_code_page="
 set "history_base_path="
 set "history_base_side="
 set "history_base_missing="
+set "history_base_sha256="
+set "history_staging_problem="
 set "reference_run="
 set "reference_name="
 set "reference_csv_path="
@@ -2956,6 +2958,9 @@ set "history_base_side=source"
 set "history_base_set_with_backslash=%source_set_with_backslash%"
 if not defined history_base_missing if defined destination_history_path call :choose_history_base || exit /b 1
 :read_history_base_chosen
+rem The history continued is copied into this run's record at the end
+rem (:write_history); its SHA-256 now pins what was checked (2.8.2).
+if defined history_base_path call :get_sha256 history_base_path history_base_sha256
 if defined history_base_path call :count_history_rows history_base_path history_row_count
 if %history_row_count% gtr 0 call :read_history_row history_base_path 2 reference
 if %history_row_count% gtr 0 call :is_run_directory_name reference_run || set "reference_run="
@@ -4097,7 +4102,7 @@ rem :each_item callback: one directory pattern of DRIVE_ROOT_HOUSEKEEPING_DIRS
 rem at callback_drive_root. An exact name is tested with IF EXIST (DIR on a
 rem directory would list its contents); a pattern with * or ? is expanded with
 rem DIR.
-echo(%~1| findstr /r "[*?]" >nul && goto find_housekeeping_dir_wildcard
+echo(%~1| "%tool_findstr%" /r "[*?]" >nul && goto find_housekeeping_dir_wildcard
 set "housekeeping_dir_path=%callback_drive_root%%~1"
 set "callback_found_name=%~1"
 call :is_directory housekeeping_dir_path && call :record_housekeeping_item D callback_found_name
@@ -5465,7 +5470,7 @@ if defined dashboard_active (
     call :show msg
 )
 set "file_sha256="
-call :get_sha256 full_path file_sha256
+call :get_sha256 full_path file_sha256 listed_size
 if not defined file_sha256 set "file_sha256=UNREADABLE"
 >>"!temp_hash_rows_%~2!" echo("!file_relative_path!","!file_sha256!"
 if "%~2"=="destination" >>"!temp_compare_lines!" echo(!file_relative_path!*!file_sha256!*DST
@@ -5506,12 +5511,22 @@ call :show_and_log msg
 call :remember_problem msg
 endlocal & exit /b 1
 
-:get_sha256  pathVar  outVar
+:get_sha256  pathVar  outVar  [sizeVar]
 rem Set outVar to the file's SHA-256 (64 hex characters). Clear it if certutil
 rem fails or prints anything else, so a failure can never look like a hash.
-rem certutil can't hash empty files: a file of size 0 gets EMPTY_SHA256. The
-rem size check is skipped for names containing "?" (a character the console
-rem code page couldn't show), where FOR could match a different file.
+rem certutil can't hash empty files: a file of size 0 gets EMPTY_SHA256 once
+rem it has been opened and read to its end with nothing in it (2.8.2, the
+rem GPT 6.1 review of 2.8.1, finding 2: the size is the directory entry's,
+rem so a file that couldn't be opened passed as hashed); find reads it
+rem through the same path form certutil was given, and a file it can't
+rem open is retried and UNREADABLE like any other. The size is sizeVar's
+rem when the caller has one (the hash pass: robocopy's listing, which
+rem names the file exactly; 2.8.2, round 15.6: FOR's %%~z on the plain
+rem path gave no size for "nul" or a name ending in a space, so such a
+rem zero-byte file was UNREADABLE, and a name ending in a dot took its
+rem twin's size), else FOR's %%~z, skipped for names containing "?" (a
+rem character the console code page couldn't show), where FOR could
+rem match a different file.
 rem certutil runs here, not inside a FOR /F command: FOR /F runs its
 rem command in a child cmd, which would expand %NAME% in a file name (e.g.
 rem "x %OS% y.txt" -> "x Windows_NT y.txt") and hash another file (test
@@ -5547,16 +5562,24 @@ if defined sha256 if "!sha256:~63,1!"=="" set "sha256="
 if defined sha256 for /f "delims=0123456789abcdefABCDEF" %%X in ("!sha256!") do set "sha256="
 if defined sha256 goto get_sha256_done
 set "size=unknown"
-if "!file_path:?=!"=="!file_path!" for %%A in ("!file_path!") do set "size=%%~zA"
-if "!size!"=="0" set "sha256=!EMPTY_SHA256!"
+if not "%~3"=="" if defined %~3 set "size=!%~3!"
+if "!size!"=="unknown" if "!file_path:?=!"=="!file_path!" for %%A in ("!file_path!") do set "size=%%~zA"
+if "!size!"=="0" (
+    del "!temp_certutil_output!" >nul 2>&1
+    ("%tool_find%" /c /v "" <"!hash_path!" >"!temp_certutil_output!") 2>nul
+    if exist "!temp_certutil_output!" for /f "usebackq" %%N in ("!temp_certutil_output!") do if "%%N"=="0" set "sha256=!EMPTY_SHA256!"
+    del "!temp_certutil_output!" >nul 2>&1
+)
 if defined sha256 goto get_sha256_done
+set "attempt_problem=certutil could not read !file_path!"
+if "!size!"=="0" set "attempt_problem=!file_path! is listed as 0 bytes but couldn't be opened and read"
 if !attempts_left! equ 0 (
-    set "msg=[INFO] certutil could not read !file_path! at the second attempt either: recorded as UNREADABLE."
+    set "msg=[INFO] !attempt_problem! at the second attempt either: recorded as UNREADABLE."
     call :show_and_log msg
     goto get_sha256_done
 )
 set /a "attempts_left-=1, retry_wait_pings=HASH_RETRY_WAIT_SECONDS + 1"
-set "msg=[INFO] certutil could not read !file_path! at the first attempt; trying again in !HASH_RETRY_WAIT_SECONDS! s."
+set "msg=[INFO] !attempt_problem! at the first attempt; trying again in !HASH_RETRY_WAIT_SECONDS! s."
 call :show_and_log msg
 "%tool_ping%" -n !retry_wait_pings! 127.0.0.1 >nul
 goto get_sha256_attempt
@@ -6911,9 +6934,18 @@ rem Forensic run. This run's history, sealed in its run record: the history
 rem it continues, unchanged, with this run's row added; or, if it continues
 rem none, the header and this run's row. The new row's Seal SHA-256 is
 rem pending_seal_text ("see <its seal file>"): the next run fills it in.
+rem The copy must have the SHA-256 the history had when it was chosen
+rem (2.8.2, the GPT 6.1 review of 2.8.1, finding 1): a copy that failed
+rem or was cut short, or a history changed during the run, would
+rem otherwise be sealed as this run's history, without the rows before.
+rem Then the seal is incomplete (history_staging_problem, :write_seal).
+rem history_base_path is only ever set to a history that was there when
+rem it was chosen: one gone since is a failed copy (2.8.2; before, the
+rem run started a new history in silence).
 set "history_continues="
-if defined history_base_path if exist "%history_base_path%" set "history_continues=1"
+if defined history_base_path set "history_continues=1"
 if defined history_continues copy /b "%history_base_path%" "%staged_history_path%" >nul 2>&1
+if defined history_continues call :history_copy_is_unchanged staged_history_path || set "history_staging_problem=1"
 if not defined history_continues call :append_line_to_file HISTORY_HEADER staged_history_path
 set "history_source_set=%source_path%"
 if defined source_set_path set "history_source_set=%source_set_path%"
@@ -6922,6 +6954,33 @@ rem as the destination (the Location check of later runs compares with the
 rem destination); its run record's relocation file says it was a move.
 if "%run_kind%"=="relocate" set "history_source_set=%relocate_from_path%"
 call :append_history_row
+exit /b 0
+
+:history_copy_is_unchanged  copyPathVar
+rem Exit 0 if the copy has the SHA-256 the history this run continues had
+rem when it was chosen (history_base_sha256, :read_history), so it holds
+rem exactly the history that was checked. A hash that couldn't be taken
+rem at either point is exit 1: unknown is not unchanged. A copy that
+rem isn't there (the history unreadable or gone) is exit 1 without a
+rem hash: :get_sha256's retry would wait and write its notes for nothing
+rem (2.8.2, round 15.6).
+setlocal
+call :copy_variable %~1 copy_path
+if not exist "%copy_path%" (endlocal & exit /b 1)
+set "copy_sha256="
+call :get_sha256 %~1 copy_sha256
+if not defined history_base_sha256 (endlocal & exit /b 1)
+if /i "%copy_sha256%"=="%history_base_sha256%" (endlocal & exit /b 0)
+endlocal & exit /b 1
+
+:report_history_not_copied
+rem (:write_seal, after its heading, when :write_history set
+rem history_staging_problem) The history continued couldn't be copied
+rem into the run record unchanged: a [FAIL] on the console in the Record
+rem written section (the log is closed), and the seal is incomplete, so
+rem the record isn't written.
+set "msg=[FAIL] The history this run continues couldn't be copied into its run record unchanged (it couldn't be read, or it changed after it was checked before the copy): the record can't be sealed."
+call :show_write_back_problem msg
 exit /b 0
 
 :append_history_row
@@ -6949,7 +7008,8 @@ rem sealed log records the script's SHA-256, which the copy was checked
 rem against. Sets run_seal_sha256, and seal_incomplete=1 if any record file
 rem or the seal itself couldn't be hashed, or (2.8.0, :check_record_files)
 rem a file the run must have written is missing or empty, or staging holds
-rem a file no row of RECORD_FILES names: :publish_records then writes
+rem a file no row of RECORD_FILES names, or (2.8.2, :write_history) the
+rem history continued wasn't copied unchanged: :publish_records then writes
 rem nothing and the run fails (owner, 2026-10-16), since a run record whose
 rem seal doesn't cover it would fail every later copy. Console only from
 rem here: the log is complete and is being sealed.
@@ -6961,6 +7021,7 @@ rem it stays.
 set "log_sealed=1"
 set "record_files_problem="
 call :check_record_files
+if defined history_staging_problem call :report_history_not_copied
 setlocal EnableDelayedExpansion
 set "sealed_count=0"
 set "seal_expected_count=0"
@@ -6983,6 +7044,7 @@ for %%F in (log_staged_path staged_hash_csv_source staged_hash_csv_destination s
 set "incomplete="
 if !sealed_count! neq !seal_expected_count! set "incomplete=1"
 if defined record_files_problem set "incomplete=1"
+if defined history_staging_problem set "incomplete=1"
 if !sealed_count! equ 0 (endlocal & set "seal_incomplete=1" & exit /b 0)
 set "seal_sha256="
 call :get_sha256 staged_seal_path seal_sha256
@@ -7252,9 +7314,12 @@ rem every row is complete; with which=continued (this run's record couldn't
 rem be completed), the history this run continued, unchanged, so the
 rem destination's history still matches the run records copied there. A
 rem quick overview, never relied on: each run checks it against the sealed
-rem run records. It replaces the one already there (/is /it).
+rem run records. It replaces the one already there (/is /it); a continued
+rem history whose copy isn't the one checked before the copy (2.8.2) is
+rem not written, and the destination's is left as it is.
 if "%~1"=="new" call :write_history_with_seal staged_history_path pending_seal_text run_seal_sha256 staged_root_history_path
 if "%~1"=="continued" copy /b "%history_base_path%" "%staged_root_history_path%" >nul 2>&1
+if "%~1"=="continued" call :history_copy_is_unchanged staged_root_history_path || goto publish_root_history_not_copied
 set /a "record_count+=1"
 "%tool_robocopy%" "%staged_root_dir% " "%destination_set_path% " "%HISTORY_FILE_NAME%" /is /it /j /r:%RETRY_COUNT% /w:%RETRY_WAIT_SECONDS% /njh /njs /ndl /nfl /np >nul 2>&1
 set /a "records_robocopy_exit_codes|=%errorlevel%"
@@ -7262,6 +7327,12 @@ set "record_name=%HISTORY_FILE_NAME%"
 set "publish_from=%staged_root_dir%"
 set "publish_to_with_backslash=%destination_set_with_backslash%"
 call :check_record_in_destination record_name publish_from publish_to_with_backslash
+exit /b 0
+:publish_root_history_not_copied
+rem Counted as a file not written: the write-back fails.
+set /a "record_count+=1"
+set "msg=[FAIL] The history this run continued couldn't be copied unchanged (it couldn't be read, or it changed after it was checked before the copy), so the history beside the evidence in the destination was not replaced."
+call :show_write_back_problem msg
 exit /b 0
 
 :check_record_in_destination  nameVar  stagedDirVar  destinationPrefixVar
@@ -8352,7 +8423,11 @@ rem run record directory that denied listing passed its seal check with an
 rem unsealed file in it). :confirm_directory_readable decides, on
 rem probeDirVar when given (the directory a wildcard path searches), else
 rem on the path itself: DIR's own exit code, and a list-only robocopy
-rem where DIR found nothing. A caller that gets
+rem where DIR found nothing. It probes again after the listing (2.8.2, the
+rem GPT 6.1 review of 2.8.1, finding 3), so a directory lost while DIR
+rem listed it (a device gone, access removed) is exit 1 too, not a short
+rem listing; DIR's exit code can't tell it (1 also when the switches
+rem match nothing there, e.g. /a-d among directories). A caller that gets
 rem exit 1 fails or refuses; it never reads the empty file as "nothing
 rem there".
 setlocal DisableDelayedExpansion
@@ -8363,6 +8438,7 @@ if not "%~4"=="" call :copy_variable %~4 list_directory_probe
 (type nul >"%list_directory_file%") 2>nul || (endlocal & exit /b 1)
 call :confirm_directory_readable list_directory_probe || (endlocal & exit /b 1)
 dir %~1 "%list_directory_path%" >"%list_directory_file%" 2>nul
+call :confirm_directory_readable list_directory_probe || ((type nul >"%list_directory_file%") 2>nul & endlocal & exit /b 1)
 endlocal & exit /b 0
 
 :confirm_directory_readable  directoryVar

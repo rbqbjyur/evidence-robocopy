@@ -5,7 +5,45 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.8.2 - 2026-10-27
+
+### Fixed
+- A run could pass with a run record whose history left out the runs
+  before it. The history a run continues is copied into its record at
+  the end, and that copy wasn't checked: had the history become
+  unreadable or gone since it was checked before the copy (a device
+  removed, access changed, TEMP full), the record's history held this
+  run's row alone or only part of the history, and a history edited
+  during the run was sealed as found. The next run failed on that
+  record. The history's SHA-256 is now taken when it is chosen and the
+  copy must have it; otherwise the run fails and its record is kept in
+  TEMP, not written. The history written beside the evidence when a
+  record can't be completed is checked the same way; when it doesn't
+  match, the destination's history is left as it is.
+- A zero-byte file took the SHA-256 of empty input from its size alone,
+  without being opened, so one that couldn't be read counted as hashed.
+  It must now be opened and read with nothing in it; otherwise it is
+  tried again and recorded `UNREADABLE`, as any other file, the log
+  saying it "is listed as 0 bytes but couldn't be opened and read".
+- A zero-byte file named `nul`, or whose name ends in a space or a dot,
+  was recorded `UNREADABLE` (one ending in a dot beside a twin without
+  it took the twin's size), so a first copy holding one failed, and
+  every later copy of that set with it. The size now comes from
+  robocopy's listing, which names each file exactly.
+- A directory is checked again once it has been listed: one lost while
+  it was being listed (a device removed, access changed) is reported as
+  a directory that couldn't be listed, never read as a shorter listing.
+- `findstr` was still run by its bare name in one place (telling a
+  pattern from a name in the drive-root tables), so a `findstr` in the
+  current directory would have run there instead of Windows' own.
+
 ## 2.8.1 - 2026-10-26
+
+Known issue (in every 2.x release so far, fixed in 2.8.2): a run could
+pass with a run record whose history left out the runs before it, if the
+history it continued became unreadable, disappeared or changed between
+its check before the copy and the end of the run. The next run fails on
+that record.
 
 ### Fixed
 - In the live display, the Hash (SHA-256) bar didn't move while a few
