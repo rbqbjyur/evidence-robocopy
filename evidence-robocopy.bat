@@ -64,7 +64,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.8.2"
+set "TOOL_VERSION=2.9.0"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -79,6 +79,14 @@ rem can't read is hashed again after this many seconds before it is recorded
 rem UNREADABLE, and the retry is noted in the log. A file that fails twice is
 rem UNREADABLE (:get_sha256).
 set "HASH_RETRY_WAIT_SECONDS=2"
+
+rem Once this many files in a row couldn't be read, the hash pass checks
+rem that the directory being hashed is still there (a network share or a
+rem device gone, round 15.8): if it isn't, the files left are recorded
+rem UNREADABLE without being tried, instead of a failed read, a wait and a
+rem retry for each (about 2.2 s a file). Files denied one by one pass the
+rem check and go on as before. The Hash check fails either way.
+set "HASH_UNREADABLE_RUN_BEFORE_PROBE=5"
 
 rem The longest full path (drive letter to file name, as the source or the
 rem destination lists it) of a file this script hashes and compares. A
@@ -353,6 +361,12 @@ set "HISTORY_FILE_NAME=evidence-robocopy-history.csv"
 set "RECORDS_DIR_NAME=evidence-robocopy-records"
 set "RECORD_FILE_PREFIX=evidence-robocopy_"
 set "PARTIAL_RUN_SUFFIX=.partial"
+rem The zero-byte file :probe_same_directory creates in the destination
+rem set directory and looks for through the source's path (2.9.0): its
+rem name is this prefix and random digits, ".tmp". Not a custody file:
+rem one left behind (named by the refusal) makes the set rules refuse the
+rem set until it is removed.
+set "PROBE_FILE_PREFIX=evidence-robocopy_same-directory-probe_"
 set "IGNORED_CUSTODY_FILES=.DS_Store|._*|.apdisk|desktop.ini|Thumbs.db|.directory"
 
 rem The files of a run record, checked before it is sealed (:write_seal,
@@ -1031,7 +1045,13 @@ echo   is empty or holds only a directory with the evidence directory's name
 echo   (D3); otherwise a directory in it named after the set (D4). A set
 echo   directory holding custody files is a rerun or update (confirmed);
 echo   otherwise it must hold nothing but an empty evidence directory. Nothing
-echo   is written into another set.
+echo   is written into another set: a directory inside one, at any depth and
+echo   by whatever path, is refused. A destination that is the source's set
+echo   directory under another path (a mapped drive letter and its share, a
+echo   share under two names, a subst drive) is refused too: a probe file
+echo   created in the destination set directory is looked for through the
+echo   source's path. A drive letter mapped to a share is a network share:
+echo   times are compared to 2 s, and the log header names the share.
 echo.
 echo /check: verifies a set in place, without copying: the SOURCE prompt only
 echo   (a set directory, or its evidence directory); every file against the
@@ -1090,7 +1110,9 @@ echo Records are UTF-8 with CRLF line endings. Files are written unbuffered
 echo   (robocopy /j). Not elevated, nothing copied is in Windows' file cache
 echo   when verified. Elevated, backup mode (/b) leaves the evidence and
 echo   custody files it copies in that cache, so they may be verified from
-echo   it; the run's own record is not in it either way.
+echo   it; the run's own record is not in it either way. A Windows file server
+echo   kept nothing of a /j copy in its own cache (one server tested); other
+echo   servers and NAS devices aren't known.
 echo Run as administrator to use backup mode (/b).
 echo A run shows its progress in a live display on the console
 echo   (Windows 10 or later, not the legacy console), drawn on the console's
@@ -2027,14 +2049,15 @@ call :is_directory relocate_target_parent_with_backslash || (
     set "identify_problem=The new location's directory doesn't exist: %relocate_target_parent_path%"
     exit /b 1
 )
+call :refuse_directory_inside_set relocate_target_parent_path 1 "The new location" || exit /b 1
 set "overlap_first_with_backslash=%relocate_from_with_backslash%"
 set "overlap_second_with_backslash=%relocate_target_with_backslash%"
 call :paths_overlap && (
     set "identify_problem=The new location is inside the set, or the set would be inside it: a set can't be moved into itself."
     exit /b 1
 )
-call :describe_volume "%relocate_from_path:~0,2%" relocate_from_volume_text relocate_from_filesystem relocate_from_serial relocate_from_volume_label_and_filesystem
-call :describe_volume "%relocate_target_path:~0,2%" relocate_target_volume_text relocate_target_filesystem relocate_target_serial relocate_target_volume_label_and_filesystem
+call :describe_volume "%relocate_from_path:~0,2%" relocate_from_volume_text relocate_from_filesystem relocate_from_serial relocate_from_volume_label_and_filesystem relocate_from_network_remote
+call :describe_volume "%relocate_target_path:~0,2%" relocate_target_volume_text relocate_target_filesystem relocate_target_serial relocate_target_volume_label_and_filesystem relocate_target_network_remote
 if "%relocate_from_serial%"=="n/a" (
     set "identify_problem=The set is on a network path, whose volume can't be read: /relocate moves a set within one volume only."
     exit /b 1
@@ -2263,15 +2286,10 @@ call :identify_destination_set || (
 set "overlap_first_with_backslash=%source_with_backslash%"
 if defined source_set_with_backslash set "overlap_first_with_backslash=%source_set_with_backslash%"
 set "overlap_second_with_backslash=%destination_set_with_backslash%"
-call :paths_overlap && (
-    echo Source and destination must not be the same, or inside each other.
-    if defined argument_destination set "abort_reason=The source and the destination given on the command line are the same, or inside each other." & if defined argument_destination exit /b 1
-    call :count_rejected_answer destination_set_rejected_answers "destination directory" || exit /b 1
-    goto ask_destination_set_again
-)
+call :paths_overlap && goto ask_destination_set_overlap
 if "%destination_was_empty%"=="1" (
     call :offer_relocation_instead_of_copy || exit /b 1
-    exit /b 0
+    goto ask_destination_set_probe
 )
 echo.
 echo The destination already holds this set (a rerun or an update): files
@@ -2286,7 +2304,23 @@ if "%destination_answer%"=="2" if defined argument_destination (
     exit /b 1
 )
 if "%destination_answer%"=="2" goto ask_destination_set_again
+:ask_destination_set_probe
+rem The destination set directory settled and, for an existing set, the
+rem rerun confirmed: one directory under two paths is refused (2.9.0).
+call :refuse_destination_that_is_the_source || goto ask_destination_set_refused
 exit /b 0
+:ask_destination_set_overlap
+echo Source and destination must not be the same, or inside each other.
+if defined overlap_mapping_note call :show overlap_mapping_note
+if defined argument_destination (
+    set "abort_reason=The source and the destination given on the command line are the same, or inside each other."
+    exit /b 1
+)
+:ask_destination_set_refused
+rem The refusal has been shown (and abort_reason set, for /destination).
+if defined argument_destination exit /b 1
+call :count_rejected_answer destination_set_rejected_answers "destination directory" || exit /b 1
+goto ask_destination_set_again
 
 :offer_relocation_instead_of_copy
 rem Caller's scope (:ask_destination_set), once a new destination set is
@@ -2316,8 +2350,8 @@ call :script_is_inside_set && exit /b 0
 if not "%source_set_path:~1,1%"==":" exit /b 0
 if not "%destination_set_path:~1,1%"==":" exit /b 0
 call :is_drive_root destination_set_with_backslash && exit /b 0
-call :describe_volume "%source_set_path:~0,2%" offer_source_volume_text offer_source_filesystem offer_source_serial offer_source_label_and_filesystem
-call :describe_volume "%destination_set_path:~0,2%" offer_destination_volume_text offer_destination_filesystem offer_destination_serial offer_destination_label_and_filesystem
+call :describe_volume "%source_set_path:~0,2%" offer_source_volume_text offer_source_filesystem offer_source_serial offer_source_label_and_filesystem offer_source_network_remote
+call :describe_volume "%destination_set_path:~0,2%" offer_destination_volume_text offer_destination_filesystem offer_destination_serial offer_destination_label_and_filesystem offer_destination_network_remote
 if "%offer_source_serial%"=="n/a" exit /b 0
 if "%offer_source_serial%"=="unknown" exit /b 0
 if /i not "%offer_source_serial%"=="%offer_destination_serial%" exit /b 0
@@ -2374,6 +2408,90 @@ set "msg=The set will be moved to %relocate_target_path% and verified there; the
 call :show msg
 exit /b 0
 
+:refuse_destination_that_is_the_source
+rem Caller's scope (:ask_destination_set, delayed expansion off), the
+rem destination set settled and, for an existing set, the rerun confirmed.
+rem A copy run whose destination set directory exists is probed against
+rem the source's set directory (a raw source, S4: the directory holding
+rem the evidence directory): one directory under two paths is refused, as
+rem the overlap check refuses one path given twice (:probe_same_directory
+rem for why and how; 2.9.0, round 15.8). Not probed: a check (no
+rem destination), a relocation chosen at the prompt (the directory has
+rem been removed), a set directory D4 has yet to make (it exists nowhere),
+rem a raw source with no directory above it (a drive root). Exit 1 with
+rem the refusal shown and abort_reason set (for /destination).
+if not "%run_kind%"=="copy" exit /b 0
+call :is_directory destination_set_with_backslash || exit /b 0
+set "probe_source_directory_path=%source_set_path%"
+set "probe_source_directory_with_backslash=%source_set_with_backslash%"
+rem A raw source: its parent, worked out in straight lines (in a block the
+rem percent values would be read before :normalise_path sets them: round
+rem 15.9, PROBE-STALE).
+if defined source_set_path goto refuse_destination_that_is_the_source_probe
+set "normalise_path_input=%source_path%\.."
+call :normalise_path || exit /b 0
+if /i "%source_path%"=="%normalise_path_result%" exit /b 0
+set "probe_source_directory_path=%normalise_path_result%"
+set "probe_source_directory_with_backslash=%normalise_path_with_backslash%"
+:refuse_destination_that_is_the_source_probe
+call :probe_same_directory destination_set_with_backslash probe_source_directory_with_backslash
+if errorlevel 2 goto refuse_destination_that_is_the_source_unknown
+if errorlevel 1 exit /b 0
+set "msg=The destination set directory (%destination_set_path%) is the source's set directory (%probe_source_directory_path%) under another path (a mapped drive letter and its share, a share under two names, a subst drive): a file created in the one was seen in the other. Nothing is copied onto itself."
+call :show msg
+set "abort_reason=The destination given on the command line is the source's set directory under another path (see above)."
+exit /b 1
+:refuse_destination_that_is_the_source_unknown
+set "msg=Whether the destination set directory (%destination_set_path%) is the source's set directory (%probe_source_directory_path%) under another path couldn't be told: %probe_problem%. The destination is refused."
+call :show msg
+set "abort_reason=Whether the destination given on the command line is the source's set directory under another path couldn't be told (see above)."
+exit /b 1
+
+:probe_same_directory  writeDirVar  lookDirVar
+rem Are two directories, named by two paths, one directory? Exit 0 when
+rem they are, 1 when they aren't, 2 when it couldn't be told (probe_problem
+rem says why). A zero-byte file with a name of this run's own
+rem (PROBE_FILE_PREFIX and random digits) is created in the first
+rem directory, looked for through the second's path, and removed: seen
+rem there, the two paths name one directory, by whatever route (a mapped
+rem drive, a share under another name, a subst drive, a junction); no name
+rem is compared. The first directory is the destination, where the run
+rem writes anyway; when the two are one directory, the file has been in the
+rem source's set directory for the moment it took, never in an evidence
+rem directory (2.9.0; owner, 2026-10-27; round 15.8: a set reached by two
+rem routes was "copied" onto itself and a run record claiming the copy
+rem written into it). A file that can't be created, or can't be removed, is
+rem named (probe_problem), exit 2; the set rules refuse a set holding one
+rem until it is removed. Both directories exist. Delayed expansion off:
+rem "!" and "%" in paths stay.
+setlocal DisableDelayedExpansion
+set "probe_problem="
+set "probe_result=1"
+set "probe_name=%PROBE_FILE_PREFIX%%RANDOM%%RANDOM%%RANDOM%.tmp"
+call :copy_variable %~1 probe_write_directory
+call :copy_variable %~2 probe_look_directory
+set "probe_write_path=%probe_write_directory%%probe_name%"
+set "probe_look_path=%probe_look_directory%%probe_name%"
+if exist "%probe_write_path%" (
+    set "probe_problem=a file named %probe_write_path% was already there"
+    set "probe_result=2"
+    goto probe_same_directory_done
+)
+(type nul >"%probe_write_path%") 2>nul
+if not exist "%probe_write_path%" (
+    set "probe_problem=the probe file %probe_write_path% couldn't be created (the directory can't be written to, or can't be reached)"
+    set "probe_result=2"
+    goto probe_same_directory_done
+)
+if exist "%probe_look_path%" set "probe_result=0"
+del "%probe_write_path%" >nul 2>&1
+if exist "%probe_write_path%" (
+    set "probe_problem=the probe file %probe_write_path% couldn't be removed: remove it by hand"
+    set "probe_result=2"
+)
+:probe_same_directory_done
+endlocal & set "probe_problem=%probe_problem%" & exit /b %probe_result%
+
 :identify_destination_set
 rem Caller's scope. Work out the destination set from destination_given_path
 rem (an existing directory) in two stages (README, "Set and evidence
@@ -2399,6 +2517,10 @@ set "destination_given_is_evidence_name="
 if /i "%destination_given_name%"=="%evidence_directory_name%" set "destination_given_is_evidence_name=1"
 set "destination_parent_holds_custody_files="
 if defined destination_parent_path call :holds_custody_files destination_parent_with_backslash && set "destination_parent_holds_custody_files=1"
+rem The ancestors above the parent (D2 looks at the parent): a set
+rem anywhere above makes this a directory inside a set, refused (2.9.0,
+rem round 15.9).
+call :refuse_directory_inside_set destination_parent_path 0 "The directory given" || exit /b 1
 set "destination_candidate_path=%destination_given_path%"
 set "destination_candidate_with_backslash=%destination_given_with_backslash%"
 
@@ -2449,12 +2571,106 @@ set "destination_candidate_path=%destination_given_with_backslash%%set_directory
 set "destination_candidate_with_backslash=%destination_candidate_path%\"
 goto identify_destination_set_state
 
+:refuse_directory_inside_set  startPathVar  checkStart  whatText
+rem Caller's scope. A directory may lie inside a set at any depth, not
+rem only one level down (round 15.9: a set's EvidenceA\sub, reached under
+rem another name for its share, was taken by D3 as a new set and the
+rem source copied into itself, over and over). Every ancestor from
+rem startPathVar upwards is looked at, startPathVar itself when checkStart
+rem is 1 (the destination's parent is D2's domain, so :identify_destination_set
+rem gives 0; a relocation target's parent is checked): one holding custody
+rem files (:holds_custody_files) makes the directory a directory inside a
+rem set, which is refused, whatever path names it (nothing is written into
+rem another set). The walk reads only (IF EXIST per ancestor), at most
+rem PATH_MAX_DEPTH levels (:inspect_next_ancestor). Sets identify_problem,
+rem opening with whatText, and exits 1 on a refusal. Working variables
+rem inside_set_*.
+call :copy_variable %~1 inside_set_ancestor_path
+if not defined inside_set_ancestor_path exit /b 0
+set "inside_set_found="
+set "inside_set_walk_done="
+if "%~2"=="1" (
+    set "inside_set_ancestor_with_backslash=%inside_set_ancestor_path%\"
+    call :holds_custody_files inside_set_ancestor_with_backslash && set "inside_set_found=%inside_set_ancestor_path%"
+)
+if defined inside_set_found set "inside_set_walk_done=1"
+for /l %%I in (1,1,%PATH_MAX_DEPTH%) do if not defined inside_set_walk_done call :inspect_next_ancestor
+if not defined inside_set_found exit /b 0
+set "identify_problem=%~3 is inside a set (%inside_set_found%): nothing is written into another set, at any depth and by whatever path it is reached. Give a location outside it."
+exit /b 1
+
+:inspect_next_ancestor
+rem Caller's scope (:refuse_directory_inside_set): one level up from
+rem inside_set_ancestor_path. At the root (the parent is the path itself),
+rem or where no parent can be worked out, the walk is done. An ancestor
+rem holding custody files sets inside_set_found to it and ends the walk.
+rem Straight lines: a percent value read inside a block would be the one
+rem from before :normalise_path ran (round 15.9, PROBE-STALE).
+set "normalise_path_input=%inside_set_ancestor_path%\.."
+call :normalise_path || set "inside_set_walk_done=1"
+if defined inside_set_walk_done exit /b 0
+if /i "%normalise_path_result%"=="%inside_set_ancestor_path%" set "inside_set_walk_done=1"
+if defined inside_set_walk_done exit /b 0
+set "inside_set_ancestor_path=%normalise_path_result%"
+set "inside_set_ancestor_with_backslash=%normalise_path_with_backslash%"
+call :holds_custody_files inside_set_ancestor_with_backslash || exit /b 0
+set "inside_set_found=%inside_set_ancestor_path%"
+set "inside_set_walk_done=1"
+exit /b 0
+
 :identify_destination_set_rule_d2
 set "destination_candidate_path=%destination_parent_path%"
 set "destination_candidate_with_backslash=%destination_parent_with_backslash%"
 
 :identify_destination_set_state
 call :check_destination_set_state || exit /b 1
+call :refuse_destination_below_evidence_name || exit /b 1
+exit /b 0
+
+:refuse_destination_below_evidence_name
+rem Caller's scope (:identify_destination_set, the set directory settled
+rem in destination_candidate_path). A raw source (S4) has no custody files
+rem above it for :refuse_directory_inside_set to find, so a destination
+rem inside raw evidence under another path for it (the share by its
+rem address and by its name, a subst drive) was taken as a new set and the
+rem copy ran into the source (round 15.9). The evidence directory's name
+rem is the one identity a raw source has (the owner, 2026-10-28: the name,
+rem not file IDs): a directory of that name above the destination set
+rem directory (its parent and up) refuses the destination; one that only
+rem shares the name is refused too, the reason given. The set directory
+rem itself isn't compared: D4 names a first copy's set directory after the
+rem evidence directory. String work only, no file system access, at most
+rem PATH_MAX_DEPTH levels (:inspect_next_name_ancestor). Sets
+rem identify_problem and exits 1 on a refusal. Working variables
+rem below_name_*.
+if defined source_set_path exit /b 0
+if not "%run_kind%"=="copy" exit /b 0
+set "below_name_found="
+set "below_name_walk_done="
+set "below_name_path=%destination_candidate_path%"
+for /l %%I in (1,1,%PATH_MAX_DEPTH%) do if not defined below_name_walk_done call :inspect_next_name_ancestor
+if not defined below_name_found exit /b 0
+set "identify_problem=%destination_layout_rule_id%: the destination set directory (%destination_candidate_path%) is below a directory named like the source's evidence directory (%below_name_found%): it may be inside the source under another path, and nothing is written into evidence. Give a location outside it."
+exit /b 1
+
+:inspect_next_name_ancestor
+rem Caller's scope (:refuse_destination_below_evidence_name): one level up
+rem from below_name_path, compared by name with the evidence directory (as
+rem Windows compares names, case aside). At the root (the parent is the
+rem path itself), or where no parent can be worked out, the walk is done.
+rem Straight lines: a percent value read inside a block would be the one
+rem from before :normalise_path ran (round 15.9, PROBE-STALE).
+set "normalise_path_input=%below_name_path%\.."
+call :normalise_path || set "below_name_walk_done=1"
+if defined below_name_walk_done exit /b 0
+if /i "%normalise_path_result%"=="%below_name_path%" set "below_name_walk_done=1"
+if defined below_name_walk_done exit /b 0
+set "below_name_path=%normalise_path_result%"
+set "below_name_component="
+for %%A in ("%below_name_path%") do set "below_name_component=%%~nxA"
+if /i not "%below_name_component%"=="%evidence_directory_name%" exit /b 0
+set "below_name_found=%below_name_path%"
+set "below_name_walk_done=1"
 exit /b 0
 
 :check_destination_set_state
@@ -2678,13 +2894,14 @@ set "overlap_first_with_backslash=%source_with_backslash%"
 set "overlap_second_with_backslash=%destination_with_backslash%"
 call :paths_overlap && (
     echo Source and destination must not be the same, or inside each other.
+    if defined overlap_mapping_note call :show overlap_mapping_note
     call :count_rejected_answer plain_paths_rejected_answers "source and destination" || exit /b 1
     goto ask_plain_paths_source
 )
 set "destination_was_empty=1"
 set "destination_state_text=empty"
 set "destination_content_unreadable="
-call :destination_has_content || exit /b 0
+call :destination_has_content || goto ask_plain_paths_probe
 if defined destination_content_unreadable (
     echo The destination directory couldn't be listed ^(access denied, or the
     echo   device isn't readable^), so it can't be told whether it is empty: it
@@ -2706,7 +2923,26 @@ if "%destination_answer%"=="2" if defined argument_destination (
 if "%destination_answer%"=="2" goto ask_plain_paths_destination
 set "destination_was_empty=0"
 set "destination_state_text=NOT empty (user chose to continue)"
-exit /b 0
+:ask_plain_paths_probe
+rem The destination settled (and, not empty, confirmed): the source
+rem directory and the destination under two paths are refused as one path
+rem given twice is (:probe_same_directory; 2.9.0).
+call :probe_same_directory destination_with_backslash source_with_backslash
+if errorlevel 2 goto ask_plain_paths_probe_unknown
+if errorlevel 1 exit /b 0
+set "msg=The destination (%destination_path%) is the source directory (%source_path%) under another path (a mapped drive letter and its share, a share under two names, a subst drive): a file created in the one was seen in the other. Nothing is copied onto itself."
+call :show msg
+goto ask_plain_paths_refused
+:ask_plain_paths_probe_unknown
+set "msg=Whether the destination (%destination_path%) is the source directory (%source_path%) under another path couldn't be told: %probe_problem%. The destination is refused."
+call :show msg
+:ask_plain_paths_refused
+if defined argument_destination (
+    set "abort_reason=The destination given on the command line was refused (see above)."
+    exit /b 1
+)
+call :count_rejected_answer plain_paths_rejected_answers "destination directory" || exit /b 1
+goto ask_plain_paths_destination
 
 :destination_has_content
 rem /nonforensic: exit 0 if the destination directory exists and holds anything
@@ -2801,6 +3037,12 @@ rem the move (:relocate_set): making it first would put the moved set
 rem inside it.
 call :is_directory destination_set_with_backslash || mkdir "%destination_set_path%" >nul 2>&1
 call :is_directory destination_set_with_backslash && exit /b 0
+rem The directory given at the prompt was there then: gone now, the
+rem destination can't be reached (a share or a device gone; round 15.8).
+call :is_directory destination_given_with_backslash || (
+    set "abort_reason=The destination (%destination_given_path%) can't be reached any more: it was there when it was given (a network share or a device gone since?). Nothing was copied, and no record was written."
+    exit /b 1
+)
 set "abort_reason=Could not create the destination set directory."
 exit /b 1
 
@@ -3893,8 +4135,8 @@ call :finish_latest_release_check
 if defined latest_release_warning call :add_warning latest_release_warning
 set "destination_volume_directory=%destination_path%"
 if "%run_mode%"=="forensic" set "destination_volume_directory=%destination_set_path%"
-call :describe_volume "%source_path:~0,2%" header_source_volume source_filesystem source_volume_serial source_volume_label_and_filesystem
-call :describe_volume "%destination_volume_directory:~0,2%" header_destination_volume destination_filesystem destination_volume_serial destination_volume_label_and_filesystem
+call :describe_volume "%source_path:~0,2%" header_source_volume source_filesystem source_volume_serial source_volume_label_and_filesystem source_network_remote
+call :describe_volume "%destination_volume_directory:~0,2%" header_destination_volume destination_filesystem destination_volume_serial destination_volume_label_and_filesystem destination_network_remote
 if not "%console_code_page%"=="65001" (
     set "msg=The console couldn't be switched to UTF-8: text in this record is in code page %console_code_page% (see Encoding)."
     call :add_warning msg
@@ -3905,8 +4147,10 @@ if "%utc_clock_failed%"=="1" (
     call :add_warning msg
 )
 if defined destination_filesystem if defined FILESYSTEM_WARNING_%destination_filesystem% call :warn_destination_filesystem
-if not defined source_filesystem if not "%source_volume_serial%"=="n/a" call :warn_unknown_filesystem source "%source_path:~0,2%"
-if not defined destination_filesystem if not "%destination_volume_serial%"=="n/a" call :warn_unknown_filesystem destination "%destination_volume_directory:~0,2%"
+rem A network drive's file system can't be read and its times are compared
+rem to 2 s (:check_metadata), so the warning's reason doesn't apply to it.
+if not defined source_filesystem if not "%source_volume_serial%"=="n/a" if not defined source_network_remote call :warn_unknown_filesystem source "%source_path:~0,2%"
+if not defined destination_filesystem if not "%destination_volume_serial%"=="n/a" if not defined destination_network_remote call :warn_unknown_filesystem destination "%destination_volume_directory:~0,2%"
 call :check_write_mode
 call :check_recovered_fragments
 call :find_drive_root_housekeeping source yes
@@ -4484,7 +4728,7 @@ if not defined host_name set "host_name=%COMPUTERNAME% (from environment variabl
 endlocal & set "%~1=%host_name%"
 exit /b 0
 
-:describe_volume  drive  outVar  filesystemOutVar  serialOutVar  labelAndFilesystemOutVar
+:describe_volume  drive  outVar  filesystemOutVar  serialOutVar  labelAndFilesystemOutVar  networkRemoteOutVar
 rem Describe the volume of a drive ("C:") for the log: VOL's label line and
 rem serial number (no admin needed), and the file system from
 rem FILESYSTEM_METHODS. A network path (drive "\\") gets "n/a". Sets
@@ -4492,7 +4736,13 @@ rem filesystemOutVar to the file system name, or clears it if unknown,
 rem serialOutVar to the volume serial ("n/a" for a network path, "unknown"
 rem if it can't be read), and labelAndFilesystemOutVar to the description
 rem without the serial (the history has the serial in a column of its own).
-setlocal
+rem A drive letter mapped to a share (2.9.0, round 15.8) is a network
+rem drive: its file system can't be read (fsutil is refused even elevated,
+rem chkntfs refuses network drives), so the methods aren't tried, the
+rem description reads "network drive", the log's names the share, and
+rem networkRemoteOutVar gets the share's path (\\server\share): empty for
+rem a local drive and for a UNC path, which is the share.
+setlocal DisableDelayedExpansion
 set "drive=%~1"
 if not "%drive:~1,1%"==":" (
     endlocal
@@ -4500,8 +4750,11 @@ if not "%drive:~1,1%"==":" (
     set "%~3="
     set "%~4=n/a"
     set "%~5=n/a (network path)"
+    set "%~6="
     exit /b 0
 )
+set "network_remote="
+call :read_drive_network_mapping %drive% network_remote
 set "volume_label_line="
 set "volume_serial=unknown"
 for /f "tokens=*" %%L in ('vol %drive% 2^>nul') do if not defined volume_label_line set "volume_label_line=%%L"
@@ -4509,10 +4762,13 @@ for /f "skip=1 tokens=*" %%L in ('vol %drive% 2^>nul') do for %%T in (%%L) do se
 if not defined volume_label_line set "volume_label_line=%drive% (label unknown)"
 if "%volume_label_line:~-1%"=="." set "volume_label_line=%volume_label_line:~0,-1%"
 set "filesystem_found="
-for %%M in (%FILESYSTEM_METHODS%) do if not defined filesystem_found call :filesystem_from_%%M %drive%
+if not defined network_remote for %%M in (%FILESYSTEM_METHODS%) do if not defined filesystem_found call :filesystem_from_%%M %drive%
 set "filesystem_text=%filesystem_found%"
 if not defined filesystem_found set "filesystem_text=file system unknown"
-endlocal & set "%~2=%volume_label_line%; serial %volume_serial%; %filesystem_text%" & set "%~3=%filesystem_found%" & set "%~4=%volume_serial%" & set "%~5=%volume_label_line%; %filesystem_text%"
+set "header_filesystem_text=%filesystem_text%"
+if defined network_remote set "filesystem_text=network drive"
+if defined network_remote set "header_filesystem_text=network drive mapped to %network_remote%"
+endlocal & set "%~2=%volume_label_line%; serial %volume_serial%; %header_filesystem_text%" & set "%~3=%filesystem_found%" & set "%~4=%volume_serial%" & set "%~5=%volume_label_line%; %filesystem_text%" & set "%~6=%network_remote%"
 exit /b 0
 
 :filesystem_from_fsutil  drive
@@ -4530,6 +4786,22 @@ if defined tool_chkntfs for /f "delims=" %%L in ('2^>nul "%tool_chkntfs%" %~1') 
     if not defined filesystem_found if /i "%%~T"=="%%F" set "filesystem_found=%%F"
     if not defined filesystem_found if /i "%%~T"=="%%F." set "filesystem_found=%%F"
 )
+exit /b 0
+
+:read_drive_network_mapping  drive  outVar
+rem Set outVar to the share a drive letter ("Z:") is mapped to, or clear
+rem it for a local or a subst drive (2.9.0). "net use Z:" prints the
+rem mapping's remote name on the one line holding "\\" (the line's label
+rem is localised, the path isn't), whether the server answers or not
+rem (round 15.8); for a drive that isn't a mapping it prints an error and
+rem no such line. The line is split at its backslashes: the first token is
+rem the label, the rest the path without its leading "\\", put back here.
+rem Delayed expansion off: "!" and "%" in a share name stay. No net.exe:
+rem no mapping is seen, and the drive is treated as a local one.
+setlocal DisableDelayedExpansion
+set "mapping_remote="
+if defined tool_net for /f "tokens=1,* delims=\" %%A in ('2^>nul ^<nul "%tool_net%" use %~1') do if not defined mapping_remote if not "%%B"=="" set "mapping_remote=\\%%B"
+endlocal & set "%~2=%mapping_remote%"
 exit /b 0
 
 :warn_unknown_filesystem  side  drive
@@ -5205,6 +5477,13 @@ if not defined fft_flag if "!source_path:~0,2!"=="\\" set "time_precision=to 2 s
 if not defined fft_flag if "!destination_path:~0,2!"=="\\" set "time_precision=to 2 s, as a network share is involved"
 if not defined fft_flag if "!source_path:~0,2!"=="\\" set "fft_flag=/fft"
 if not defined fft_flag if "!destination_path:~0,2!"=="\\" set "fft_flag=/fft"
+rem A drive letter mapped to a share is the same share (2.9.0; owner,
+rem 2026-10-27; round 15.8: the letter was compared exactly, its UNC path
+rem to 2 s).
+if not defined fft_flag if defined source_network_remote set "time_precision=to 2 s, as a network share is involved"
+if not defined fft_flag if defined destination_network_remote set "time_precision=to 2 s, as a network share is involved"
+if not defined fft_flag if defined source_network_remote set "fft_flag=/fft"
+if not defined fft_flag if defined destination_network_remote set "fft_flag=/fft"
 set "heading=Metadata: size and last-modified time, compared !time_precision!"
 call :write_section_heading heading both
 set "msg=running: robocopy list-only, source against destination" & call :dashboard_stage metadata msg
@@ -5342,6 +5621,10 @@ rem (HASH_PROGRESS_UNIT_DIGITS, HASH_WEIGHT_PER_FILE_UNITS) are added up
 rem here into listing_units_total, the bar's total.
 call :copy_variable %~1 hash_listing_path
 set "%~3=0"
+rem Files in a row that couldn't be read, and whether the directory being
+rem hashed has been found gone (:hash_listed_file; 2.9.0).
+set "unreadable_run_count=0"
+set "hash_listing_unreachable="
 rem The files listed and the units they weigh (sizes are digits: delayed
 rem expansion on is safe here).
 setlocal EnableDelayedExpansion
@@ -5470,8 +5753,17 @@ if defined dashboard_active (
     call :show msg
 )
 set "file_sha256="
-call :get_sha256 full_path file_sha256 listed_size
+rem Once the directory being hashed can't be reached (below), the files
+rem left are recorded UNREADABLE without being tried.
+if not defined hash_listing_unreachable call :get_sha256 full_path file_sha256 listed_size
 if not defined file_sha256 set "file_sha256=UNREADABLE"
+if "!file_sha256!"=="UNREADABLE" (set /a "unreadable_run_count+=1") else set "unreadable_run_count=0"
+rem HASH_UNREADABLE_RUN_BEFORE_PROBE files in a row unreadable: is the
+rem directory still there (a share or a device gone, round 15.8)? Files
+rem denied one by one pass this and go on as before.
+if not defined hash_listing_unreachable if !unreadable_run_count! geq %HASH_UNREADABLE_RUN_BEFORE_PROBE% (
+    call :is_directory !base_var! || call :report_hash_directory_unreachable %~2 !base_var!
+)
 >>"!temp_hash_rows_%~2!" echo("!file_relative_path!","!file_sha256!"
 if "%~2"=="destination" >>"!temp_compare_lines!" echo(!file_relative_path!*!file_sha256!*DST
 rem The file's units for the Hash bar (listed_size: the caller's, from the
@@ -5481,9 +5773,23 @@ set "file_units=!listed_size:~0,-%HASH_PROGRESS_UNIT_DIGITS%!"
 if not defined file_units set "file_units=0"
 set /a "dashboard_tick_content_units+=file_units"
 set /a "file_units+=HASH_WEIGHT_PER_FILE_UNITS"
-endlocal & set /a "hashed_count_%~2+=1, hashed_units_%~2+=%file_units%" & set "dashboard_tick_count=%dashboard_tick_count%" & set "dashboard_tick_content_units=%dashboard_tick_content_units%" & set "dashboard_last_redraw=%dashboard_last_redraw%" & set "listing_last_line_number=%listed_line_number%" & set "listing_refused_count=%listing_refused_count%" & exit /b 0
+endlocal & set /a "hashed_count_%~2+=1, hashed_units_%~2+=%file_units%" & set "dashboard_tick_count=%dashboard_tick_count%" & set "dashboard_tick_content_units=%dashboard_tick_content_units%" & set "dashboard_last_redraw=%dashboard_last_redraw%" & set "listing_last_line_number=%listed_line_number%" & set "listing_refused_count=%listing_refused_count%" & set "unreadable_run_count=%unreadable_run_count%" & set "hash_listing_unreachable=%hash_listing_unreachable%" & exit /b 0
 :hash_listed_file_skipped
 endlocal & set "listing_last_line_number=%listed_line_number%" & set "listing_refused_count=%listing_refused_count%" & exit /b 0
+
+:report_hash_directory_unreachable  side  dirVar
+rem Caller's scope (:hash_listed_file, delayed expansion on): the directory
+rem being hashed can't be found any more. One [FAIL] (a Failures line); the
+rem files not yet hashed are then recorded UNREADABLE without being tried
+rem (hash_listing_unreachable), and the Hash check fails on them as on any
+rem unreadable file. side: source, destination or custody.
+set "unreachable_what=%~1 directory"
+if "%~1"=="custody" set "unreachable_what=destination set directory"
+set "msg=[FAIL] The !unreachable_what! (!%~2!) can't be reached any more: !unreadable_run_count! files in a row couldn't be read, and the directory itself can't be found now (a network share or a device gone?). The files not yet hashed are recorded UNREADABLE without being read."
+call :show_and_log msg
+call :remember_problem msg
+set "hash_listing_unreachable=1"
+exit /b 0
 
 :write_hash_csv  side
 rem Write the side's CSV (in the staging directory; side: source, destination or
@@ -7836,18 +8142,49 @@ exit /b 0
 :paths_overlap
 rem Exit 0 if two directories are the same or one is inside the other
 rem (case-insensitive). IN overlap_first_with_backslash and
-rem overlap_second_with_backslash. A mapped drive and its UNC path are not
-rem recognised as the same place.
+rem overlap_second_with_backslash. A drive letter mapped to a share is
+rem compared as the share's path (2.9.0, round 15.8: Z:\Set and
+rem \\srv\ert\Set are one directory), and overlap_mapping_note then names
+rem the mapping for the refusal (cleared when there is none). Not resolved
+rem here: a share under two names, two shares on one directory, a subst
+rem drive, a junction. :probe_same_directory proves the case that matters
+rem most, the same directory, by any route.
+setlocal DisableDelayedExpansion
+set "overlap_mapping_note="
+set "overlap_first_resolved=%overlap_first_with_backslash%"
+set "overlap_second_resolved=%overlap_second_with_backslash%"
+call :resolve_mapped_drive_in_path overlap_first_resolved
+call :resolve_mapped_drive_in_path overlap_second_resolved
 setlocal EnableDelayedExpansion
-call :strlen overlap_first_with_backslash first_length
-call :strlen overlap_second_with_backslash second_length
+call :strlen overlap_first_resolved first_length
+call :strlen overlap_second_resolved second_length
 set "overlap_exit_code=1"
 if !first_length! leq !second_length! (
-    for %%N in (!first_length!) do if /i "!overlap_second_with_backslash:~0,%%N!"=="!overlap_first_with_backslash!" set "overlap_exit_code=0"
+    for %%N in (!first_length!) do if /i "!overlap_second_resolved:~0,%%N!"=="!overlap_first_resolved!" set "overlap_exit_code=0"
 ) else (
-    for %%N in (!second_length!) do if /i "!overlap_first_with_backslash:~0,%%N!"=="!overlap_second_with_backslash!" set "overlap_exit_code=0"
+    for %%N in (!second_length!) do if /i "!overlap_first_resolved:~0,%%N!"=="!overlap_second_resolved!" set "overlap_exit_code=0"
 )
-endlocal & exit /b %overlap_exit_code%
+endlocal & set "overlap_exit_code=%overlap_exit_code%"
+endlocal & set "overlap_mapping_note=%overlap_mapping_note%" & exit /b %overlap_exit_code%
+
+:resolve_mapped_drive_in_path  pathVar
+rem Caller's scope (:paths_overlap, delayed expansion off). When the path
+rem in pathVar starts with a drive letter mapped to a share, the letter is
+rem replaced by the share's path (Z:\Set\ -> \\srv\ert\Set\) and the
+rem mapping added to overlap_mapping_note ("Z: is mapped to \\srv\ert.",
+rem once per mapping); otherwise the path is left as it is. Working
+rem variables resolve_*.
+call :copy_variable %~1 resolve_path
+if not "%resolve_path:~1,1%"==":" exit /b 0
+set "resolve_remote="
+call :read_drive_network_mapping %resolve_path:~0,2% resolve_remote
+if not defined resolve_remote exit /b 0
+set "%~1=%resolve_remote%%resolve_path:~2%"
+set "resolve_note=%resolve_path:~0,2% is mapped to %resolve_remote%."
+if /i "%overlap_mapping_note%"=="%resolve_note%" exit /b 0
+if defined overlap_mapping_note set "resolve_note=%overlap_mapping_note% %resolve_note%"
+set "overlap_mapping_note=%resolve_note%"
+exit /b 0
 
 rem -- Time -------------------------------------------------------------------
 

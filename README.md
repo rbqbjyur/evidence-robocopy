@@ -45,7 +45,11 @@ the result block play at real speed.
   *custody files*: the script, the history and the records directory. Nothing
   is ever written into the evidence directory, and a copy never writes to
   the source (`/check` writes its record into the set it checks and
-  `/relocate` moves a set, each confirmed first). See [Set and evidence
+  `/relocate` moves a set, each confirmed first). A destination that is
+  the source's set directory under another path (a mapped drive letter
+  and its share, a share under two names, a subst drive) is refused: a
+  probe file created in the destination set directory is looked for
+  through the source's path. See [Set and evidence
   directories](#set-and-evidence-directories).
 - **SHA-256 verification against a reference record.** A first copy hashes
   the source and records it; that record is the reference for this and every
@@ -63,11 +67,14 @@ the result block play at real speed.
   Windows cache. Elevated, backup mode (`/b`) leaves the evidence and
   custody files it copies in that cache, and hashing may read them from
   there; the run's own record is read back from the drive either way.
-  The log's Writes field says which.
+  The log's Writes field says which. On a share, a Windows file server
+  kept nothing of a `/j` copy in its own cache (one server tested); other
+  servers and NAS devices aren't known.
 - **Metadata check.** After the copy, robocopy compares every source file
   with its copy in list-only mode: any file whose size or last-modified
   time differs, or that wasn't copied, fails the run. Times are compared
-  exactly, or to 2 s where FAT or exFAT or a network share is involved.
+  exactly, or to 2 s where FAT or exFAT or a network share (a UNC path,
+  or a drive letter mapped to one) is involved.
 - **A sealed record of every copy, and a history.** Each run writes its
   log, hash CSVs and history into a run record of its own, sealed with
   their SHA-256s. On every copy, every earlier run record is checked against
@@ -341,8 +348,8 @@ like) never count as content.
 | D3 | Empty, or holds only a directory with the evidence directory's name | The destination |
 | D4 | Anything else | A directory in it named after the set (made if it isn't there) |
 
-   A directory inside a set that doesn't have its evidence directory's name is
-   refused.
+   A directory inside a set, at any depth and by whatever path it is
+   reached, is refused unless it is the set's evidence directory (D2).
 
 2. State, the same whichever rule applied: a set directory holding the custody
    files is the same set (a rerun or an update; its evidence directory must
@@ -353,6 +360,18 @@ like) never count as content.
 A set directory made by D4 takes the source set directory's name; a first copy has
 none, so it takes the evidence directory's name (a drive root's volume label,
 or `Volume_<serial>` if it has none).
+
+The source and the destination set directory must not be the same directory
+or inside each other. Their paths are compared with a drive letter mapped to
+a share read as the share's path (the refusal names the mapping); then, once
+the destination is settled and a rerun confirmed, a zero-byte probe file is
+created in the destination set directory and looked for through the source's
+path, so one directory under two paths of any kind (a share under two names,
+a subst drive, a junction) is refused. When they are one directory, that file
+has been in the source's set directory for the moment it took; it is created
+in the destination set directory only, which the ancestor check above has
+already found to be inside no set. The log header names a mapped drive's
+share, and the history's volume cell reads "network drive".
 
 ```
 C:\Evidence\CASE18601\                      case directory (D4)
@@ -600,7 +619,9 @@ robocopy's own ETA lines with the plain output.
   times. Robocopy copies them; only each file's main data stream is hashed,
   and only size and last-modified time are compared.
 - Hash files that only backup mode can read. Robocopy copies them, but
-  they are reported as unreadable (FAIL).
+  they are reported as unreadable (FAIL). Over a share, backup mode
+  reaches such files only when the account holds the backup privilege on
+  the server.
 - Hash a file whose full path, on the source or on the destination, is
   longer than 4,000 characters: robocopy copies it, but cmd can't carry
   such a path, so the run fails and names the file by the first 200
@@ -610,8 +631,20 @@ robocopy's own ETA lines with the plain output.
   are written unbuffered, but only ejecting or dismounting the drive
   flushes the rest. Elevated, Windows' file cache holds the copied files
   too (backup mode), so hashing may not reach the drive at all.
-- Recognise a mapped drive and its UNC path as the same place (in the
-  check that source and destination don't overlap).
+- Prove that a destination is outside *raw* evidence (a directory with
+  no custody files above it) under another path for it. A destination
+  inside a set is refused at any depth and by any path; for raw evidence
+  a destination below a directory named like the evidence directory is
+  refused (which also refuses a lab directory that merely shares the
+  name: give another location); a share rooted inside the evidence
+  directory, whose path never shows that name, isn't recognised.
+- Start without a prompt from a share named by its IP address: Windows
+  shows its security warning ("a location outside your local network")
+  first; by the server's name it starts at once.
+- Prove itself on a NAS: tested against Windows servers (SMB2) only. A
+  Samba or other NAS share may show names Windows can't represent under
+  mangled names, which are what gets copied and hashed, and may keep
+  coarser times (compared to 2 s on any share).
 - Copy files named like DOS devices (`nul`, `aux` and the like) to a network
   (UNC) destination: Windows refuses to create them there, so the copy
   fails and reports them missing. They copy and verify on local drives.

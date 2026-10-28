@@ -5,7 +5,70 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.9.0 - 2026-10-28
+
+### Added
+- A destination that is the source's set directory under another path is
+  refused before anything is written. The overlap check reads a drive
+  letter mapped to a share as the share's path (the refusal names the
+  mapping), and once the destination is settled and a rerun confirmed a
+  zero-byte probe file is created in the destination set directory and
+  looked for through the source's path, which catches one directory
+  under two paths of any kind. Until now a set reached by a mapped drive
+  letter and by its UNC path (either way round, or the share root), or
+  by a `subst` drive and the real path, was "copied" onto itself: nothing
+  was copied, every check passed, and a sealed run record and a PASS
+  history row claiming a copy from the one path to the other were
+  written into the set. `/nonforensic` refuses the same case.
+- A drive letter mapped to a share is treated as the network share it
+  is: times are compared to 2 s, as for a UNC path (they were compared
+  exactly); the log header names the share ("network drive mapped to
+  \\server\share") and the history's volume cell reads "network
+  drive" where it read "file system unknown"; the warning that the
+  volume's file system couldn't be read isn't raised for it.
+- When the directory being hashed can't be reached any more (a share or
+  a device gone), after 5 files in a row couldn't be read the hash pass
+  checks that the directory is still there and, if it isn't, records
+  the files left `UNREADABLE` without trying each (a failed read, a 2 s
+  wait and a retry per file before). The run fails as before.
+
+### Fixed
+- A destination inside a set deeper than one level (for example an empty
+  directory inside the evidence directory), reached by a path the script
+  couldn't match with the source's (the share under another server name,
+  a drive letter mapped to it, a `subst` drive), was taken as a new set
+  and the source's evidence directory copied into itself, over and over,
+  until the copy failed or was stopped (every 2.x release; the v2.8.2
+  release notes state it). Only the parent of the directory given was
+  looked at; now every directory above it is, and one holding custody
+  files makes it a directory inside a set, which is refused by whatever
+  path it is reached. A `/relocate` target inside a set is refused the
+  same way. For raw evidence (no custody files above the source) a
+  destination below a directory named like the evidence directory is
+  refused instead, with the reason.
+
+### Changed
+- A destination that was there at the prompt and can't be reached when
+  the run starts aborts with "The destination (...) can't be reached any
+  more ..." instead of "Could not create the destination set directory."
+- The help describes the self-copy refusal and the mapped-drive rules;
+  the README states them, and that backup mode over a share depends on
+  the account's rights on the server, that Windows asks before a script
+  opened from a share named by its IP address runs, and that a NAS is
+  untested. The help and README say that a Windows file server kept
+  nothing of a `/j` copy in its own cache (one server tested).
+
 ## 2.8.2 - 2026-10-27
+
+### Known issue (every 2.x release; found 2026-10-28)
+- A destination inside the source set, given by a path the script doesn't
+  recognise as the source's (the share under another server name, a drive
+  letter mapped to the share, a `subst` drive), is taken as a new set and
+  the source's evidence directory is copied into itself, over and over,
+  until the copy fails or is stopped. The files already in it aren't
+  changed, but the evidence directory gains the copies. Until the next
+  release fixes it, give a destination outside the source set, whatever
+  path you reach it by.
 
 ### Fixed
 - A run could pass with a run record whose history left out the runs
