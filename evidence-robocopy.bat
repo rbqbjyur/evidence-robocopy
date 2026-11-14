@@ -64,7 +64,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.9.0"
+set "TOOL_VERSION=2.9.1"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -1363,17 +1363,24 @@ set "argument_mode_count=0"
 if "%~1"=="" goto parse_args_done
 set /a "argument_count+=1"
 if /i "%~1"=="/nonforensic" (set "run_mode=nonforensic" & set /a "argument_mode_count+=1" & goto parse_args_shift)
-if /i "%~1"=="/update" (set "update_requested=1" & goto parse_args_shift)
+if /i "%~1"=="/update" (set "parse_args_flag_var=update_requested" & set "parse_args_flag_name=/update" & goto parse_args_flag)
 if /i "%~1"=="/check" (set "run_kind=check" & set /a "argument_mode_count+=1" & goto parse_args_shift)
 if /i "%~1"=="/relocate" (set "run_kind=relocate" & set /a "argument_mode_count+=1" & goto parse_args_shift)
-if /i "%~1"=="/yes-to-all" (set "argument_yes_to_all=1" & goto parse_args_shift)
-if /i "%~1"=="/nopause" (set "argument_nopause=1" & goto parse_args_shift)
-if /i "%~1"=="/no-update-check" (set "argument_no_update_check=1" & goto parse_args_shift)
+if /i "%~1"=="/yes-to-all" (set "parse_args_flag_var=argument_yes_to_all" & set "parse_args_flag_name=/yes-to-all" & goto parse_args_flag)
+if /i "%~1"=="/nopause" (set "parse_args_flag_var=argument_nopause" & set "parse_args_flag_name=/nopause" & goto parse_args_flag)
+if /i "%~1"=="/no-update-check" (set "parse_args_flag_var=argument_no_update_check" & set "parse_args_flag_name=/no-update-check" & goto parse_args_flag)
 if /i "%~1"=="/redraw" goto parse_args_redraw
 if /i "%~1"=="/source" goto parse_args_source
 if /i "%~1"=="/destination" goto parse_args_destination
 set "abort_reason=Unknown option: %~1. Run with /? for the options."
 goto :abort
+:parse_args_flag
+rem A flag (an option without a value): parse_args_flag_var names the
+rem variable it sets, parse_args_flag_name the option as the help writes
+rem it. Given twice, it stops the run, as the options with a value do.
+if defined %parse_args_flag_var% (set "abort_reason=%parse_args_flag_name% was given twice." & goto :abort)
+set "%parse_args_flag_var%=1"
+goto parse_args_shift
 :parse_args_source
 if defined argument_source (set "abort_reason=/source was given twice." & goto :abort)
 if "%~2"=="" (set "abort_reason=/source needs a path after it (quoted)." & goto :abort)
@@ -2582,32 +2589,45 @@ rem gives 0; a relocation target's parent is checked): one holding custody
 rem files (:holds_custody_files) makes the directory a directory inside a
 rem set, which is refused, whatever path names it (nothing is written into
 rem another set). The walk reads only (IF EXIST per ancestor), at most
-rem PATH_MAX_DEPTH levels (:inspect_next_ancestor). Sets identify_problem,
-rem opening with whatText, and exits 1 on a refusal. Working variables
-rem inside_set_*.
+rem PATH_MAX_DEPTH levels (:inspect_next_ancestor). Only a walk that
+rem reaches the root finds nothing (2.9.1): one stopped by the bound, or
+rem by a parent that can't be worked out, refuses too, saying which.
+rem Sets identify_problem, opening with whatText, and exits 1 on a
+rem refusal. Working variables inside_set_*.
 call :copy_variable %~1 inside_set_ancestor_path
 if not defined inside_set_ancestor_path exit /b 0
 set "inside_set_found="
 set "inside_set_walk_done="
+set "inside_set_walk_unresolved="
 if "%~2"=="1" (
     set "inside_set_ancestor_with_backslash=%inside_set_ancestor_path%\"
     call :holds_custody_files inside_set_ancestor_with_backslash && set "inside_set_found=%inside_set_ancestor_path%"
 )
 if defined inside_set_found set "inside_set_walk_done=1"
 for /l %%I in (1,1,%PATH_MAX_DEPTH%) do if not defined inside_set_walk_done call :inspect_next_ancestor
+if not defined inside_set_walk_done goto refuse_directory_inside_set_too_deep
+if defined inside_set_walk_unresolved goto refuse_directory_inside_set_unresolved
 if not defined inside_set_found exit /b 0
 set "identify_problem=%~3 is inside a set (%inside_set_found%): nothing is written into another set, at any depth and by whatever path it is reached. Give a location outside it."
+exit /b 1
+:refuse_directory_inside_set_too_deep
+set "identify_problem=%~3 couldn't be checked for a set above it: it lies too deep for the check, which walks up at most %PATH_MAX_DEPTH% directories. Give a location nearer the root."
+exit /b 1
+:refuse_directory_inside_set_unresolved
+set "identify_problem=%~3 couldn't be checked for a set above it: the directory above %inside_set_ancestor_path% couldn't be worked out. Give another location."
 exit /b 1
 
 :inspect_next_ancestor
 rem Caller's scope (:refuse_directory_inside_set): one level up from
-rem inside_set_ancestor_path. At the root (the parent is the path itself),
-rem or where no parent can be worked out, the walk is done. An ancestor
-rem holding custody files sets inside_set_found to it and ends the walk.
+rem inside_set_ancestor_path. At the root (the parent is the path itself)
+rem the walk is done; where no parent can be worked out it is done and
+rem inside_set_walk_unresolved set (a refusal, 2.9.1). An ancestor holding
+rem custody files sets inside_set_found to it and ends the walk.
 rem Straight lines: a percent value read inside a block would be the one
 rem from before :normalise_path ran (round 15.9, PROBE-STALE).
 set "normalise_path_input=%inside_set_ancestor_path%\.."
-call :normalise_path || set "inside_set_walk_done=1"
+call :normalise_path || set "inside_set_walk_unresolved=1"
+if defined inside_set_walk_unresolved set "inside_set_walk_done=1"
 if defined inside_set_walk_done exit /b 0
 if /i "%normalise_path_result%"=="%inside_set_ancestor_path%" set "inside_set_walk_done=1"
 if defined inside_set_walk_done exit /b 0
@@ -2640,28 +2660,41 @@ rem directory (its parent and up) refuses the destination; one that only
 rem shares the name is refused too, the reason given. The set directory
 rem itself isn't compared: D4 names a first copy's set directory after the
 rem evidence directory. String work only, no file system access, at most
-rem PATH_MAX_DEPTH levels (:inspect_next_name_ancestor). Sets
-rem identify_problem and exits 1 on a refusal. Working variables
+rem PATH_MAX_DEPTH levels (:inspect_next_name_ancestor). Only a walk that
+rem reaches the root finds nothing (2.9.1): one stopped by the bound, or
+rem by a parent that can't be worked out, refuses too, saying which.
+rem Sets identify_problem and exits 1 on a refusal. Working variables
 rem below_name_*.
 if defined source_set_path exit /b 0
 if not "%run_kind%"=="copy" exit /b 0
 set "below_name_found="
 set "below_name_walk_done="
+set "below_name_walk_unresolved="
 set "below_name_path=%destination_candidate_path%"
 for /l %%I in (1,1,%PATH_MAX_DEPTH%) do if not defined below_name_walk_done call :inspect_next_name_ancestor
+if not defined below_name_walk_done goto refuse_destination_below_evidence_name_too_deep
+if defined below_name_walk_unresolved goto refuse_destination_below_evidence_name_unresolved
 if not defined below_name_found exit /b 0
 set "identify_problem=%destination_layout_rule_id%: the destination set directory (%destination_candidate_path%) is below a directory named like the source's evidence directory (%below_name_found%): it may be inside the source under another path, and nothing is written into evidence. Give a location outside it."
+exit /b 1
+:refuse_destination_below_evidence_name_too_deep
+set "identify_problem=%destination_layout_rule_id%: the destination set directory (%destination_candidate_path%) couldn't be compared with the directories above it: it lies too deep for the check, which walks up at most %PATH_MAX_DEPTH% directories. Give a location nearer the root."
+exit /b 1
+:refuse_destination_below_evidence_name_unresolved
+set "identify_problem=%destination_layout_rule_id%: the destination set directory (%destination_candidate_path%) couldn't be compared with the directories above it: the directory above %below_name_path% couldn't be worked out. Give another location."
 exit /b 1
 
 :inspect_next_name_ancestor
 rem Caller's scope (:refuse_destination_below_evidence_name): one level up
 rem from below_name_path, compared by name with the evidence directory (as
 rem Windows compares names, case aside). At the root (the parent is the
-rem path itself), or where no parent can be worked out, the walk is done.
+rem path itself) the walk is done; where no parent can be worked out it is
+rem done and below_name_walk_unresolved set (a refusal, 2.9.1).
 rem Straight lines: a percent value read inside a block would be the one
 rem from before :normalise_path ran (round 15.9, PROBE-STALE).
 set "normalise_path_input=%below_name_path%\.."
-call :normalise_path || set "below_name_walk_done=1"
+call :normalise_path || set "below_name_walk_unresolved=1"
+if defined below_name_walk_unresolved set "below_name_walk_done=1"
 if defined below_name_walk_done exit /b 0
 if /i "%normalise_path_result%"=="%below_name_path%" set "below_name_walk_done=1"
 if defined below_name_walk_done exit /b 0
@@ -3759,13 +3792,15 @@ exit /b 0
 
 :precheck_partial_directory
 rem Caller's scope (:precheck_partial_directories): one directory, in
-rem record_directory_name.
+rem record_directory_name. The name is record content, so it is written
+rem with :append_line_to_file, never expanded on a command line (2.9.1:
+rem an "&" in it ran a command).
 call :is_partial_run_directory record_directory_name || exit /b 0
 "%tool_findstr%" /x /l /c:"%record_directory_name%" "%temp_partial_warned%" >nul 2>&1 && exit /b 0
 set "msg=Run records: %record_directory_name% is an interrupted write-back (a run record never completed); it is outside the history."
 call :add_warning msg
 set "run_records_warned=1"
->>"%temp_partial_warned%" echo(%record_directory_name%
+call :append_line_to_file record_directory_name temp_partial_warned
 exit /b 0
 
 :is_partial_run_directory  nameVar
@@ -5795,11 +5830,16 @@ exit /b 0
 rem Write the side's CSV (in the staging directory; side: source, destination or
 rem custody): header plus rows sorted by
 rem relative path, so it doesn't depend on the order in which a file system
-rem lists files. The rows are counted before and after the sort: sort
-rem writes nothing at all when a record passes its limit (4,096 characters
-rem by default; round 12.6: both hash records empty, the run failing
-rem "Nothing was verified"), and a record short of its rows must fail by
-rem name (exit 1).
+rem lists files. The rows are counted at each stage, and a record short of
+rem its rows fails by name (exit 1). First the rows written against the
+rem files hashed (hashed_count_<side>, 2.9.1, the holistic review of
+rem 2.9.0): :hash_listed_file appends each row unchecked, and a row lost
+rem there left its file out of the record while the run passed (on a
+rem copy-on the compare line still paired it with the reference). Then
+rem the rows sorted against the rows written: sort writes nothing at all
+rem when a record passes its limit (4,096 characters by default; round
+rem 12.6: both hash records empty, the run failing "Nothing was
+rem verified").
 setlocal EnableDelayedExpansion
 >"!staged_hash_csv_%~1!" echo "File","SHA-256"
 set "rows_to_sort=0"
@@ -5810,6 +5850,13 @@ if exist "!temp_hash_rows_%~1!" (
     for /f "usebackq" %%N in ("!temp_count!") do set "rows_to_sort=%%N"
     "%tool_find%" /c /v "" <"!staged_hash_csv_%~1!" >"!temp_count!" 2>nul
     for /f "usebackq" %%N in ("!temp_count!") do set /a "rows_sorted=%%N - 1"
+)
+set "files_hashed=!hashed_count_%~1!"
+if !rows_to_sort! neq !files_hashed! (
+    set "msg=[FAIL] The %~1 hash record holds !rows_to_sort! rows for the !files_hashed! files hashed: a row was lost, so the record can't be relied on."
+    call :show_and_log msg
+    call :remember_problem msg
+    endlocal & exit /b 1
 )
 if !rows_sorted! equ !rows_to_sort! (endlocal & exit /b 0)
 set "msg=[FAIL] The %~1 hash record holds !rows_sorted! of its !rows_to_sort! rows: sorting them failed, so the record can't be relied on."
@@ -5923,14 +5970,18 @@ rem as compare lines "relative path*SHA-256*REF" (from the reference record)
 rem and "...*DST" (from the destination); * can't occur in Windows names.
 rem Sorted ordinally (sort /L C), each path's two lines are adjacent, so one
 rem pass pairs them up. In /nonforensic the reference is this run's hashes of
-rem the source, which are in no record: the messages say "the source".
+rem the source, which are in no record: the messages say "the source". The
+rem reference is read from its copy in TEMP (:copy_for_reading, 2.9.1): one
+rem that can't be read is a [FAIL] by name and the check INCOMPLETE, never
+rem a record listing no files.
 set "compare_reference_label=reference record"
 if "%run_mode%"=="nonforensic" set "compare_reference_label=source"
 set "heading=Hash (SHA-256): destination vs reference record %reference_name%"
 if "%run_mode%"=="nonforensic" set "heading=Hash (SHA-256): destination vs source"
 call :write_section_heading heading both
 call :compare_identical_records && exit /b 0
-for /f "usebackq skip=1 delims=" %%L in ("%reference_csv_path%") do (
+call :copy_for_reading reference_csv_path temp_custody_copy || goto compare_with_reference_unreadable
+for /f "usebackq skip=1 delims=" %%L in ("%temp_custody_copy%") do (
     set "reference_row=%%L"
     call :add_reference_row reference_row
 )
@@ -5956,6 +6007,13 @@ for /f "usebackq eol=* delims=" %%L in ("%temp_compare_lines_sorted%") do (
     call :pair_compare_line compare_line
 )
 call :settle_last_compare_line
+exit /b 0
+:compare_with_reference_unreadable
+set "msg=[FAIL] The reference record %reference_name% couldn't be read: the destination was not compared with it."
+if "%run_mode%"=="nonforensic" set "msg=[FAIL] This run's hashes of the source couldn't be read back: the destination was not compared with them."
+call :show_and_log msg
+call :remember_problem msg
+set "hash_check_incomplete=1"
 exit /b 0
 
 :compare_identical_records
@@ -6428,7 +6486,8 @@ call :is_directory row_run_dir || (
     exit /b 0
 )
 if not "%history_check_mode%"=="quiet" call :check_run_record row_run row_run_dir
-call :collect_outside_history row_run_dir row_run
+set "finding=Run records: run %row_run%'s list of the run records outside the history (%RECORD_FILE_PREFIX%%row_run%_runs_outside_history.csv) couldn't be read."
+call :collect_outside_history row_run_dir row_run || call :history_problem finding
 set "row_seal_path=%row_run_dir%\%RECORD_FILE_PREFIX%%row_run%.sha256"
 set "row_seal_sha256="
 if exist "%row_seal_path%" call :get_sha256 row_seal_path row_seal_sha256
@@ -6531,11 +6590,15 @@ exit /b 0
 :collect_outside_history  runDirVar  runVar
 rem If this run record holds a history restart's list of run records outside
 rem the history (<stem>_runs_outside_history.csv), add its rows to
-rem temp_outside_history as "run*seal SHA-256*listing run" lines.
+rem temp_outside_history as "run*seal SHA-256*listing run" lines. The list
+rem is read from its copy in TEMP (:copy_for_reading, 2.9.1): exit 1 when
+rem it is there but can't be read, for the caller to report; never an
+rem empty list.
 setlocal EnableDelayedExpansion
 set "list_file=!%~1!\!RECORD_FILE_PREFIX!!%~2!_runs_outside_history.csv"
 if not exist "!list_file!" (endlocal & exit /b 0)
-for /f "usebackq skip=1 delims=" %%L in ("!list_file!") do (
+call :copy_for_reading list_file temp_custody_copy || (endlocal & exit /b 1)
+for /f "usebackq skip=1 delims=" %%L in ("!temp_custody_copy!") do (
     set "line=%%L"
     set "line=!line:","=*!"
     set "line=!line:"=!"
@@ -7311,7 +7374,10 @@ rem (staged), then show the seal's own SHA-256 for the user's
 rem chain-of-custody notes. With that value recorded elsewhere, any later
 rem change to the record can be detected. A script copy isn't listed: the
 rem sealed log records the script's SHA-256, which the copy was checked
-rem against. Sets run_seal_sha256, and seal_incomplete=1 if any record file
+rem against. The files are RECORD_FILES' rows, in the table's order, each
+rem sealed when it is in staging (2.9.1: the table, not a list of its own
+rem beside it, so a new row is checked and sealed alike). Sets
+rem run_seal_sha256, and seal_incomplete=1 if any record file
 rem or the seal itself couldn't be hashed, or (2.8.0, :check_record_files)
 rem a file the run must have written is missing or empty, or staging holds
 rem a file no row of RECORD_FILES names, or (2.8.2, :write_history) the
@@ -7331,7 +7397,7 @@ if defined history_staging_problem call :report_history_not_copied
 setlocal EnableDelayedExpansion
 set "sealed_count=0"
 set "seal_expected_count=0"
-for %%F in (log_staged_path staged_hash_csv_source staged_hash_csv_destination staged_hash_csv_custody staged_history_path staged_outside_history_path staged_relocation_path) do (
+for %%R in (%RECORD_FILES%) do for %%F in (!RECORD_FILE_%%R_VAR!) do (
     if defined %%F if exist "!%%F!" (
         set /a "seal_expected_count+=1"
         set "record_path=!%%F!"

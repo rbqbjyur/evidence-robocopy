@@ -5,7 +5,52 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.9.1 - 2026-11-14
+
+### Known issues (found 2026-11-14; 2.9.0 and earlier the same)
+- Any directory in a records directory whose name ends in `.partial` is
+  taken as an interrupted write-back: a warning, outside the history.
+  One the script didn't write (`notes.partial`) gets the same warning,
+  and a file inside it is named in no finding, so the run can pass. The
+  script only writes `<run UTC>.partial`: any other name in that warning
+  is a directory it didn't write.
+- A run record file that can't be read fails the seal check as "has
+  changed since it was sealed".
+
+### Fixed
+- A hash row lost before its hash record was written went unnoticed:
+  rows were added unchecked, and the record was counted only against
+  the rows added. The destination was still compared with the reference
+  record file by file, so a run could pass with its sealed destination
+  hash record a file short. Each hash record's rows are now counted
+  against the files hashed; a record short of them fails the run,
+  naming the record.
+- A leftover `<run>.partial` directory whose name holds `&` ran the rest
+  of its name as a command when its warning was noted. The name is now
+  written as text.
+- A destination or relocation target too deep for the checks to walk up
+  to its drive or share root (they walk up at most 256 directories), or
+  one with a directory above it that couldn't be worked out, was taken
+  as having no set above it (and, for a raw source, no directory named
+  like its evidence directory). It is now refused, with the reason.
+- A reference record that couldn't be read failed the Hash check as
+  "nothing was verified: the reference record lists no files"; it now
+  fails naming the record as unreadable. A history restart's list of the
+  run records outside the history that couldn't be read failed each run
+  record it lists as "not in the history"; the list itself is now named.
+- `/update`, `/yes-to-all`, `/nopause` and `/no-update-check` given twice
+  were accepted; they are now refused, as the other options are.
+
+### Changed
+- The seal's list of record files is taken from the table the record's
+  files are checked against, not from a list of its own. The seal's
+  lines are unchanged.
+
 ## 2.9.0 - 2026-10-28
+
+Known issue (fixed in 2.9.1): a hash row lost before the destination
+hash record was written went unnoticed, so a run could pass with that
+record a file short.
 
 ### Added
 - A destination that is the source's set directory under another path is

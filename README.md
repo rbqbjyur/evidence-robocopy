@@ -350,6 +350,8 @@ like) never count as content.
 
    A directory inside a set, at any depth and by whatever path it is
    reached, is refused unless it is the set's evidence directory (D2).
+   One too deep for the check to walk up to its drive or share root (it
+   walks up at most 256 directories) is refused too.
 
 2. State, the same whichever rule applied: a set directory holding the custody
    files is the same set (a rerun or an update; its evidence directory must
