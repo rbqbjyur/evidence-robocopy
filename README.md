@@ -643,6 +643,12 @@ robocopy's own ETA lines with the plain output.
   refused (which also refuses a lab directory that merely shares the
   name: give another location); a share rooted inside the evidence
   directory, whose path never shows that name, isn't recognised.
+- Remove its probe file from a destination set directory it can't list.
+  Elevated, an empty drive or share root that denies the account listing
+  reads as empty, so the probe file is created there but can't be found:
+  the destination is refused and the file
+  (`evidence-robocopy_same-directory-probe_<n>.tmp`) named, for removal
+  by hand.
 - Start without a prompt from a share named by its IP address: Windows
   shows its security warning ("a location outside your local network")
   first; by the server's name it starts at once.

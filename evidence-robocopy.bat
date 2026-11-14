@@ -64,7 +64,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.9.2"
+set "TOOL_VERSION=2.9.3"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -2472,8 +2472,17 @@ rem directory (2.9.0; owner, 2026-10-27; round 15.8: a set reached by two
 rem routes was "copied" onto itself and a run record claiming the copy
 rem written into it). A file that can't be created, or can't be removed, is
 rem named (probe_problem), exit 2; the set rules refuse a set holding one
-rem until it is removed. Both directories exist. Delayed expansion off:
-rem "!" and "%" in paths stay.
+rem until it is removed. IF EXIST finds a file through FindFirstFile, which
+rem a directory that denies listing refuses even for a file just made in
+rem it, and DEL finds it the same way (round 15.13: an elevated run's empty
+rem share root denying listing passed :confirm_directory_readable's root
+rem branch, and the file was left there, reported as never created). So a
+rem file made but not found is followed by :confirm_directory_readable on
+rem its directory, which holds the file by then, so the root branch can't
+rem read it as empty: a directory that can't be listed is named with the
+rem file, which may still be there, to remove by hand (no removal is
+rem tried: DEL finds it as IF EXIST does). Both directories exist.
+rem Delayed expansion off: "!" and "%" in paths stay.
 setlocal DisableDelayedExpansion
 set "probe_problem="
 set "probe_result=1"
@@ -2487,18 +2496,25 @@ if exist "%probe_write_path%" (
     set "probe_result=2"
     goto probe_same_directory_done
 )
-(type nul >"%probe_write_path%") 2>nul
-if not exist "%probe_write_path%" (
+(type nul >"%probe_write_path%") 2>nul || (
     set "probe_problem=the probe file %probe_write_path% couldn't be created (the directory can't be written to, or can't be reached)"
     set "probe_result=2"
     goto probe_same_directory_done
 )
+if not exist "%probe_write_path%" goto probe_same_directory_not_found
 if exist "%probe_look_path%" set "probe_result=0"
 del "%probe_write_path%" >nul 2>&1
 if exist "%probe_write_path%" (
     set "probe_problem=the probe file %probe_write_path% couldn't be removed: remove it by hand"
     set "probe_result=2"
 )
+goto probe_same_directory_done
+:probe_same_directory_not_found
+rem Created, yet not found: the directory decides which (see above).
+set "probe_result=2"
+set "probe_problem=the probe file %probe_write_path% was created but can't be found: its directory couldn't be listed (access denied, or the device isn't readable), so the file may still be there: remove it by hand"
+call :confirm_directory_readable probe_write_directory || goto probe_same_directory_done
+set "probe_problem=the probe file %probe_write_path% was created, but then couldn't be found"
 :probe_same_directory_done
 endlocal & set "probe_problem=%probe_problem%" & exit /b %probe_result%
 

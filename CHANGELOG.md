@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.9.3 - 2026-11-14
+
+### Fixed
+- In a destination set directory that can't be listed (an elevated run's
+  empty drive or share root that denies the account listing), the
+  same-directory probe's file was created and left there, but the
+  destination was refused as "the probe file ... couldn't be created".
+  The refusal now says the directory couldn't be listed and names the
+  file to remove by hand.
+
 ## 2.9.2 - 2026-11-14
 
 ### Known issue (found 2026-11-14; 2.9.0 and 2.9.1 the same by the code)
