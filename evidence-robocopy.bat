@@ -64,7 +64,7 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.9.1"
+set "TOOL_VERSION=2.9.2"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -1140,6 +1140,7 @@ exit /b 0
 :init_state
 rem Counters and flags used across the run, all given a starting value here.
 rem   copy_exit_codes            robocopy exit codes of all passes, OR-ed
+rem   copy_custody_exit_codes    those of the custody pass alone, OR-ed
 rem   copy_files_<column>        robocopy's Files row over the evidence
 rem                              passes (copied, skipped, failed, mismatch,
 rem                              extras: :add_pass_summary_counts),
@@ -1157,6 +1158,8 @@ rem   unexpected_listing_lines   listing lines that weren't a path in the
 rem                              directory
 rem   hash_check_incomplete      1 if a listing, certutil or the reference
 rem                              record was unavailable
+rem   reference_unreadable       1 if the reference record (/nonforensic:
+rem                              this run's source hashes) couldn't be read
 rem   path_too_long_<side>_count  listed files of the source / destination
 rem                              not hashed: their path is over
 rem                              MAX_FILE_PATH_LENGTH, or cmd couldn't carry
@@ -1197,11 +1200,11 @@ rem   robocopy_output_lines_written, _total  the lines the last
 rem                              :save_robocopy_unicode_output wrote, of
 rem                              those robocopy's output held
 rem   header_written             defined once the log header is complete
-for %%V in (copy_exit_codes hashed_count_source hashed_count_destination hashed_count_custody unexpected_listing_lines hash_check_incomplete) do set "%%V=0"
+for %%V in (copy_exit_codes copy_custody_exit_codes hashed_count_source hashed_count_destination hashed_count_custody unexpected_listing_lines hash_check_incomplete) do set "%%V=0"
 for %%V in (copy_files_copied copy_files_skipped copy_files_failed copy_files_mismatch copy_files_extras copy_files_total copy_passes_counted copy_counts_missing) do set "%%V=0"
 for %%V in (hashed_units_source hashed_units_destination hashed_units_custody listing_units_total) do set "%%V=0"
 for %%V in (metadata_differ_count metadata_check_incomplete reference_row_count match_count differ_count missing_count) do set "%%V=0"
-for %%V in (unreadable_count invalid_row_count added_file_count reference_seal_failed utc_clock_failed) do set "%%V=0"
+for %%V in (unreadable_count invalid_row_count added_file_count reference_seal_failed reference_unreadable utc_clock_failed) do set "%%V=0"
 for %%V in (run_record_count run_record_file_match_count run_record_problem_count history_row_count) do set "%%V=0"
 for %%V in (path_too_long_source_count path_too_long_destination_count copy_log_incomplete robocopy_output_lines_written robocopy_output_lines_total) do set "%%V=0"
 set "run_records_checked="
@@ -3344,6 +3347,9 @@ if exist "%resolve_beside_path%" call :history_matches_records resolve_beside_pa
     exit /b 0
 )
 set "%~1_history_problem=the history beside the evidence (%HISTORY_FILE_NAME%) doesn't match the sealed run records"
+rem One that couldn't be read is named as such (2.9.2, round 14.9;
+rem section 5.13: never "doesn't match").
+if exist "%resolve_beside_path%" call :copy_for_reading resolve_beside_path temp_custody_copy || set "%~1_history_problem=the history beside the evidence (%HISTORY_FILE_NAME%) couldn't be read (access denied, empty, or the device isn't readable)"
 if not exist "%resolve_beside_path%" set "%~1_history_problem=there is no history beside the evidence (%HISTORY_FILE_NAME%), though there are run records"
 call :find_newest_sealed_history %~1 && goto resolve_set_history_sealed
 if not exist "%resolve_beside_path%" (
@@ -3439,8 +3445,8 @@ call :copy_variable %~1_history_problem set_aside_problem
 call :copy_variable %~1_history_sealed_run set_aside_run
 set "set_aside_text="
 if "%set_aside_origin%"=="sealed" set "set_aside_text=Run records: in the %~1 set, %set_aside_problem%. This run continues from the newest sealed history instead (run %set_aside_run%), which matches the run records, and writes the destination a complete history built from it."
-if "%set_aside_origin%"=="unverified" set "set_aside_text=Run records: in the %~1 set, %set_aside_problem%, and no sealed history does either: this run continues from it as found."
-if "%~1"=="source" if defined source_history_superseded set "set_aside_text=Run records: in the source set, %set_aside_problem%, and no sealed history there does either. This rerun continues from the destination set's history instead, which matches its run records."
+if "%set_aside_origin%"=="unverified" set "set_aside_text=Run records: in the %~1 set, %set_aside_problem%, and the newest sealed history isn't usable either (missing, unreadable, or it doesn't match them): this run continues from it as found."
+if "%~1"=="source" if defined source_history_superseded set "set_aside_text=Run records: in the source set, %set_aside_problem%, and the newest sealed history there isn't usable either (missing, unreadable, or it doesn't match them). This rerun continues from the destination set's history instead, which matches its run records."
 if defined %~1_records_unreadable set "set_aside_text=Run records: in the %~1 set, the records directory (%RECORDS_DIR_NAME%) couldn't be listed (access denied, or the device isn't readable): its run records can't be checked, and no history can be matched to them."
 if not defined set_aside_text exit /b 0
 if "%~2"=="before" (
@@ -3804,12 +3810,19 @@ call :append_line_to_file record_directory_name temp_partial_warned
 exit /b 0
 
 :is_partial_run_directory  nameVar
-rem Exit 0 if the directory name ends in PARTIAL_RUN_SUFFIX.
+rem Exit 0 if the directory name is a run's UTC time followed by
+rem PARTIAL_RUN_SUFFIX (<run UTC>.partial), as the build names a run
+rem record it is still writing. Any other name ending in the suffix is
+rem not one (2.9.2, round 15.12: "notes.partial" was taken for one, and a
+rem file planted in it was named in no finding).
 setlocal EnableDelayedExpansion
 set "name=!%~1!"
 call :strlen PARTIAL_RUN_SUFFIX suffix_length
-for %%N in (!suffix_length!) do if /i "!name:~-%%N!"=="!PARTIAL_RUN_SUFFIX!" (endlocal & exit /b 0)
-endlocal & exit /b 1
+set "partial_run_name="
+for %%N in (!suffix_length!) do if /i "!name:~-%%N!"=="!PARTIAL_RUN_SUFFIX!" set "partial_run_name=!name:~0,-%%N!"
+if not defined partial_run_name (endlocal & exit /b 1)
+call :is_run_directory_name partial_run_name || (endlocal & exit /b 1)
+endlocal & exit /b 0
 
 :log_pre_copy_findings
 rem After the header: the script check's result, and its failure if any.
@@ -5247,7 +5260,7 @@ if not defined custody_found (
     set "msg=No run records or script copies in the source set."
     call :show_and_log msg
 )
-endlocal & set "copy_log_incomplete=%copy_log_incomplete%" & set /a "copy_exit_codes|=%custody_exit_codes%" & exit /b 0
+endlocal & set "copy_log_incomplete=%copy_log_incomplete%" & set /a "copy_exit_codes|=%custody_exit_codes%, copy_custody_exit_codes|=%custody_exit_codes%" & exit /b 0
 
 :ignored_names_as_robocopy_arguments  outVar
 rem IGNORED_CUSTODY_FILES as robocopy /xf arguments: each item quoted.
@@ -6014,6 +6027,7 @@ if "%run_mode%"=="nonforensic" set "msg=[FAIL] This run's hashes of the source c
 call :show_and_log msg
 call :remember_problem msg
 set "hash_check_incomplete=1"
+set "reference_unreadable=1"
 exit /b 0
 
 :compare_identical_records
@@ -6495,6 +6509,7 @@ rem No seal at all is a failure of the run record's own check; when only
 rem choosing a history (quiet), it means this history can't be shown to match.
 if not exist "%row_seal_path%" if "%history_check_mode%"=="quiet" set "history_check_problem=1"
 set "finding=Run records: run %row_run%'s seal doesn't have the SHA-256 the history records for it."
+if exist "%row_seal_path%" if not defined row_seal_sha256 set "finding=Run records: run %row_run%'s seal couldn't be read (access denied, or the device isn't readable), so it can't be compared with the SHA-256 the history records for it."
 if exist "%row_seal_path%" if /i not "%row_seal_sha256%"=="%row_seal%" call :history_problem finding
 set "row_sealed_history=%row_run_dir%\%RECORD_FILE_PREFIX%%row_run%_history.csv"
 rem A missing sealed history is a file missing from a sealed run record,
@@ -6525,12 +6540,22 @@ rem record a history restart listed as outside the history it restarted (a
 rem warning, if it still matches the seal SHA-256 listed for it). With no
 rem history (this run restarts it), each run record found is checked against
 rem its own seal and, after the copy, listed (:list_run_outside_history).
+rem A directory whose name isn't a run's UTC time is no run record: a
+rem problem before and after the copy, never checked or listed as one; in
+rem quiet mode left out, as it says nothing of whether the history and
+rem the run records agree (2.9.2; owner, 2026-11-14).
 call :is_partial_run_directory record_directory_name && goto check_record_directory_listed_partial
+call :is_run_directory_name record_directory_name || goto check_record_directory_listed_not_run
 "%tool_findstr%" /x /l /c:"%record_directory_name%" "%temp_history_runs%" >nul 2>&1 && exit /b 0
 set "record_directory_dir=%history_check_records_root%\%record_directory_name%"
 if not defined history_check_history goto check_record_directory_listed_restart
 call :find_outside_history && goto check_record_directory_listed_outside
 set "finding=Run records: %record_directory_name% in the records directory is not in the history."
+call :history_problem finding
+exit /b 0
+:check_record_directory_listed_not_run
+if "%history_check_mode%"=="quiet" exit /b 0
+set "finding=Run records: %record_directory_name% in the records directory isn't a run record (its name isn't a run's UTC time), so nothing in the history accounts for it."
 call :history_problem finding
 exit /b 0
 :check_record_directory_listed_restart
@@ -6555,6 +6580,18 @@ call :check_run_record record_directory_name record_directory_dir
 set "record_directory_seal=%record_directory_dir%\%RECORD_FILE_PREFIX%%record_directory_name%.sha256"
 set "record_directory_seal_sha256="
 if exist "%record_directory_seal%" call :get_sha256 record_directory_seal record_directory_seal_sha256
+rem A seal there that can't be hashed, or one the restart couldn't hash
+rem ("unknown", 2.9.2), can't be compared: a problem, named as such.
+if exist "%record_directory_seal%" if not defined record_directory_seal_sha256 (
+    set "finding=Run records: %record_directory_name%, listed by run %outside_listed_by% as outside the history it restarted, has a seal that couldn't be read (access denied, or the device isn't readable), so it can't be compared with the SHA-256 listed for it."
+    call :history_problem finding
+    exit /b 0
+)
+if /i "%outside_seal_sha256%"=="unknown" (
+    set "finding=Run records: %record_directory_name%, listed by run %outside_listed_by% as outside the history it restarted, had a seal that run couldn't read, so it can't be shown unchanged since."
+    call :history_problem finding
+    exit /b 0
+)
 rem Listed with no seal ("none") and still without one: unchanged since the
 rem restart; the missing seal itself is a failure of :check_run_record.
 if "%outside_seal_sha256%"=="none" if not defined record_directory_seal_sha256 (
@@ -6578,10 +6615,13 @@ rem Caller's scope (:check_record_directory_listed, history restart): add the
 rem run record in record_directory_name, with its seal's SHA-256, to this
 rem run's sealed list of run records outside the restarted history
 rem (<stem>_runs_outside_history.csv), so later copies can tell them apart
-rem from run records added since.
+rem from run records added since. The seal cell is "none" when there is
+rem no seal, and "unknown" when there is one that couldn't be hashed
+rem (2.9.2; it was "none", which says there was no seal).
 set "record_directory_seal=%record_directory_dir%\%RECORD_FILE_PREFIX%%record_directory_name%.sha256"
 set "record_directory_seal_sha256="
 if exist "%record_directory_seal%" call :get_sha256 record_directory_seal record_directory_seal_sha256
+if not defined record_directory_seal_sha256 if exist "%record_directory_seal%" set "record_directory_seal_sha256=unknown"
 if not defined record_directory_seal_sha256 set "record_directory_seal_sha256=none"
 if not exist "%staged_outside_history_path%" >"%staged_outside_history_path%" echo "Run record","Seal SHA-256"
 >>"%staged_outside_history_path%" echo "%record_directory_name%","%record_directory_seal_sha256%"
@@ -6766,6 +6806,11 @@ if not exist "!sealed_path!" (
     set "finding=Run record !%~1!: !sealed_name! is listed in its seal but missing."
     goto check_sealed_file_failed
 )
+rem A file that couldn't be hashed is unknown, not changed (2.9.2).
+if not defined current_sha256 (
+    set "finding=Run record !%~1!: !sealed_name! couldn't be read (access denied, or the device isn't readable), so it can't be shown unchanged since it was sealed."
+    goto check_sealed_file_failed
+)
 if /i not "!current_sha256!"=="!%~4!" (
     set "finding=Run record !%~1!: !sealed_name! has changed since it was sealed."
     goto check_sealed_file_failed
@@ -6936,6 +6981,11 @@ call :is_robocopy_exit_code_in_range copy_exit_codes || set "copy_status=FAIL"
 if %copy_log_incomplete% neq 0 set "copy_status=FAIL"
 set "result_copy=%copy_status%: robocopy exit codes combined: %copy_exit_codes%"
 call :describe_copy_counts copy_counts_text
+rem The counts are the evidence passes'; a failed custody pass leads, so
+rem "none failed" can't be read as the whole copy (2.9.2, round 14.8).
+set /a "copy_custody_failed_bits=copy_custody_exit_codes & ROBOCOPY_FAIL_MASK"
+call :is_robocopy_exit_code_in_range copy_custody_exit_codes || set "copy_custody_failed_bits=1"
+if defined copy_counts_text if %copy_custody_failed_bits% neq 0 set "copy_counts_text=the custody records' pass failed (robocopy exit code %copy_custody_exit_codes%); evidence: %copy_counts_text%"
 if defined copy_counts_text set "result_copy=%copy_status%: %copy_counts_text% (robocopy exit codes combined: %copy_exit_codes%)"
 if %copy_log_incomplete% neq 0 set "result_copy=%result_copy%, but its output in the log is incomplete"
 if "%copy_status%"=="FAIL" set "result_copy=%result_copy% (see Copy above, and Failures)"
@@ -7087,6 +7137,11 @@ if %path_too_long_count% gtr 0 set "result_hash=%hash_status%: not hashed, path 
 rem A reference whose run record fails its checks can't be relied on, even
 rem if every file matches it: say so first, so the status can't be misread.
 if %reference_seal_failed% neq 0 set "result_hash=%hash_status%: the reference record's run record failed its checks, so the reference can't be relied on; %match_count% of %reference_row_count% %reference_label% match it"
+rem A reference that couldn't be read compared nothing: that is the reason,
+rem so it leads (2.9.2, round 15.12: "0 of 0 files" read as a record
+rem listing nothing).
+if %reference_unreadable% neq 0 set "result_hash=%hash_status%: the reference record couldn't be read, so the destination wasn't compared with it"
+if "%run_mode%"=="nonforensic" if %reference_unreadable% neq 0 set "result_hash=%hash_status%: this run's hashes of the source couldn't be read back, so the destination wasn't compared with them"
 rem Nothing to verify: that is the reason, so it leads (the counts are 0).
 if "%run_mode%"=="forensic" if %hash_check_incomplete% equ 0 if %reference_row_count% equ 0 set "result_hash=%hash_status%: nothing was verified: the reference record lists no files"
 if "%run_mode%"=="nonforensic" if %hash_check_incomplete% equ 0 if %reference_row_count% equ 0 set "result_hash=%hash_status%: nothing was verified: the source holds no files"
@@ -7228,7 +7283,11 @@ call :version_is_newer destination_copy_version chosen_copy_version && (
     set "result_script_copy=not placed: the copy already beside the evidence is newer (version %destination_copy_version%), so it is left as it is"
     exit /b 0
 )
-call :files_have_same_sha256 chosen_copy_path destination_copy_path && (
+set "chosen_copy_sha256="
+set "destination_copy_sha256="
+call :get_sha256 chosen_copy_path chosen_copy_sha256
+call :get_sha256 destination_copy_path destination_copy_sha256
+if defined chosen_copy_sha256 if /i "%chosen_copy_sha256%"=="%destination_copy_sha256%" (
     set "script_copy_route=none"
     set "result_script_copy=not needed: the destination set directory already holds this file as %script_file_name% (same SHA-256)"
     exit /b 0
@@ -7236,7 +7295,10 @@ call :files_have_same_sha256 chosen_copy_path destination_copy_path && (
 if "%script_copy_route%"=="this_script" set "script_copy_replaces=1"
 set "destination_copy_version_text=version unknown"
 if defined destination_copy_version set "destination_copy_version_text=version %destination_copy_version%"
-set "result_script_copy=%result_script_copy%, replacing the copy there (%destination_copy_version_text%, a different SHA-256)"
+set "destination_copy_difference=a different SHA-256"
+if not defined destination_copy_sha256 set "destination_copy_difference=its SHA-256 couldn't be read"
+if not defined chosen_copy_sha256 set "destination_copy_difference=not compared: the SHA-256 of the copy to place couldn't be read"
+set "result_script_copy=%result_script_copy%, replacing the copy there (%destination_copy_version_text%, %destination_copy_difference%)"
 exit /b 0
 
 :stage_script_copy
@@ -7270,17 +7332,6 @@ call :parse_version %~2 baseline_version || exit /b 1
 call :compare_versions baseline_version candidate_version candidate_version_order
 if "%candidate_version_order%"=="older" exit /b 0
 exit /b 1
-
-:files_have_same_sha256  firstPathVar  secondPathVar
-rem Exit 0 if both files can be hashed and have the same SHA-256.
-setlocal
-set "first_sha256="
-set "second_sha256="
-call :get_sha256 %~1 first_sha256
-call :get_sha256 %~2 second_sha256
-if not defined first_sha256 (endlocal & exit /b 1)
-if /i "%first_sha256%"=="%second_sha256%" (endlocal & exit /b 0)
-endlocal & exit /b 1
 
 :read_script_version  fileVar  outVar
 rem The version a copy of this script declares: its TOOL_VERSION line (2.x),
@@ -7529,7 +7580,9 @@ set "records_robocopy_exit_codes=0"
 set "run_record_in_place="
 set "publish_listing_failed="
 call :publish_staged_directory records
-if %records_matching% equ %record_count% if %record_count% gtr 0 ren "%destination_partial_run_dir%" "%run_utc_stamp%" >nul 2>&1 && set "run_record_in_place=1"
+set "run_record_rename_attempted="
+if %records_matching% equ %record_count% if %record_count% gtr 0 set "run_record_rename_attempted=1"
+if defined run_record_rename_attempted ren "%destination_partial_run_dir%" "%run_utc_stamp%" >nul 2>&1 && set "run_record_in_place=1"
 if %record_count% gtr 0 if not defined run_record_in_place call :report_run_record_not_completed
 call :publish_staged_directory root
 if defined run_record_in_place if defined run_seal_sha256 call :publish_root_history new
@@ -7551,13 +7604,29 @@ rd "%staged_root_dir%" >nul 2>&1
 rd "%staging_dir%" >nul 2>&1
 endlocal & set "result_record_written=%record_written_text%" & set "log_published=%log_was_published%" & exit /b 0
 :publish_records_failed
+rem What failed, as the step that failed: files not intact, the staged
+rem files not all listed, or (every file intact) the rename from
+rem .partial, or no run record file to write, so no rename was tried
+rem (2.9.2, round 14.9: "Only 6 of 6 ... intact").
 set "msg=[WARN] Only %records_matching% of %record_count% custody files reached the destination intact (robocopy exit codes combined: %records_robocopy_exit_codes%). All of them are kept here:"
+set "record_written_text=FAIL: only %records_matching% of %record_count% custody files reached the destination intact; all are kept in TEMP (see Record written above)"
+if %records_matching% equ %record_count% if defined run_record_rename_attempted (
+    set "msg=[WARN] All %record_count% custody files written reached the destination intact, but the run record couldn't be renamed from %run_utc_stamp%%PARTIAL_RUN_SUFFIX% (see above). All of them are kept here:"
+    set "record_written_text=FAIL: the run record couldn't be renamed from %run_utc_stamp%%PARTIAL_RUN_SUFFIX%; all custody files are kept in TEMP (see Record written above)"
+)
+if %records_matching% equ %record_count% if not defined run_record_rename_attempted (
+    set "msg=[WARN] The custody files written reached the destination intact, but no file of this run's record was found in TEMP to write. All of them are kept here:"
+    set "record_written_text=FAIL: no file of this run's record was found in TEMP to write; all custody files are kept in TEMP (see Record written above)"
+)
+if defined publish_listing_failed (
+    set "msg=[WARN] The staged files couldn't all be listed (see above), so whether every custody file reached the destination can't be told. All of them are kept here:"
+    set "record_written_text=FAIL: the staged files couldn't all be listed, so whether every custody file was written can't be told; all are kept in TEMP (see Record written above)"
+)
 call :show_write_back_problem msg
 set "msg=       %staging_dir%"
 call :show msg
 set "msg=[FAIL] This run's record wasn't completed in the destination. The log and summary were sealed before the write-back; because the record is missing, the exit code is FAIL (%EXIT_CODE_FAIL%)."
 call :show_write_back_problem msg
-set "record_written_text=FAIL: only %records_matching% of %record_count% custody files reached the destination intact; all are kept in TEMP (see Record written above)"
 endlocal & set "exit_code=%EXIT_CODE_FAIL%" & set "result_record_written=%record_written_text%" & set "record_kept_in_staging=1" & exit /b 1
 
 :report_run_record_not_completed
@@ -7709,7 +7778,9 @@ exit /b 0
 
 :check_record_in_destination  nameVar  stagedDirVar  destinationPrefixVar
 rem One staged file: add 1 to records_matching if the destination holds it
-rem with the same SHA-256, else say so.
+rem with the same SHA-256, else say which it is: not there, there but not
+rem readable, the staged file not readable, or different (2.9.2: one
+rem message said "not there, or it differs" for all four).
 setlocal EnableDelayedExpansion
 set "staged_path=!%~2!\!%~1!"
 set "destination_copy_path=!%~3!!%~1!"
@@ -7718,7 +7789,10 @@ set "destination_sha256="
 call :get_sha256 staged_path staged_sha256
 if exist "!destination_copy_path!" call :get_sha256 destination_copy_path destination_sha256
 if defined staged_sha256 if /i "!staged_sha256!"=="!destination_sha256!" (endlocal & set /a "records_matching+=1" & exit /b 0)
-set "msg=[WARN] Not in the destination, or it differs from the staged record: !%~1!"
+set "msg=[WARN] In the destination, but it differs from the staged record: !%~1!"
+if not defined destination_sha256 set "msg=[WARN] In the destination, but it couldn't be read back (access denied, or the device isn't readable): !%~1!"
+if not exist "!destination_copy_path!" set "msg=[WARN] Not in the destination: !%~1!"
+if not defined staged_sha256 set "msg=[WARN] The staged record couldn't be read (access denied, or the device isn't readable), so its copy in the destination can't be compared with it: !%~1!"
 call :is_directory destination_set_with_backslash || set "msg=[WARN] Couldn't be read back (the destination set directory can't be reached): !%~1!"
 call :show_write_back_problem msg
 endlocal & exit /b 0
@@ -8375,13 +8449,20 @@ endlocal & set "%~3=%y%%mo%%d%%h%%mi%%s%"
 exit /b 0
 
 :is_timestamp_digits  valueVar
-rem Exit 0 if the variable holds exactly 14 decimal digits.
+rem Exit 0 if the variable holds exactly 14 decimal digits. The digits are
+rem removed by substitution and nothing may be left: a FOR /F test skipped
+rem a value starting with its end-of-line character ";", which then passed
+rem (2.9.2, the conformance review: ";xxxxxxxTxxxxxxZ" as a run name).
 setlocal EnableDelayedExpansion
 set "value=!%~1!"
 if not defined value (endlocal & exit /b 1)
 if not "!value:~14!"=="" (endlocal & exit /b 1)
 if "!value:~13,1!"=="" (endlocal & exit /b 1)
-for /f "delims=0123456789" %%X in ("!value!") do (endlocal & exit /b 1)
+rem The leading "x" keeps the variable defined once every digit is gone:
+rem substitution on an undefined variable isn't reliably empty.
+set "non_digits=x!value!"
+for %%D in (0 1 2 3 4 5 6 7 8 9) do set "non_digits=!non_digits:%%D=!"
+if not "!non_digits!"=="x" (endlocal & exit /b 1)
 endlocal & exit /b 0
 
 rem -- General ----------------------------------------------------------------
@@ -8852,9 +8933,13 @@ rem    DIR enumerated it (an empty directory counts: its "." and ".."
 rem    entries are found, though /b doesn't print them), so the listing
 rem    the caller makes next is what DIR could read. Exit code 1 means
 rem    DIR found no entry at all: the directory is missing, denies
-rem    listing, or is a drive root with nothing in it (roots have no "."
-rem    entry). DIR never takes backup semantics, elevated or not.
-rem 2. Then a list-only robocopy of the directory (DIRECTORY_PROBE_FLAGS:
+rem    listing, or is a drive or share root with nothing in it (roots
+rem    have no "." entry). DIR never takes backup semantics, elevated or
+rem    not. Anywhere but a root, exit code 1 is exit 1 here: an elevated
+rem    robocopy reads a directory that denies listing, so an empty one
+rem    read "nothing there" (2.9.2, round 14.8: a D4 directory denied
+rem    listing was copied into instead of refused).
+rem 2. At a root, a list-only robocopy of the directory (DIRECTORY_PROBE_FLAGS:
 rem    the directory and one level below, no file or directory lines,
 rem    the job summary kept), without /b. A missing directory, a device
 rem    that is gone, or a directory denied to a run that isn't elevated
@@ -8866,9 +8951,9 @@ rem    itself, /b or not, while DIR never does; round 14.7, where the
 rem    probe was robocopy alone and passed on every denied directory
 rem    elevated), so exit 1: the caller reports a directory that can be
 rem    copied but not checked. A summary that can't be read is exit 1.
-rem Stage 2 runs only where DIR found nothing, so a run pays a robocopy
-rem start (about 50 ms) for an empty drive root or a denied directory,
-rem not per listing. The path goes to robocopy from this cmd, so "%" and
+rem Stage 2 runs only where DIR found nothing at a root, so a run pays a
+rem robocopy start (about 50 ms) for an empty or denied root, not per
+rem listing. The path goes to robocopy from this cmd, so "%" and
 rem "!" in it stay (section 6 of the conventions); the trailing space
 rem inside the quotes keeps a drive root's "\" from escaping them; the
 rem destination named never exists (robocopy /l creates nothing). Output
@@ -8879,6 +8964,7 @@ rem failed redirection's exit code 1 can't pass as robocopy's.
 setlocal EnableDelayedExpansion
 set "probe_directory=!%~1!"
 dir /a /b "!probe_directory!" >nul 2>nul && (endlocal & exit /b 0)
+call :is_volume_root probe_directory || (endlocal & exit /b 1)
 set "probe_passed="
 (type nul >"!temp_directory_probe!") 2>nul || (endlocal & exit /b 1)
 "%tool_robocopy%" "!probe_directory! " "!temp_directory_probe!_nonexistent" *.* !DIRECTORY_PROBE_FLAGS! >"!temp_directory_probe!" 2>&1
@@ -8909,6 +8995,23 @@ set "temp_directory_probe_tail=%temp_directory_probe%.tail"
 set "temp_update_check=%temp_dir%\%TOOL_NAME%_update_check_%RANDOM%.tmp"
 set "temp_update_check_done=%temp_update_check%.done"
 exit /b 0
+
+:is_volume_root  pathVar
+rem Exit 0 if the path, with or without its trailing backslash, is a drive
+rem root ("X:") or a share's root ("\\server\share"): the directories
+rem that have no "." entry, so DIR finds no entry in them when they are
+rem empty (:confirm_directory_readable).
+setlocal EnableDelayedExpansion
+set "value=!%~1!"
+if "!value:~-1!"=="\" set "value=!value:~0,-1!"
+if "!value:~1!"==":" (endlocal & exit /b 0)
+if not "!value:~0,2!"=="\\" (endlocal & exit /b 1)
+set "share_part=!value:~2!"
+if "!share_part!"=="!share_part:\=!" (endlocal & exit /b 1)
+set "share_part=!share_part:*\=!"
+if not defined share_part (endlocal & exit /b 1)
+if not "!share_part!"=="!share_part:\=!" (endlocal & exit /b 1)
+endlocal & exit /b 0
 
 :is_drive_root  pathVar
 rem Exit 0 if the path (in its with-backslash form) is a drive root: "X:\".

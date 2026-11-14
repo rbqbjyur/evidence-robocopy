@@ -5,9 +5,66 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.9.2 - 2026-11-14
+
+### Known issue (found 2026-11-14; 2.9.0 and 2.9.1 the same by the code)
+- In an elevated copy run whose destination set directory is an empty
+  drive or share root that denies listing, the zero-byte probe file the
+  run creates there can be neither seen nor removed: the run is refused,
+  saying the probe file couldn't be created, and the file
+  (`evidence-robocopy_same-directory-probe_<n>.tmp`) stays until removed
+  by hand. In 2.9.0 and 2.9.1 any empty directory that denies listing
+  does the same.
+
+### Fixed
+- Any directory in a records directory whose name ends in `.partial` was
+  taken as an interrupted write-back: a warning, outside the history,
+  so a file inside one the script didn't write (`notes.partial`) was
+  named in no finding and the run could pass. Only `<run UTC>.partial`
+  is one now. Any other directory there whose name isn't a run's UTC
+  time fails the Run records check; a history restart no longer lists
+  one as a run record outside the history, after which later copies only
+  warned about it. The check of a run's UTC time also let through a
+  name starting with `;`, in the history's run cells too.
+- A directory in a records directory that isn't a run record set the
+  history beside the evidence aside, as one that doesn't match the
+  sealed run records; on a rerun the destination set's history could
+  then be continued without checking that the two sets are one line of
+  copies. It no longer decides which history is continued; the Run
+  records check still fails on it.
+- A restart's list of the run records outside the history recorded a
+  seal that couldn't be hashed as `none` (no seal). It records `unknown`
+  now, and later copies fail on it, saying so.
+- A run record file that couldn't be read failed the seal check as "has
+  changed since it was sealed". It is reported as couldn't be read, as
+  are a run record's seal that couldn't be read where the history or a
+  restart's list gives its SHA-256, a custody file that couldn't be read
+  back after the write-back, and a script copy in the destination whose
+  SHA-256 couldn't be read.
+- The Hash row for a reference record that couldn't be read said "0 of
+  0 files in the reference record match the destination". It says the
+  reference record couldn't be read (in `/nonforensic`, this run's
+  hashes of the source).
+- A history beside the evidence that couldn't be read, or was empty, was
+  set aside as one that doesn't match the sealed run records. It is set
+  aside as one that couldn't be read.
+- A write-back that failed only when the run record was renamed from
+  `<run UTC>.partial` said "Only 6 of 6 custody files reached the
+  destination intact". It says every file arrived intact and the rename
+  failed; one whose staged files couldn't all be listed, or that found
+  no file of the run record to write, says that.
+- The Copy row of a run whose custody records' pass failed gave the
+  evidence passes' counts alone ("47 files copied, none failed"). It
+  leads with the custody pass's failure.
+- In an elevated run, an empty directory that denies listing was read as
+  empty (robocopy reads it, DIR doesn't), so a destination that should
+  have been refused was copied into and the run failed at the
+  write-back. Anywhere but a drive or share root, a directory DIR can't
+  list is now one that couldn't be listed, elevated or not.
+
 ## 2.9.1 - 2026-11-14
 
-### Known issues (found 2026-11-14; 2.9.0 and earlier the same)
+### Known issues (found 2026-11-14; 2.9.0 and earlier the same; fixed in 2.9.2)
 - Any directory in a records directory whose name ends in `.partial` is
   taken as an interrupted write-back: a warning, outside the history.
   One the script didn't write (`notes.partial`) gets the same warning,

@@ -415,7 +415,9 @@ with every file named `evidence-robocopy_<run UTC>…`:
   history), same columns.
 - `…_history.csv`: the history as this run left it (below).
 - `…_runs_outside_history.csv` (only when this run restarted the history):
-  the run records it found outside the history, with their seals' SHA-256.
+  the run records it found outside the history, with their seals' SHA-256
+  (`none` for a record with no seal, `unknown` for one that couldn't be
+  hashed).
 - `…_relocation.txt` (only when the run was a `/relocate`): what was
   moved, from where to where, when, by whom and on what.
 - `evidence-robocopy_<UTC>.sha256`, the seal: one `<SHA-256> *<file name>`
@@ -481,7 +483,8 @@ row leaves a consistent but shorter chain: only the seal SHA-256 recorded
 in the custody notes shows it. A run record
 left as `<UTC>.partial` (an interrupted write-back: each run record is
 written under that name, read back by SHA-256 and only then renamed) is a
-warning and outside the history.
+warning and outside the history; any other directory there whose name
+isn't a run's UTC time fails the Run records check.
 
 A rerun into the same destination is a full run (robocopy copies what
 differs; every file is verified) and gets its own row, e.g. run 3 FAIL,
