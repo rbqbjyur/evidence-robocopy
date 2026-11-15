@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 2.9.4 - Unreleased
+## 2.9.4 - 2026-11-15
 
 The project is now called menard. The script keeps its name,
 `evidence-robocopy.bat`, and the repository its own; records, file names,
@@ -24,8 +24,8 @@ and the log's Script field still read `evidence-robocopy <version>`.
 - The banner's first line reads `Script: menard (evidence-robocopy)`
   (before, `Script: evidence-robocopy`), and the help's first line
   `menard <version> (evidence-robocopy): evidence copy and verification`.
-- The live display's title starts with the name and version: `menard 2.9.4
-  - Progress (...)` (before, `Progress (...)`).
+- The live display's title starts with the name and version:
+  `menard 2.9.4 - Progress (...)` (before, `Progress (...)`).
 - The README is titled menard, with the banner's art under the title.
 
 ## 2.9.3 - 2026-11-14
