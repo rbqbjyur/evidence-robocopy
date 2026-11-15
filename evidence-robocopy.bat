@@ -684,6 +684,9 @@ rem                                  room (shared, one above the other; each,
 rem                                  side by side)
 rem   DASHBOARD_LIST_ROWS_MAX        the most rows the lists take (and the
 rem                                  most lines of each list kept for them)
+rem   DASHBOARD_BANNER_LIST_ROWS_MIN the fewest rows the lists keep when the
+rem                                  banner's art takes the rows they don't
+rem                                  fill (2.9.4; :dashboard_draw_screen)
 rem   DASHBOARD_LISTS_SIDE_BY_SIDE_MIN_COLUMNS  from this width the Failures
 rem                                  list is on the left and the Warnings
 rem                                  list on the right, each the full
@@ -739,6 +742,7 @@ set "DASHBOARD_ESTIMATE_AFTER_PERMILLE=10"
 set "DASHBOARD_BLOCK_FIXED_LINES=14"
 set "DASHBOARD_LIST_ROWS_MIN=6"
 set "DASHBOARD_LIST_ROWS_MAX=20"
+set "DASHBOARD_BANNER_LIST_ROWS_MIN=3"
 set "DASHBOARD_LISTS_SIDE_BY_SIDE_MIN_COLUMNS=160"
 set /a "DASHBOARD_MIN_WINDOW_ROWS=DASHBOARD_BLOCK_FIXED_LINES + 2 + DASHBOARD_LIST_ROWS_MIN + 2"
 set /a "DASHBOARD_MIN_WINDOW_COLUMNS=OUTPUT_WIDTH + 1"
@@ -9175,9 +9179,13 @@ set "dashboard_environment_lines=0"
 set "dashboard_header_sections_lines=0"
 set "dashboard_stop_state_text="
 set "dashboard_stop_record_text="
-set "dashboard_title_text=Progress (the header and the summary are in the log)"
+rem The title names the project and version first (2.9.4; owner,
+rem 2026-11-15): seen at every size the display is drawn at (from
+rem DASHBOARD_MIN_WINDOW_COLUMNS x _ROWS), where the art needs rows to
+rem spare.
+set "dashboard_title_text=%BRAND_NAME% %TOOL_VERSION% - Progress (the header and the summary are in the log)"
 set "dashboard_lists_rest_text=all in the log"
-if "%run_mode%"=="nonforensic" set "dashboard_title_text=Progress (console only; no log and no records: /nonforensic)"
+if "%run_mode%"=="nonforensic" set "dashboard_title_text=%BRAND_NAME% %TOOL_VERSION% - Progress (console only; no log and no records: /nonforensic)"
 if "%run_mode%"=="nonforensic" set "dashboard_lists_rest_text=all in the summary that follows"
 rem The banner's art (:show_banner): the art at the top of this file,
 rem with this version; dashboard_banner_rows is its height in the
@@ -9581,6 +9589,26 @@ if defined dashboard_small_text (
     echo(!dashboard_small_text!
     goto dashboard_draw_screen_end
 )
+rem The banner's art (2.9.4; owner, 2026-11-15) in the rows the lists
+rem don't fill now: they keep the rows their lines need (side by side the
+rem longer list's, one above the other both; at most the rows they have),
+rem at least DASHBOARD_BANNER_LIST_ROWS_MIN, and the art takes the rest
+rem with the rows spare beyond them (dashboard_rows_spare) when that makes
+rem its dashboard_banner_rows; it goes again once the lists need the rows.
+rem Decided here, where the counts have just been read; dashboard_list_rows
+rem changes for this frame alone (this scope).
+set "dashboard_show_banner="
+set /a "dashboard_banner_failures=dashboard_list_FC, dashboard_banner_warnings=dashboard_list_WC"
+if !dashboard_banner_failures! gtr %DASHBOARD_LIST_ROWS_MAX% set "dashboard_banner_failures=%DASHBOARD_LIST_ROWS_MAX%"
+if !dashboard_banner_warnings! gtr %DASHBOARD_LIST_ROWS_MAX% set "dashboard_banner_warnings=%DASHBOARD_LIST_ROWS_MAX%"
+set /a "dashboard_banner_list_need=dashboard_banner_failures + dashboard_banner_warnings"
+if defined dashboard_lists_side_by_side set /a "dashboard_banner_list_need=dashboard_banner_failures"
+if defined dashboard_lists_side_by_side if !dashboard_banner_warnings! gtr !dashboard_banner_failures! set /a "dashboard_banner_list_need=dashboard_banner_warnings"
+if !dashboard_banner_list_need! lss %DASHBOARD_BANNER_LIST_ROWS_MIN% set "dashboard_banner_list_need=%DASHBOARD_BANNER_LIST_ROWS_MIN%"
+if !dashboard_banner_list_need! gtr !dashboard_list_rows! set "dashboard_banner_list_need=!dashboard_list_rows!"
+set /a "dashboard_banner_room=dashboard_rows_spare + dashboard_list_rows - dashboard_banner_list_need"
+if defined dashboard_banner_possible if !dashboard_banner_room! geq !dashboard_banner_rows! set "dashboard_show_banner=1"
+if defined dashboard_show_banner if !dashboard_rows_spare! lss !dashboard_banner_rows! set /a "dashboard_list_rows-=dashboard_banner_rows - dashboard_rows_spare"
 if defined dashboard_show_banner for /l %%N in (1,1,%banner_line_count%) do echo(!dashboard_erase!!banner_line_%%N!
 if defined dashboard_show_banner echo(!dashboard_erase!
 if defined dashboard_show_environment type "!temp_dashboard_environment!"
@@ -9793,10 +9821,10 @@ rem round 14) (from DASHBOARD_LISTS_SIDE_BY_SIDE_MIN_COLUMNS),
 rem dashboard_list_rows (less the last frame's closing lines,
 rem dashboard_closing_lines, which come under the block: 2.8.0),
 rem dashboard_show_header_sections, dashboard_show_environment, and
-rem dashboard_show_banner (2.9.4: the banner's art, :show_banner, at the
-rem top, in the rows still left once the environment is shown and the
-rem lists are at their maximum, so it never takes a row from anything
-rem else).
+rem dashboard_banner_possible with dashboard_rows_spare (2.9.4: the
+rem banner's art, :show_banner, may go at the top once the environment
+rem is shown; the rows left beyond the lists' maximum;
+rem :dashboard_draw_screen decides, with the lists' counts).
 set "dashboard_window_rows=%console_window_rows%"
 set "dashboard_window_columns=%console_window_columns%"
 if "%dashboard_window_rows%"=="unknown" set "dashboard_window_rows=25"
@@ -9805,7 +9833,8 @@ set /a "dashboard_line_room=dashboard_window_columns - 1, dashboard_cut_length=d
 set "dashboard_small_text="
 set "dashboard_show_header_sections="
 set "dashboard_show_environment="
-set "dashboard_show_banner="
+set "dashboard_banner_possible="
+set "dashboard_rows_spare=0"
 set "dashboard_lists_side_by_side="
 set "dashboard_list_rows=0"
 rem The notice fits 80 columns (round 14.10: at the width it names, the
@@ -9840,7 +9869,8 @@ if defined dashboard_show_header_sections if %dashboard_rows_free% geq %dashboar
 )
 set /a "dashboard_list_rows+=dashboard_rows_free, dashboard_rows_free=0"
 if %dashboard_list_rows% gtr %DASHBOARD_LIST_ROWS_MAX% set /a "dashboard_rows_free=dashboard_list_rows - DASHBOARD_LIST_ROWS_MAX, dashboard_list_rows=DASHBOARD_LIST_ROWS_MAX"
-if defined dashboard_show_environment if %dashboard_rows_free% geq %dashboard_banner_rows% set "dashboard_show_banner=1"
+set "dashboard_rows_spare=%dashboard_rows_free%"
+if defined dashboard_show_environment set "dashboard_banner_possible=1"
 exit /b 0
 
 :dashboard_build_static

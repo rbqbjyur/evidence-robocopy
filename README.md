@@ -161,7 +161,8 @@ the result block play at real speed.
   the prompts are answered it takes a second screen, laid out for the
   window at each redraw (make the window larger at any time, maximise it,
   or make it smaller again), and the header and the summary go to the log.
-  The progress block is always there: the RESULT (pending until the
+  The progress block is always there, under a title naming menard and
+  the version: the RESULT (pending until the
   verdict), each check of the result block with its status or a progress
   bar with an estimate of the time left (from the average rate since that
   stage began; the hashing bars count bytes, with a fixed share per file),
@@ -171,8 +172,9 @@ the result block play at real speed.
   to spare, the Source and Destination sections come above it with the
   History row (the set's earlier runs, oldest first, then `current`; a run
   that didn't pass in red), and then the environment in cells across the
-  screen, and at the top, once the lists have their full 20 rows, the
-  banner's art; a value a warning is about is coloured as its tag there (the
+  screen, and at the top the banner's art, in rows the lists aren't
+  filling (they keep the rows their lines need, at least 3, and the art
+  makes way once they need more); a value a warning is about is coloured as its tag there (the
   destination's FAT32 file system, a clock not synchronised, an older
   script: yellow; the elevation notice: cyan). At the end the display
   shows the final result, the seal's SHA-256 and the log's location and

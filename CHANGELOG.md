@@ -15,14 +15,17 @@ and the log's Script field still read `evidence-robocopy <version>`.
 ### Added
 - The banner at the start opens with the menard art and the version;
   none with `/nopause`.
-- The live display shows the art at its top when the window has rows to
-  spare once the lists have their full 20 rows; nothing else gives up a
-  row for it.
+- The live display shows the art at its top in rows the Failures and
+  Warnings lists aren't filling: they keep the rows their lines need, at
+  least 3, and the art makes way once they need more; nothing else gives
+  up a row for it.
 
 ### Changed
 - The banner's first line reads `Script: menard (evidence-robocopy)`
   (before, `Script: evidence-robocopy`), and the help's first line
   `menard <version> (evidence-robocopy): evidence copy and verification`.
+- The live display's title starts with the name and version: `menard 2.9.4
+  - Progress (...)` (before, `Progress (...)`).
 - The README is titled menard, with the banner's art under the title.
 
 ## 2.9.3 - 2026-11-14
