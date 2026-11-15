@@ -1,8 +1,22 @@
-# evidence-robocopy
+# menard
 
-A Windows batch wrapper around robocopy for copying digital evidence between
-drives as it moves around a lab (master to working copies, to servers, to
-archive), with SHA-256 hash verification and chain-of-custody records.
+```text
+                       ,
+                      //
+ ________   ________ //     __  __   _____   _   _      _      ____    ____
+|~~~ ~~~~| |~~~ ~~~~//     |  \/  | | ____| | \ | |    / \    |  _ \  |  _ \
+|~~ ~~~~~| |~~ ~~~~//      | |\/| | |  _|   |  \| |   / _ \   | |_) | | | | |
+|~~~~ ~~~|=|~~~~ ~//|      | |  | | | |___  | |\  |  / ___ \  |  _ <  | |_| |
+|~ ~~~~~~| |~ ~~ '  |      |_|  |_| |_____| |_| \_| /_/   \_\ |_| \_\ |____/
+|~~~ ~~~~| |        |
+|~~ ~~~~~| |        |      evidence copy and verification
+|________| |________|
+```
+
+menard is a Windows batch wrapper around robocopy, `evidence-robocopy.bat`,
+for copying digital evidence between drives as it moves around a lab
+(master to working copies, to servers, to archive), with SHA-256 hash
+verification and chain-of-custody records.
 Every copy is logged and verified by default, and a sealed record of it
 stays with the evidence, together with the script itself.
 
@@ -157,7 +171,8 @@ the result block play at real speed.
   to spare, the Source and Destination sections come above it with the
   History row (the set's earlier runs, oldest first, then `current`; a run
   that didn't pass in red), and then the environment in cells across the
-  screen; a value a warning is about is coloured as its tag there (the
+  screen, and at the top, once the lists have their full 20 rows, the
+  banner's art; a value a warning is about is coloured as its tag there (the
   destination's FAT32 file system, a clock not synchronised, an older
   script: yellow; the elevation notice: cyan). At the end the display
   shows the final result, the seal's SHA-256 and the log's location and
@@ -276,7 +291,7 @@ Options, in any order with the modes:
                           destination that holds the set: continue; /check
                           and /relocate: go ahead; copy or relocate: copy;
                           the /nonforensic questions: continue, compare)
-  /nopause                no "Press any key" at the end
+  /nopause                no "Press any key" at the end, no art at the start
   /redraw <seconds>       the live display's redraw interval, 1 to 60
                           (default 5); no effect with the plain output
   /no-update-check        no request to github.com for the latest release

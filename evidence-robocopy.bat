@@ -1,10 +1,20 @@
 :: SPDX-License-Identifier: 0BSD
+::                        ,
+::                       //
+::  ________   ________ //     __  __   _____   _   _      _      ____    ____
+:: |~~~ ~~~~| |~~~ ~~~~//     |  \/  | | ____| | \ | |    / \    |  _ \  |  _ \
+:: |~~ ~~~~~| |~~ ~~~~//      | |\/| | |  _|   |  \| |   / _ \   | |_) | | | | |
+:: |~~~~ ~~~|=|~~~~ ~//|      | |  | | | |___  | |\  |  / ___ \  |  _ <  | |_| |
+:: |~ ~~~~~~| |~ ~~ '  |      |_|  |_| |_____| |_| \_| /_/   \_\ |_| \_\ |____/
+:: |~~~ ~~~~| |        |
+:: |~~ ~~~~~| |        |      evidence copy and verification
+:: |________| |________|
 @echo off
 rem ===========================================================================
-rem evidence-robocopy - copy digital evidence between drives with robocopy,
-rem verify every file by SHA-256 against a reference record and by size and
-rem last-modified time, and keep a sealed record of every copy with the
-rem evidence.
+rem menard (evidence-robocopy.bat) - copy digital evidence between drives
+rem with robocopy, verify every file by SHA-256 against a reference record
+rem and by size and last-modified time, and keep a sealed record of every
+rem copy with the evidence.
 rem
 rem Usage:   evidence-robocopy.bat       forensic mode (default): log, SHA-256
 rem                                      verification and run records; asks
@@ -64,7 +74,13 @@ rem ============================== CONFIG =====================================
 
 rem Version: plain MAJOR.MINOR.PATCH only (the script check compares them).
 set "TOOL_NAME=evidence-robocopy"
-set "TOOL_VERSION=2.9.3"
+set "TOOL_VERSION=2.9.4"
+rem The project's name (owner, 2026-11-15) and its tagline, for a person
+rem to read: the banner (its art and its Script line) and the help's
+rem first line. TOOL_NAME names this script wherever a record or a temporary
+rem name does (the history's Script cell, the log's Script field).
+set "BRAND_NAME=menard"
+set "BRAND_TAGLINE=evidence copy and verification"
 
 rem Robocopy retries for each file that fails (count, seconds between tries).
 rem Fail fast on purpose: one short retry covers transient faults (network
@@ -1022,7 +1038,7 @@ rem ============================ FUNCTIONS ====================================
 rem --------------------------- Run steps -------------------------------------
 
 :show_help
-echo %TOOL_NAME% %TOOL_VERSION%
+echo %BRAND_NAME% %TOOL_VERSION% (%TOOL_NAME%): %BRAND_TAGLINE%
 echo.
 echo Forensic mode (default): copies an evidence directory, under its own name,
 echo   into a set directory in the destination, beside the custody files (this
@@ -1088,7 +1104,7 @@ echo                            copy or relocate (below): copy
 echo                            /nonforensic: 1 (continue), 1 (compare), and
 echo                              1 (continue) when the destination isn't empty
 echo   /nopause               no "Press any key" at the end; the exit code is the
-echo                          result
+echo                          result; no art at the start
 echo   /redraw ^<seconds^>      the live display's redraw interval, 1 to %DASHBOARD_REDRAW_MAX_SECONDS%
 echo                          (default %DASHBOARD_POLL_SECONDS%): the loops redraw at most this often
 echo                          and the copy's progress is read this often. Cost on
@@ -1121,7 +1137,8 @@ echo   window larger at any time. The progress block (the RESULT, each
 echo   check's status or bar, the file in hand, the last failures and
 echo   warnings) always; above it, with room, the Source and Destination
 echo   columns with the History row (the set's runs, then this one), then
-echo   the environment. Under %DASHBOARD_MIN_WINDOW_COLUMNS% x %DASHBOARD_MIN_WINDOW_ROWS% it shows one line asking for a
+echo   the environment; at the top, with rows still to spare, the %BRAND_NAME%
+echo   art. Under %DASHBOARD_MIN_WINDOW_COLUMNS% x %DASHBOARD_MIN_WINDOW_ROWS% it shows one line asking for a
 echo   larger window. The display stands in for the console output: the
 echo   header and the summary go to the log; at the end it shows the result,
 echo   the seal's SHA-256 and the log's location and waits at the pause, and
@@ -1504,7 +1521,13 @@ if "%original_code_page%"=="unknown" exit /b 0
 exit /b 0
 
 :show_banner
-echo Script: %TOOL_NAME%
+rem The banner's art (2.9.4; owner, 2026-11-15): the project's name as
+rem the art at the top of this file, with this version (banner_line_*,
+rem set by :init_dashboard). None with /nopause: a run started by another
+rem program, with nobody to read it. The live display shows it too, with
+rem rows to spare (:dashboard_layout).
+if not defined argument_nopause call :write_banner_art
+echo Script: %BRAND_NAME% (%TOOL_NAME%)
 echo Version: %TOOL_VERSION%
 echo Author: outis
 echo Licence: 0BSD
@@ -9156,6 +9179,21 @@ set "dashboard_title_text=Progress (the header and the summary are in the log)"
 set "dashboard_lists_rest_text=all in the log"
 if "%run_mode%"=="nonforensic" set "dashboard_title_text=Progress (console only; no log and no records: /nonforensic)"
 if "%run_mode%"=="nonforensic" set "dashboard_lists_rest_text=all in the summary that follows"
+rem The banner's art (:show_banner): the art at the top of this file,
+rem with this version; dashboard_banner_rows is its height in the
+rem display, with the empty line below it.
+set "banner_line_1=                       ,"
+set "banner_line_2=                      //"
+set "banner_line_3= ________   ________ //     __  __   _____   _   _      _      ____    ____"
+set "banner_line_4=|~~~ ~~~~| |~~~ ~~~~//     |  \/  | | ____| | \ | |    / \    |  _ \  |  _ \"
+set "banner_line_5=|~~ ~~~~~| |~~ ~~~~//      | |\/| | |  _|   |  \| |   / _ \   | |_) | | | | |"
+set "banner_line_6=|~~~~ ~~~|=|~~~~ ~//|      | |  | | | |___  | |\  |  / ___ \  |  _ <  | |_| |"
+set "banner_line_7=|~ ~~~~~~| |~ ~~ '  |      |_|  |_| |_____| |_| \_| /_/   \_\ |_| \_\ |____/"
+set "banner_line_8=|~~~ ~~~~| |        |"
+set "banner_line_9=|~~ ~~~~~| |        |      v%TOOL_VERSION% - %BRAND_TAGLINE%"
+set "banner_line_10=|________| |________|"
+set "banner_line_count=10"
+set /a "dashboard_banner_rows=banner_line_count + 1"
 rem The redraw interval (2.7.0): CONFIG's, or /redraw's for this run; the
 rem loops' redraws (:dashboard_tick) and the copy helper's reads of
 rem robocopy's log (:dashboard_helper_main) follow it; the header's
@@ -9181,6 +9219,16 @@ rem the console's alternate screen, so no size keeps it off: a window
 rem smaller than DASHBOARD_MIN_WINDOW_COLUMNS x _ROWS shows one line saying
 rem so until it is made larger (:dashboard_layout).
 set "dashboard_mode=live"
+exit /b 0
+
+:write_banner_art
+rem (:show_banner) The banner's art, banner_line_* (:init_dashboard),
+rem and an empty line. Here with the display's helpers, below the
+rem per-file loops, so their label searches don't pass it.
+setlocal EnableDelayedExpansion
+for /l %%N in (1,1,%banner_line_count%) do echo(!banner_line_%%N!
+echo(
+endlocal
 exit /b 0
 
 :dashboard_start
@@ -9501,8 +9549,9 @@ exit /b 0
 
 :dashboard_draw_screen
 rem (:dashboard_redraw) The screen's lines, written from the top left: the
-rem environment cells and the header's Source and Destination sections when
-rem the layout shows them (typed from their files), then the progress
+rem banner's art (:show_banner), the environment cells and the header's
+rem Source and Destination sections when the layout shows them (the art
+rem from banner_line_*, the others typed from their files), then the progress
 rem block: a rule, the title, the stage rows with their detail lines, a
 rem blank line, the Failures and Warnings lists (:dashboard_draw_lists), a
 rem rule; then the rest of the screen erased. Every line erased and
@@ -9532,6 +9581,8 @@ if defined dashboard_small_text (
     echo(!dashboard_small_text!
     goto dashboard_draw_screen_end
 )
+if defined dashboard_show_banner for /l %%N in (1,1,%banner_line_count%) do echo(!dashboard_erase!!banner_line_%%N!
+if defined dashboard_show_banner echo(!dashboard_erase!
 if defined dashboard_show_environment type "!temp_dashboard_environment!"
 if defined dashboard_show_header_sections type "!temp_dashboard_header_sections!"
 echo(!dashboard_erase!!dashboard_rule!
@@ -9741,7 +9792,11 @@ rem shorter at an odd width, so a row is never the window's full width:
 rem round 14) (from DASHBOARD_LISTS_SIDE_BY_SIDE_MIN_COLUMNS),
 rem dashboard_list_rows (less the last frame's closing lines,
 rem dashboard_closing_lines, which come under the block: 2.8.0),
-rem dashboard_show_header_sections, dashboard_show_environment.
+rem dashboard_show_header_sections, dashboard_show_environment, and
+rem dashboard_show_banner (2.9.4: the banner's art, :show_banner, at the
+rem top, in the rows still left once the environment is shown and the
+rem lists are at their maximum, so it never takes a row from anything
+rem else).
 set "dashboard_window_rows=%console_window_rows%"
 set "dashboard_window_columns=%console_window_columns%"
 if "%dashboard_window_rows%"=="unknown" set "dashboard_window_rows=25"
@@ -9750,6 +9805,7 @@ set /a "dashboard_line_room=dashboard_window_columns - 1, dashboard_cut_length=d
 set "dashboard_small_text="
 set "dashboard_show_header_sections="
 set "dashboard_show_environment="
+set "dashboard_show_banner="
 set "dashboard_lists_side_by_side="
 set "dashboard_list_rows=0"
 rem The notice fits 80 columns (round 14.10: at the width it names, the
@@ -9782,8 +9838,9 @@ if defined dashboard_show_header_sections if %dashboard_rows_free% geq %dashboar
     set "dashboard_show_environment=1"
     set /a "dashboard_rows_free-=dashboard_environment_lines"
 )
-set /a "dashboard_list_rows+=dashboard_rows_free"
-if %dashboard_list_rows% gtr %DASHBOARD_LIST_ROWS_MAX% set "dashboard_list_rows=%DASHBOARD_LIST_ROWS_MAX%"
+set /a "dashboard_list_rows+=dashboard_rows_free, dashboard_rows_free=0"
+if %dashboard_list_rows% gtr %DASHBOARD_LIST_ROWS_MAX% set /a "dashboard_rows_free=dashboard_list_rows - DASHBOARD_LIST_ROWS_MAX, dashboard_list_rows=DASHBOARD_LIST_ROWS_MAX"
+if defined dashboard_show_environment if %dashboard_rows_free% geq %dashboard_banner_rows% set "dashboard_show_banner=1"
 exit /b 0
 
 :dashboard_build_static
